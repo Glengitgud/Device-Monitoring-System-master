@@ -13,6 +13,7 @@ let devicePage = 1;
 let userVisibleCount = ITEMS_PER_PAGE;
 let usersLoaded = false;
 let deviceDetailsRequestId = 0;
+let deviceQrCountdownInterval = null;
 let deviceSearch = '';
 let deviceStatusFilter = 'all';
 let archivedDeviceSearch = '';
@@ -302,6 +303,10 @@ function initDevicesPage() {
         'click',
         generateDeviceRegistrationQr
     );
+    document.getElementById('copyDeviceQrLinkBtn')?.addEventListener(
+        'click',
+        copyDeviceRegistrationLink
+    );
 }
 
 async function openDeviceModal(mode, deviceId) {
@@ -518,28 +523,81 @@ function renderDeviceDetails(device) {
 
 async function generateDeviceRegistrationQr() {
     const button = document.getElementById('createDeviceQrBtn');
+    const qrCard = document.getElementById('deviceQrCard');
     const image = document.getElementById('deviceRegistrationQrImage');
     const link = document.getElementById('deviceRegistrationQrLink');
+    const copyButton = document.getElementById('copyDeviceQrLinkBtn');
     const status = document.getElementById('deviceQrStatus');
-    const expiry = document.getElementById('deviceQrExpiry');
+    const expiryCard = document.getElementById('deviceQrExpiryCard');
     button.disabled = true;
-    image.classList.add('d-none');
+    clearInterval(deviceQrCountdownInterval);
+    qrCard.classList.add('d-none');
     link.classList.add('d-none');
-    expiry.textContent = '';
+    copyButton.classList.add('d-none');
+    expiryCard.classList.add('d-none');
+    button.textContent = 'Generate QR Code';
     status.textContent = 'Creating a secure one-use registration code...';
     try {
         const result = await api('/api/device-registration-tokens', { method: 'POST' });
         image.src = result.qr_code;
-        image.classList.remove('d-none');
+        qrCard.classList.remove('d-none');
         link.href = result.enrollment_url;
         link.classList.remove('d-none');
-        expiry.textContent = `Expires ${new Date(result.expires_at).toLocaleString()}.`;
+        copyButton.classList.remove('d-none');
+        expiryCard.classList.remove('d-none');
         status.textContent = 'Your QR code is ready.';
+        button.textContent = 'Regenerate QR Code';
+        startDeviceQrCountdown(result.expires_at);
     } catch (error) {
         status.textContent = error.message;
         showToast(error.message, 'danger');
     } finally {
         button.disabled = false;
+    }
+}
+
+function startDeviceQrCountdown(expiresAt) {
+    const expiration = new Date(expiresAt).getTime();
+    const remaining = document.getElementById('deviceQrRemainingTime');
+    const expiryStatus = document.getElementById('deviceQrExpiryStatus');
+    const tokenStatus = document.getElementById('deviceQrTokenStatus');
+    const createButton = document.getElementById('createDeviceQrBtn');
+    const link = document.getElementById('deviceRegistrationQrLink');
+    const copyButton = document.getElementById('copyDeviceQrLinkBtn');
+
+    const updateCountdown = () => {
+        const seconds = Math.max(0, Math.ceil((expiration - Date.now()) / 1000));
+        const minutes = Math.floor(seconds / 60);
+        const displaySeconds = String(seconds % 60).padStart(2, '0');
+        remaining.textContent = `${minutes}:${displaySeconds}`;
+
+        if (seconds === 0) {
+            clearInterval(deviceQrCountdownInterval);
+            expiryStatus.textContent = 'Expired';
+            tokenStatus.textContent = 'Expired';
+            link.classList.add('d-none');
+            copyButton.classList.add('d-none');
+            createButton.textContent = 'Regenerate QR Code';
+            document.getElementById('deviceQrStatus').textContent =
+                'This QR code has expired. Generate a new one to continue.';
+            return;
+        }
+
+        expiryStatus.textContent = new Date(expiration).toLocaleTimeString();
+        tokenStatus.textContent = 'Unused';
+    };
+
+    updateCountdown();
+    deviceQrCountdownInterval = setInterval(updateCountdown, 1000);
+}
+
+async function copyDeviceRegistrationLink() {
+    const link = document.getElementById('deviceRegistrationQrLink');
+    try {
+        await navigator.clipboard.writeText(link.href);
+        showToast('Registration link copied.');
+    } catch (error) {
+        showToast('Unable to copy the registration link in this browser.', 'danger');
     }
 }
 
