@@ -706,7 +706,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(denied_create.status_code, 403)
 
-    def test_admin_can_register_and_manage_other_users_devices_and_search_device_logs(self):
+    def test_admin_can_manage_devices_but_cannot_register_new_devices(self):
         with self.app.app_context():
             administrator = User(
                 username="deviceadmin",
@@ -772,7 +772,17 @@ class DatabaseIntegrationTest(unittest.TestCase):
                     "status": "online",
                 },
             )
-        self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+        self.assertEqual(created.status_code, 403, created.get_data(as_text=True))
+        devices_page = self.client.get("/devices")
+        self.assertNotIn(b"Generate QR Code", devices_page.data)
+        self.assertNotIn(b' id="addDeviceBtn"', devices_page.data)
+        self.assertNotIn(b"Register a Device with QR Code", devices_page.data)
+        self.assertNotIn(b"deviceRegistrationQrModal", devices_page.data)
+        qr_request = self.client.post(
+            "/api/device-registration-tokens",
+            headers={"X-CSRF-Token": token},
+        )
+        self.assertEqual(qr_request.status_code, 403)
         self.assertEqual(self.client.get("/api/devices").status_code, 200)
 
         details = self.client.get(f"/api/devices/{device_id}")
@@ -1142,6 +1152,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
         devices_page = self.client.get("/devices")
         self.assertIn(b"qr-code-card", devices_page.data)
         self.assertIn(b"deviceQrExpiryCard", devices_page.data)
+        self.assertIn(b' id="generateDeviceQrBtn"', devices_page.data)
+        self.assertIn(b' id="addDeviceBtn"', devices_page.data)
         first_token = first.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         second_token = second.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         self.assertNotEqual(first_token, second_token)

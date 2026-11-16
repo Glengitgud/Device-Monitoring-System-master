@@ -292,21 +292,22 @@ function initDevicesPage() {
         devicePage = 1;
         renderDevicesCards();
     });
-    const qrModal = bootstrap.Modal.getOrCreateInstance(
-        document.getElementById('deviceRegistrationQrModal')
-    );
-    document.getElementById('generateDeviceQrBtn')?.addEventListener('click', () => {
-        qrModal.show();
-        generateDeviceRegistrationQr();
-    });
-    document.getElementById('createDeviceQrBtn')?.addEventListener(
-        'click',
-        generateDeviceRegistrationQr
-    );
-    document.getElementById('copyDeviceQrLinkBtn')?.addEventListener(
-        'click',
-        copyDeviceRegistrationLink
-    );
+    const qrModalElement = document.getElementById('deviceRegistrationQrModal');
+    if (qrModalElement) {
+        const qrModal = bootstrap.Modal.getOrCreateInstance(qrModalElement);
+        document.getElementById('generateDeviceQrBtn')?.addEventListener('click', () => {
+            qrModal.show();
+            generateDeviceRegistrationQr();
+        });
+        document.getElementById('createDeviceQrBtn')?.addEventListener(
+            'click',
+            generateDeviceRegistrationQr
+        );
+        document.getElementById('copyDeviceQrLinkBtn')?.addEventListener(
+            'click',
+            copyDeviceRegistrationLink
+        );
+    }
 }
 
 async function openDeviceModal(mode, deviceId) {

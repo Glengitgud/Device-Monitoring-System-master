@@ -481,6 +481,10 @@ def create_app(test_config=None):
     @app.post("/api/device-registration-tokens")
     @login_required
     def create_device_registration_token():
+        if current_user.is_admin:
+            return api_error(
+                "Device registration is only available to standard users.", 403
+            )
         base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
         parsed_base = urlsplit(base_url)
         if (
@@ -631,6 +635,10 @@ def create_app(test_config=None):
     @app.post("/api/devices")
     @login_required
     def add_device():
+        if current_user.is_admin:
+            return api_error(
+                "Device registration is only available to standard users.", 403
+            )
         try:
             device = create_device(current_user, api_data())
         except ValidationError as error:
