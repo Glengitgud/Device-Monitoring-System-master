@@ -3,6 +3,7 @@
 ## ERD and relationships
 
 - `users` own zero or more `devices`; each device created by the application has exactly one owner.
+- `users` may issue one-use `device_registration_tokens`; a successfully consumed token is linked to exactly one registered device through its owner and event history.
 - `devices` have one `device_specifications` row and many `network_records` and `diagnostic_runs`.
 - `devices` have many `logs`; deleting a device cascades to its device event history.
 - Each `diagnostic_run` can have multiple detailed `diagnostic_checks`.
@@ -19,7 +20,8 @@
 | `user_roles`, `role_permissions` | RBAC many-to-many associations |
 | `devices` | Device identity, owner/registrant, connectivity status, active/archive/delete lifecycle, and lifecycle timestamps |
 | `logs` | Device-linked event text and timestamp for registration, edits, archives, and diagnostic history |
-| `device_specifications` | CPU, core/thread count, RAM/storage capacity, optional GPU/motherboard, OS version |
+| `device_registration_tokens` | Hashed one-use QR token, issuing account, expiration, use, and revocation timestamps |
+| `device_specifications` | CPU/cores, RAM capacity/usage, storage devices/capacity/availability, GPU, motherboard brand, OS, adapter names, IP addresses |
 | `network_records` | Timestamped IP, subnet mask, gateway, DNS server, connectivity status |
 | `network_interfaces`, `network_observations` | Optional lower-level interface/observation inventory retained from the initial design |
 | `diagnostic_runs` | Per-scan result, problem, recommendation, initiator, and timestamp |
@@ -27,7 +29,7 @@
 | `device_metrics` | Historical CPU, memory, storage, and network metrics (not currently collected) |
 | `activity_logs` | Auditable account and system actions for administrator oversight |
 
-`schema.sql` creates the full MySQL/MariaDB schema from scratch. Existing databases created from the earlier project design must first be backed up and upgraded with `migrations/001_database_integration.sql`. The original XAMPP prototype schema has a separate upgrade, `migrations/003_upgrade_xampp_prototype.sql`; back up first and use it only when the legacy `users`, `devices`, and `logs` tables are empty. Apply `migrations/004_device_lifecycle.sql` to an existing current schema before starting the updated application. Then run `flask --app device_monitoring_prototype.app init-db` to create missing tables and seed roles and permissions. `db.create_all()` does not alter existing tables.
+`schema.sql` creates the full MySQL/MariaDB schema from scratch. Existing databases created from the earlier project design must first be backed up and upgraded with `migrations/001_database_integration.sql`. The original XAMPP prototype schema has a separate upgrade, `migrations/003_upgrade_xampp_prototype.sql`; back up first and use it only when the legacy `users`, `devices`, and `logs` tables are empty. Apply `migrations/004_device_lifecycle.sql` and `migrations/005_qr_device_enrollment.sql` to an existing current schema before starting the updated application. Then run `flask --app device_monitoring_prototype.app init-db` to create missing tables and seed roles and permissions. `db.create_all()` does not alter existing tables.
 
 ## Authentication and authorization
 
@@ -51,6 +53,11 @@ Database credentials are read from `.env`/environment variables or `DATABASE_URL
 |---|---|---|
 | `POST /register` | Public | Create a standard account |
 | `POST /login`, `POST /logout` | Public / signed-in | Verify password hash; start/end a Flask-Login session |
+| `POST /api/device-registration-tokens` | Signed-in | Create a hashed, expiring, account-linked QR enrollment token |
+| `GET /enroll/<token>` | One-use token | Show enrollment/download page; reject invalid, used, or expired tokens |
+| `GET /enroll/<token>/agent.py` | One-use token | Download the Windows Python agent bound to the token |
+| `POST /api/device-agent/enroll` | Bearer enrollment token | Validate and atomically consume the token while saving confirmed inventory |
+| `GET /devices/<id>/specifications` | Owner/registrant or admin | View collected device specifications and registration history |
 | `GET/POST /api/devices` | Signed-in | List visible devices / register an owned device |
 | `PATCH /api/devices/<id>` | Owner/registrant or admin | Update an active device |
 | `POST /api/devices/<id>/archive` | Owner/registrant or admin | Archive without deleting the device row |
@@ -104,4 +111,4 @@ JOIN roles AS r ON r.id = ur.role_id;
 
 ## Collection scope
 
-The current best-effort collector saves hardware and network details from the computer running Flask when a device is registered. A browser form cannot inspect the registered remote endpoint’s CPU, motherboard, GPU, gateway, or DNS. Real endpoint inventory and diagnostics require an authenticated agent installed on each device. The diagnostic action currently persists a clearly labelled placeholder record; it does not run hardware tests. Live metric collection is not enabled.
+The QR-delivered Windows agent collects a one-time inventory only after local review and explicit confirmation. Its allowlist is CPU name/cores, RAM capacity/usage, storage devices/capacity/available space, GPU information, motherboard brand, OS name/version, network adapter names, and IP addresses. The server validates and stores the report with the token owner; tokens are hashed, expire in 30 minutes, and are consumed once. Configure `PUBLIC_BASE_URL` with the HTTPS origin for remote use. The agent requires Python 3, does not persist in the background, and does not collect live metrics or run diagnostics. The manual form retains its existing Flask-host collector; the diagnostic action remains a clearly labelled placeholder.

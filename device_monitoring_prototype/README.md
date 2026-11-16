@@ -15,7 +15,7 @@ DevMonitor is a Flask application for centralized end-user device inventory and 
    ```
    To install the core database packages directly instead:
    ```powershell
-   pip install Flask Flask-SQLAlchemy PyMySQL Flask-Login Werkzeug python-dotenv psutil cryptography
+   pip install Flask Flask-SQLAlchemy PyMySQL Flask-Login Werkzeug python-dotenv psutil cryptography qrcode
    ```
 5. Create the tables and default RBAC roles/administrator, then start the app:
    ```powershell
@@ -24,7 +24,7 @@ DevMonitor is a Flask application for centralized end-user device inventory and 
    ```
 6. Open **http://127.0.0.1:5000**. Public registration creates standard-user accounts only.
 
-`init-db` calls `db.create_all()` for every SQLAlchemy model and is safe to rerun to create missing tables, but it does not alter existing tables. The app also accepts a `DATABASE_URL`. Back up existing databases and apply the applicable migration before initializing: use `migrations\001_database_integration.sql` for the older DevMonitor schema, or `migrations\003_upgrade_xampp_prototype.sql` for the original empty XAMPP prototype tables. Apply `migrations\004_device_lifecycle.sql` to an existing current-schema database to add archive/restore and soft-delete columns. The current schema has a separate `activity_logs` table for broader account/system auditing.
+`init-db` calls `db.create_all()` for every SQLAlchemy model and is safe to rerun to create missing tables, but it does not alter existing tables. The app also accepts a `DATABASE_URL`. Back up existing databases and apply the applicable migrations before initializing: use `migrations\001_database_integration.sql` for the older DevMonitor schema, or `migrations\003_upgrade_xampp_prototype.sql` for the original empty XAMPP prototype tables. Apply `migrations\004_device_lifecycle.sql` and `migrations\005_qr_device_enrollment.sql` to an existing current-schema database to add archive/restore, soft-delete, and QR-based device enrollment support. The current schema has a separate `activity_logs` table for broader account/system auditing.
 
 `init-db` ensures the reserved `admin` account exists, is active, and has the Administrator role. Its bootstrap password is `admin123`; initialization resets it to that password so the system account remains recoverable. This development credential must be changed before deployment. The reserved account is excluded from user management and cannot be created through public registration. Use `create-admin` only when adding another administrator.
 
@@ -55,11 +55,13 @@ with app.app_context():
 - Account creation requires a matching confirmation and an 8-16 character password with at least one capital letter and one special character. Passwords are stored as Werkzeug hashes and Flask-Login manages sessions.
 - RBAC roles are seeded by `init-db`; creating an administrator requires the CLI or another administrator.
 - Device list and CRUD are owner-scoped; administrators can view/manage all accounts and devices.
+- Signed-in users can create one-use QR codes for their account. Scanning starts a Python-based Windows device-agent download; the agent shows the exact requested hardware/software inventory and only submits it after the user confirms. Set `PUBLIC_BASE_URL` in `.env` to the reachable HTTPS origin when registering remote devices. The scanned computer needs Python 3 and network access to DevMonitor.
+- QR tokens are random, expire after 30 minutes, are stored as SHA-256 hashes, and can register only one device. Treat QR codes and downloaded token-bound agents like temporary credentials. The agent does not run as a background service or collect continuous telemetry.
 - Device registration saves a hardware specification and network snapshot; diagnostic actions save history entries. Deactivation and device removal are soft operations so historical records remain.
 - Device changes and diagnostic requests create linked rows in `logs`; broader audit events are kept in `activity_logs`.
 - API write requests use a session CSRF token.
 
-**Collection limitation:** the current collector records information about the computer running Flask, not an arbitrary remote device entered in the form. Remote hardware, network, and real diagnostic collection requires an installed, authenticated endpoint agent; those monitoring checks are not implemented here.
+**Collection limitation:** manual device registration retains the existing best-effort Flask-host snapshot. QR enrollment performs a one-time, user-confirmed Windows inventory submission; it does not remotely execute code, run persistently, or perform real diagnostic checks. Real diagnostics and live monitoring remain future work.
 
 ## Database unavailable
 
@@ -70,9 +72,12 @@ If sign-in or registration reports that the database is unavailable, confirm MyS
 - `app.py` — Flask application, authentication, views, JSON CRUD endpoints, and CLI commands.
 - `models.py` — SQLAlchemy tables and relationships.
 - `services.py` — validated CRUD functions and history persistence.
+- `device_agent.py` — Windows inventory script template personalized with a one-use enrollment token at download time.
 - `system_info.py` — best-effort local host inventory.
 - `schema.sql` — complete MySQL/MariaDB schema for new installations.
 - `migrations\001_database_integration.sql` — one-time schema upgrade from the earlier design.
 - `migrations\002_device_event_logs.sql` — device event log table for manual upgrades.
 - `migrations\003_upgrade_xampp_prototype.sql` — upgrade the original empty XAMPP prototype tables.
+- `migrations\004_device_lifecycle.sql` — add archive and retained soft-delete support to existing databases.
+- `migrations\005_qr_device_enrollment.sql` — add QR tokens and extended specification storage to existing databases.
 - `DATABASE_DESIGN.md` — ERD summary, tables, relationships, and example SQL queries.

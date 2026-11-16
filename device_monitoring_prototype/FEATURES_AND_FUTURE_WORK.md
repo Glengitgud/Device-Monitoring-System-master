@@ -1,10 +1,9 @@
 # Device Monitoring Prototype — Feature Summary
 
-## Simulated Features vs. Future Development
+## Implemented Features vs. Future Development
 
-This document explains which features of the prototype are **simulated**
-(for visual demonstration only) and which would require **real
-development** in a full production system.
+This document separates working, database-backed prototype features from
+the enhancements that still require production development.
 
 ---
 
@@ -31,17 +30,19 @@ Design principles followed:
 
 ## Implemented Database Features
 
-The application now uses MySQL through Flask-SQLAlchemy. Public registration stores standard-user accounts with Werkzeug password hashes; account creation requires the password and confirmation to match and enforces 8-16 characters, at least one capital letter, and at least one special character. Flask-Login manages sessions. `init-db` ensures the reserved `admin` account is active, has the Administrator role, and uses the hashed bootstrap password `admin123`. The account is excluded from user management and protected from public registration. Administrator-only user management/log access and owner-scoped device operations are enforced by Flask views, not by JavaScript alone.
+The application uses MySQL through Flask-SQLAlchemy. Public registration stores standard-user accounts with Werkzeug password hashes; account creation requires the password and confirmation to match and enforces 8-16 characters, at least one capital letter, and at least one special character. Flask-Login manages sessions. `init-db` ensures the reserved `admin` account is active, has the Administrator role, and uses the hashed bootstrap password `admin123`. The account is excluded from user management and protected from public registration. Administrator-only user management/log access and owner-scoped device operations are enforced by Flask views, not by JavaScript alone. Signed-in users can issue short-lived, single-use QR enrollment tokens for their own accounts.
 
 | Feature | Current implementation |
 |---|---|
 | **User Registration and Login** | Account creation enforces the password length/complexity policy and confirmation match; user records and hashed passwords are persisted in MySQL, invalid credentials are rejected, and login attempts are recorded in activity logs. |
 | **Role-Based Access** | Roles and permissions are stored in RBAC tables; `/admin`, user-management, and administrator log endpoints require an administrator. |
-| **Device Registration** | Device and owner foreign key, specification row, and network record are persisted together. |
+| **Device Registration** | Manual registration remains available. Users can also generate a 30-minute QR link that automatically downloads a token-bound Windows Python agent. Its one-use token is stored as a SHA-256 hash and associates the confirmed device submission with the issuing account. |
+| **Windows Device Agent** | With the user's confirmation, the agent collects only CPU name/core count, RAM capacity/usage, storage devices/capacity/available space, GPU, motherboard brand, OS name/version, network adapter names, and IP addresses. It displays the inventory and asks before submission; it does not run persistently or collect telemetry. |
+| **Device Specifications** | The confirmed inventory is validated, stored with the device and owner, and available on the Detected Device Specifications page and from the existing View action. Registration/update dates, status, and device event history are shown. |
 | **Device Editing and Removal** | Active devices can be updated; archive/restore uses a lifecycle state, while administrator deletion is a retained soft delete. No application route physically removes devices. |
 | **Diagnostic History** | Each scan action creates a new, explicitly placeholder diagnostic record; no actual diagnostic test runs. |
 | **User Management** | Administrators can create accounts, update roles/status, and deactivate users without deleting their history. |
-| **Device Details and Logs** | Owners/registrants see only approved device fields and specifications; administrators see complete relationships and audit history. Administrators can search/filter activity and device event logs. These are application records, not operating-system or web-server logs. |
+| **Device Details and Logs** | Owners/registrants see their device specifications; administrators can view and manage all active/archived devices and see complete device and audit history. Device search and status filtering, archive/restore, and retained soft deletion are available. Administrators can also search/filter activity and device event logs. These are application records, not operating-system or web-server logs. |
 | **Dashboard** | Fleet counts and rows are queried from MySQL. |
 | **Search, Sort and Pagination** | Browser-side presentation of records returned from the database-backed endpoints. |
 | **Input and Session Security** | Server-side validation, CSRF token checks, HttpOnly/SameSite cookies, and configurable Secure cookies. |
@@ -60,8 +61,8 @@ technologies.
 - For multi-domain login, keep local username login separate from organization email login. Validate email syntax, normalize and check the domain against an administrator-managed allowed-domains table, verify credentials and account status (active, suspended, or disabled), record success/failure without logging credentials, then redirect by assigned role. Verify domain ownership before enabling it; an email suffix alone does not establish identity.
 
 ### 2. Endpoint Agent and Real Device Collection
-- Install an authenticated agent on each end-user device to collect that endpoint's hardware and network information. The current collector sees only the machine running Flask.
-- Collect real CPU, RAM, storage utilization, connectivity, and diagnostic results through the agent.
+- The current Windows agent performs a one-time, user-confirmed inventory submission. A signed installer, managed deployment, agent updates, and continuous collection are future work.
+- Add real diagnostics and ongoing CPU, RAM, storage, and connectivity telemetry only with a documented consent and retention policy.
 
 ### 3. Real-Time Updates
 - Use WebSockets or Server-Sent Events to push live status changes to the dashboard without refreshing the page.
@@ -102,4 +103,4 @@ palette of deep purples and blues (`#0d0221`, `#0f084b`, `#26408b`),
 providing an industry-standard look with clean typography, consistent
 spacing, and responsive layouts.
 
-Accounts, device inventory, host snapshots, and diagnostic placeholder history are persisted in MySQL. The application does not yet monitor remote endpoints or execute real diagnostic tests; that requires an authenticated endpoint agent and production security/deployment work as outlined above.
+Accounts, device inventory, QR enrollment records, confirmed Windows endpoint specifications, network snapshots, and diagnostic placeholder history are persisted in MySQL. The application does not continuously monitor endpoints or execute real diagnostic tests. Production use still requires HTTPS, deployment hardening, managed/signed agent delivery, telemetry and diagnostic work, recovery controls, and operational review.
