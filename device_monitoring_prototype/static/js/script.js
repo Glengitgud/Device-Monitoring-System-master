@@ -14,6 +14,7 @@ let userVisibleCount = ITEMS_PER_PAGE;
 let usersLoaded = false;
 let deviceDetailsRequestId = 0;
 let deviceQrCountdownInterval = null;
+let deviceQrStatusInterval = null;
 let deviceSearch = '';
 let deviceStatusFilter = 'all';
 let archivedDeviceSearch = '';
@@ -532,6 +533,7 @@ async function generateDeviceRegistrationQr() {
     const expiryCard = document.getElementById('deviceQrExpiryCard');
     button.disabled = true;
     clearInterval(deviceQrCountdownInterval);
+    clearInterval(deviceQrStatusInterval);
     qrCard.classList.add('d-none');
     link.classList.add('d-none');
     copyButton.classList.add('d-none');
@@ -548,7 +550,9 @@ async function generateDeviceRegistrationQr() {
         expiryCard.classList.remove('d-none');
         status.textContent = 'Your QR code is ready.';
         button.textContent = 'Regenerate QR Code';
-        startDeviceQrCountdown(result.expires_at);
+        const token = new URL(result.enrollment_url, window.location.origin)
+            .pathname.split('/').pop();
+        startDeviceQrCountdown(result.expires_at, token);
     } catch (error) {
         status.textContent = error.message;
         showToast(error.message, 'danger');
@@ -557,7 +561,7 @@ async function generateDeviceRegistrationQr() {
     }
 }
 
-function startDeviceQrCountdown(expiresAt) {
+function startDeviceQrCountdown(expiresAt, token) {
     const expiration = new Date(expiresAt).getTime();
     const remaining = document.getElementById('deviceQrRemainingTime');
     const expiryStatus = document.getElementById('deviceQrExpiryStatus');
@@ -574,6 +578,7 @@ function startDeviceQrCountdown(expiresAt) {
 
         if (seconds === 0) {
             clearInterval(deviceQrCountdownInterval);
+            clearInterval(deviceQrStatusInterval);
             expiryStatus.textContent = 'Expired';
             tokenStatus.textContent = 'Expired';
             link.classList.add('d-none');
@@ -590,6 +595,51 @@ function startDeviceQrCountdown(expiresAt) {
 
     updateCountdown();
     deviceQrCountdownInterval = setInterval(updateCountdown, 1000);
+    refreshDeviceQrTokenStatus(token);
+    deviceQrStatusInterval = setInterval(
+        () => refreshDeviceQrTokenStatus(token),
+        10000
+    );
+}
+
+async function refreshDeviceQrTokenStatus(token) {
+    const remaining = document.getElementById('deviceQrRemainingTime');
+    const expiryStatus = document.getElementById('deviceQrExpiryStatus');
+    const tokenStatus = document.getElementById('deviceQrTokenStatus');
+    const link = document.getElementById('deviceRegistrationQrLink');
+    const copyButton = document.getElementById('copyDeviceQrLinkBtn');
+    const createButton = document.getElementById('createDeviceQrBtn');
+
+    try {
+        const result = await api(
+            `/api/device-registration-tokens/${encodeURIComponent(token)}/status`
+        );
+        if (result.status === 'active') {
+            tokenStatus.textContent = 'Unused';
+            return;
+        }
+
+        clearInterval(deviceQrCountdownInterval);
+        clearInterval(deviceQrStatusInterval);
+        remaining.textContent = result.status === 'used' ? 'Complete' : '00:00';
+        expiryStatus.textContent = result.status === 'used'
+            ? 'Registration complete'
+            : result.status === 'revoked' ? 'Revoked' : 'Expired';
+        tokenStatus.textContent = result.status === 'used'
+            ? 'Used'
+            : result.status === 'revoked' ? 'Revoked' : 'Expired';
+        link.classList.add('d-none');
+        copyButton.classList.add('d-none');
+        createButton.textContent = 'Generate another QR Code';
+        document.getElementById('deviceQrStatus').textContent =
+            result.status === 'used'
+                ? 'This QR code has been used to register a device.'
+                : `This QR code is ${result.status}. Generate a new one to continue.`;
+    } catch (error) {
+        clearInterval(deviceQrStatusInterval);
+        tokenStatus.textContent = 'Unavailable';
+        showToast(`Unable to verify the QR code status: ${error.message}`, 'danger');
+    }
 }
 
 async function copyDeviceRegistrationLink() {

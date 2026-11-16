@@ -5,6 +5,7 @@ import re
 import secrets
 import uuid
 import base64
+import hashlib
 import io
 import json
 import xml.etree.ElementTree as ET
@@ -530,8 +531,46 @@ def create_app(test_config=None):
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/api/device-registration-tokens/<token>/status")
+    @login_required
+    def device_registration_token_status(token):
+        if current_user.is_admin:
+            return api_error(
+                "Device registration is only available to standard users.", 403
+            )
+        if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token):
+            return api_error("Registration token not found.", 404)
+
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        registration = DeviceRegistrationToken.query.filter_by(
+            token_hash=token_hash
+        ).one_or_none()
+        if registration is None or registration.user_id != current_user.id:
+            return api_error("Registration token not found.", 404)
+
+        expires_at = registration.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if registration.used_at:
+            status = "used"
+        elif registration.revoked_at:
+            status = "revoked"
+        elif expires_at <= datetime.now(timezone.utc):
+            status = "expired"
+        else:
+            status = "active"
+
+        response = jsonify(status=status, expires_at=expires_at.isoformat())
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/enroll/<token>")
     def device_enrollment(token):
+        if current_user.is_authenticated and current_user.is_admin:
+            return enrollment_page(
+                message="Device registration is only available to standard users.",
+                status=403,
+            )
         if find_valid_registration_token(token) is None:
             return enrollment_page(
                 message="This device registration QR code has expired or was already used.",
@@ -543,6 +582,11 @@ def create_app(test_config=None):
 
     @app.get("/enroll/<token>/agent.py")
     def download_device_agent(token):
+        if current_user.is_authenticated and current_user.is_admin:
+            return enrollment_page(
+                message="Device registration is only available to standard users.",
+                status=403,
+            )
         if find_valid_registration_token(token) is None:
             return enrollment_page(
                 message="This device registration QR code has expired or was already used.",
@@ -580,6 +624,10 @@ def create_app(test_config=None):
 
     @app.post("/api/device-agent/enroll")
     def submit_agent_enrollment():
+        if current_user.is_authenticated and current_user.is_admin:
+            return api_error(
+                "Device registration is only available to standard users.", 403
+            )
         authorization = request.headers.get("Authorization", "")
         scheme, separator, token = authorization.partition(" ")
         if not separator or scheme.casefold() != "bearer":

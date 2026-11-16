@@ -783,6 +783,25 @@ class DatabaseIntegrationTest(unittest.TestCase):
             headers={"X-CSRF-Token": token},
         )
         self.assertEqual(qr_request.status_code, 403)
+        admin_token = "A" * 43
+        self.assertEqual(
+            self.client.get(
+                f"/api/device-registration-tokens/{admin_token}/status"
+            ).status_code,
+            403,
+        )
+        self.assertEqual(self.client.get(f"/enroll/{admin_token}").status_code, 403)
+        self.assertEqual(
+            self.client.get(f"/enroll/{admin_token}/agent.py").status_code, 403
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/device-agent/enroll",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={},
+            ).status_code,
+            403,
+        )
         self.assertEqual(self.client.get("/api/devices").status_code, 200)
 
         details = self.client.get(f"/api/devices/{device_id}")
@@ -1034,6 +1053,11 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
         device_id = response.json["device_id"]
+        consumed_status = self.client.get(
+            f"/api/device-registration-tokens/{token}/status"
+        )
+        self.assertEqual(consumed_status.status_code, 200)
+        self.assertEqual(consumed_status.json["status"], "used")
         details = self.client.get(f"/api/devices/{device_id}")
         self.assertEqual(details.status_code, 200)
         self.assertEqual(details.json["specification"]["cpu_model"], "Example CPU")
@@ -1157,6 +1181,38 @@ class DatabaseIntegrationTest(unittest.TestCase):
         first_token = first.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         second_token = second.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         self.assertNotEqual(first_token, second_token)
+        active_status = self.client.get(
+            f"/api/device-registration-tokens/{second_token}/status"
+        )
+        self.assertEqual(active_status.status_code, 200)
+        self.assertEqual(active_status.json["status"], "active")
+        other_client = self.app.test_client()
+        other_client.get("/register")
+        with other_client.session_transaction() as session:
+            other_csrf = session["_csrf_token"]
+        other_client.post(
+            "/register",
+            data={
+                "csrf_token": other_csrf,
+                "full_name": "Another User",
+                "email": "another@example.com",
+                "username": "anotheruser",
+                "password": "AnotherUser1!",
+                "confirm_password": "AnotherUser1!",
+            },
+        )
+        other_client.post(
+            "/login",
+            data={
+                "csrf_token": other_csrf,
+                "username": "anotheruser",
+                "password": "AnotherUser1!",
+            },
+        )
+        unauthorized_status = other_client.get(
+            f"/api/device-registration-tokens/{second_token}/status"
+        )
+        self.assertEqual(unauthorized_status.status_code, 404)
         with self.app.app_context():
             registration = DeviceRegistrationToken.query.filter_by(
                 token_hash=hashlib.sha256(first_token.encode()).hexdigest()
@@ -1165,6 +1221,11 @@ class DatabaseIntegrationTest(unittest.TestCase):
             db.session.commit()
         expired_page = self.client.get(f"/enroll/{first_token}")
         self.assertEqual(expired_page.status_code, 410)
+        expired_status = self.client.get(
+            f"/api/device-registration-tokens/{first_token}/status"
+        )
+        self.assertEqual(expired_status.status_code, 200)
+        self.assertEqual(expired_status.json["status"], "expired")
 
     def test_windows_agent_parses_only_the_requested_inventory_fields(self):
         expected = {
