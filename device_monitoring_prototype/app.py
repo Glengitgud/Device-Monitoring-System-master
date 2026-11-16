@@ -534,6 +534,7 @@ def create_app(test_config=None):
             enrollment_url=enrollment_url,
             qr_code=f"data:image/svg+xml;base64,{encoded_qr}",
             expires_at=expires_at.isoformat(),
+            server_time=datetime.now(timezone.utc).isoformat(),
         )
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -567,7 +568,11 @@ def create_app(test_config=None):
         else:
             status = "active"
 
-        response = jsonify(status=status, expires_at=expires_at.isoformat())
+        response = jsonify(
+            status=status,
+            expires_at=expires_at.isoformat(),
+            server_time=datetime.now(timezone.utc).isoformat(),
+        )
         response.headers["Cache-Control"] = "no-store"
         return response
 

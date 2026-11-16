@@ -1259,6 +1259,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
+        self.assertIn("server_time", first.json)
         svg_bytes = base64.b64decode(first.json["qr_code"].split(",", 1)[1])
         svg_root = ET.fromstring(svg_bytes)
         svg_namespace = "{http://www.w3.org/2000/svg}"
@@ -1279,6 +1280,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(active_status.status_code, 200)
         self.assertEqual(active_status.json["status"], "active")
+        self.assertIn("server_time", active_status.json)
         other_client = self.app.test_client()
         other_client.get("/register")
         with other_client.session_transaction() as session:

@@ -552,7 +552,7 @@ async function generateDeviceRegistrationQr() {
         button.textContent = 'Regenerate QR Code';
         const token = new URL(result.enrollment_url, window.location.origin)
             .pathname.split('/').pop();
-        startDeviceQrCountdown(result.expires_at, token);
+        startDeviceQrCountdown(result.expires_at, result.server_time, token);
     } catch (error) {
         status.textContent = error.message;
         showToast(error.message, 'danger');
@@ -561,8 +561,9 @@ async function generateDeviceRegistrationQr() {
     }
 }
 
-function startDeviceQrCountdown(expiresAt, token) {
-    const expiration = new Date(expiresAt).getTime();
+function startDeviceQrCountdown(expiresAt, serverTime, token) {
+    let expiration = new Date(expiresAt).getTime();
+    let serverClockOffset = Date.now() - new Date(serverTime).getTime();
     const remaining = document.getElementById('deviceQrRemainingTime');
     const expiryStatus = document.getElementById('deviceQrExpiryStatus');
     const tokenStatus = document.getElementById('deviceQrTokenStatus');
@@ -571,7 +572,8 @@ function startDeviceQrCountdown(expiresAt, token) {
     const copyButton = document.getElementById('copyDeviceQrLinkBtn');
 
     const updateCountdown = () => {
-        const seconds = Math.max(0, Math.ceil((expiration - Date.now()) / 1000));
+        const serverNow = Date.now() - serverClockOffset;
+        const seconds = Math.max(0, Math.ceil((expiration - serverNow) / 1000));
         const minutes = Math.floor(seconds / 60);
         const displaySeconds = String(seconds % 60).padStart(2, '0');
         remaining.textContent = `${minutes}:${displaySeconds}`;
@@ -593,29 +595,15 @@ function startDeviceQrCountdown(expiresAt, token) {
         tokenStatus.textContent = 'Unused';
     };
 
-    updateCountdown();
-    deviceQrCountdownInterval = setInterval(updateCountdown, 1000);
-    refreshDeviceQrTokenStatus(token);
-    deviceQrStatusInterval = setInterval(
-        () => refreshDeviceQrTokenStatus(token),
-        10000
-    );
-}
-
-async function refreshDeviceQrTokenStatus(token) {
-    const remaining = document.getElementById('deviceQrRemainingTime');
-    const expiryStatus = document.getElementById('deviceQrExpiryStatus');
-    const tokenStatus = document.getElementById('deviceQrTokenStatus');
-    const link = document.getElementById('deviceRegistrationQrLink');
-    const copyButton = document.getElementById('copyDeviceQrLinkBtn');
-    const createButton = document.getElementById('createDeviceQrBtn');
-
-    try {
+    const refreshStatus = async () => {
         const result = await api(
             `/api/device-registration-tokens/${encodeURIComponent(token)}/status`
         );
+        serverClockOffset = Date.now() - new Date(result.server_time).getTime();
+        expiration = new Date(result.expires_at).getTime();
         if (result.status === 'active') {
             tokenStatus.textContent = 'Unused';
+            updateCountdown();
             return;
         }
 
@@ -630,16 +618,28 @@ async function refreshDeviceQrTokenStatus(token) {
             : result.status === 'revoked' ? 'Revoked' : 'Expired';
         link.classList.add('d-none');
         copyButton.classList.add('d-none');
-        createButton.textContent = 'Generate another QR Code';
+        createButton.textContent = 'Generate New QR Code';
         document.getElementById('deviceQrStatus').textContent =
             result.status === 'used'
                 ? 'This QR code has been used to register a device.'
                 : `This QR code is ${result.status}. Generate a new one to continue.`;
-    } catch (error) {
+    };
+
+    updateCountdown();
+    tokenStatus.textContent = 'Unused';
+    deviceQrCountdownInterval = setInterval(updateCountdown, 1000);
+    refreshStatus().catch(error => {
         clearInterval(deviceQrStatusInterval);
         tokenStatus.textContent = 'Unavailable';
         showToast(`Unable to verify the QR code status: ${error.message}`, 'danger');
-    }
+    });
+    deviceQrStatusInterval = setInterval(() => {
+        refreshStatus().catch(error => {
+            clearInterval(deviceQrStatusInterval);
+            tokenStatus.textContent = 'Unavailable';
+            showToast(`Unable to verify the QR code status: ${error.message}`, 'danger');
+        });
+    }, 10000);
 }
 
 async function copyDeviceRegistrationLink() {
