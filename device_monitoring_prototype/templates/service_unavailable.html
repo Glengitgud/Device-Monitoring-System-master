@@ -3,20 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Database unavailable - DevMonitor</title>
+    <title>Database connection or setup required - DevMonitor</title>
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 </head>
 <body class="login-page">
     <main class="login-container">
         <section class="login-card">
             <div class="login-header">
-                <h3>Database unavailable</h3>
+                <h3>Database connection or setup required</h3>
                 <p>{{ message }}</p>
             </div>
             <div class="mb-4">
                 <h5>Reconnect DevMonitor</h5>
                 <ol>
                     <li>Start MySQL and confirm the <code>devmonitor</code> database and app user exist.</li>
+                    <li>
+                        Check connectivity and schema status:
+                        <pre class="mt-2"><code>python -m flask --app device_monitoring_prototype.app check-db</code></pre>
+                    </li>
                     <li>
                         From the repository root, copy
                         <code>device_monitoring_prototype\.env.example</code> to
@@ -25,10 +29,14 @@
                         <pre class="mt-2"><code>Copy-Item device_monitoring_prototype\.env.example device_monitoring_prototype\.env</code></pre>
                     </li>
                     <li>
-                        Initialize missing tables and default roles:
+                        For a new database, create tables and default roles:
                         <pre class="mt-2"><code>python -m flask --app device_monitoring_prototype.app init-db</code></pre>
                     </li>
-                    <li>Restart Flask and try again. Back up and migrate an existing legacy database before initialization.</li>
+                    <li>
+                        For an existing database, back it up and apply the required SQL
+                        migrations listed in the README first. <code>init-db</code> does
+                        not alter existing tables. Restart Flask and try again.
+                    </li>
                 </ol>
             </div>
             <p class="text-center mb-0">

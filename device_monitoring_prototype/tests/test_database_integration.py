@@ -10,10 +10,15 @@ from types import SimpleNamespace
 
 from sqlalchemy import inspect
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
 
-from device_monitoring_prototype.app import _database_uri, create_app
+from device_monitoring_prototype.app import (
+    _database_error_message,
+    _database_uri,
+    create_app,
+)
 from device_monitoring_prototype.app import app as default_app
 from device_monitoring_prototype import device_agent
 from device_monitoring_prototype.models import (
@@ -133,12 +138,64 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(url.username, "root")
         self.assertEqual(url.password, "")
 
+    def test_database_uri_escapes_credentials_and_uses_configured_target(self):
+        settings = {
+            "DATABASE_URL": "",
+            "MYSQL_USER": "monitor user",
+            "MYSQL_PASSWORD": "p@ss:/word",
+            "MYSQL_HOST": "127.0.0.1",
+            "MYSQL_PORT": "3307",
+            "MYSQL_DATABASE": "device_monitor",
+        }
+        with patch.dict(os.environ, settings, clear=True):
+            url = make_url(_database_uri())
+        self.assertEqual(url.username, "monitor user")
+        self.assertEqual(url.password, "p@ss:/word")
+        self.assertEqual(url.host, "127.0.0.1")
+        self.assertEqual(url.port, 3307)
+        self.assertEqual(url.database, "device_monitor")
+
+    def test_database_errors_distinguish_schema_and_connection_problems(self):
+        missing_table = OperationalError(
+            "SELECT * FROM device_registration_tokens",
+            {},
+            Exception(1146, "Table does not exist"),
+        )
+        connection_down = OperationalError(
+            "SELECT 1",
+            {},
+            Exception(2003, "Can't connect to MySQL server"),
+        )
+        bad_credentials = OperationalError(
+            "SELECT 1",
+            {},
+            Exception(1045, "Access denied"),
+        )
+
+        self.assertIn("schema is incomplete", _database_error_message(missing_table))
+        self.assertIn("running", _database_error_message(connection_down))
+        self.assertIn("MYSQL_USER", _database_error_message(bad_credentials))
+
     def test_init_db_command_includes_device_logs(self):
         result = self.app.test_cli_runner().invoke(args=["init-db"])
         self.assertEqual(result.exit_code, 0, result.output)
         with self.app.app_context():
             self.assertIn("logs", inspect(db.engine).get_table_names())
             self.assertEqual(Role.query.count(), 2)
+
+    def test_check_db_command_validates_declared_schema_and_row_counts(self):
+        result = self.app.test_cli_runner().invoke(args=["check-db"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("16 tables", result.output)
+        self.assertIn(
+            "primary/unique keys, foreign keys, and check constraints",
+            result.output,
+        )
+        self.assertIn("users=0", result.output)
+        self.assertIn("devices=0", result.output)
+        self.assertIn("archived devices=0", result.output)
+        self.assertIn("device specifications=0", result.output)
+        self.assertIn("device registration tokens=0", result.output)
 
     def test_init_db_creates_default_admin_once_and_admin_can_log_in(self):
         runner = self.app.test_cli_runner()
@@ -247,7 +304,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 },
             )
             self.assertEqual(login_response.status_code, 503)
-            self.assertIn(b"database is unavailable", login_response.data.lower())
+            self.assertIn(b"schema is incomplete", login_response.data.lower())
+            self.assertIn(b"does not update existing tables", login_response.data)
             self.assertIn(b"Copy-Item", login_response.data)
             self.assertIn(b"device_monitoring_prototype.app init-db", login_response.data)
 

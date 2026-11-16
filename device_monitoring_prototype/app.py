@@ -9,7 +9,7 @@ import io
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote_plus, urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 #
 import click
 from flask import (
@@ -34,13 +34,23 @@ from flask_login import (
 from dotenv import load_dotenv
 import qrcode
 from qrcode.image.svg import SvgPathImage
-from sqlalchemy import String, cast, func, or_
+from sqlalchemy import (
+    CheckConstraint,
+    String,
+    UniqueConstraint,
+    cast,
+    func,
+    inspect as sqlalchemy_inspect,
+    or_,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from device_monitoring_prototype.models import (
     ActivityLog,
     Device,
+    DeviceRegistrationToken,
+    DeviceSpecification,
     Log,
     NetworkRecord,
     Permission,
@@ -80,12 +90,48 @@ def _database_uri():
     if os.environ.get("DATABASE_URL"):
         return os.environ["DATABASE_URL"]
     # XAMPP's local MySQL defaults are root, localhost, and port 3306.
-    user = quote_plus(os.environ.get("MYSQL_USER", "root"))
-    password = quote_plus(os.environ.get("MYSQL_PASSWORD", ""))
+    user = quote(os.environ.get("MYSQL_USER", "root"), safe="")
+    password = quote(os.environ.get("MYSQL_PASSWORD", ""), safe="")
     host = os.environ.get("MYSQL_HOST", "localhost")
     port = os.environ.get("MYSQL_PORT", "3306")
-    database = quote_plus(os.environ.get("MYSQL_DATABASE", "devmonitor"))
+    database = quote(os.environ.get("MYSQL_DATABASE", "devmonitor"), safe="")
     return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
+
+
+def _database_error_message(error):
+    original = getattr(error, "orig", None)
+    arguments = getattr(original, "args", ())
+    code = arguments[0] if arguments and isinstance(arguments[0], int) else None
+    description = str(original or "").lower()
+
+    if code in {1051, 1054, 1146} or any(
+        marker in description
+        for marker in (
+            "no such table",
+            "no such column",
+            "doesn't exist",
+            "unknown column",
+        )
+    ):
+        return (
+            "The database schema is incomplete. Back up the database and apply the "
+            "required migrations from the project README; `init-db` creates missing "
+            "tables but does not update existing tables."
+        )
+    if code == 1045:
+        return (
+            "MySQL rejected the configured credentials. Check MYSQL_USER and "
+            "MYSQL_PASSWORD in device_monitoring_prototype\\.env."
+        )
+    if code == 1049:
+        return (
+            "The configured MySQL database does not exist. Check MYSQL_DATABASE in "
+            "device_monitoring_prototype\\.env and create the database before setup."
+        )
+    return (
+        "The database is unavailable. Check that MySQL is running and verify the "
+        "connection settings in device_monitoring_prototype\\.env."
+    )
 
 
 def create_app(test_config=None):
@@ -121,11 +167,15 @@ def create_app(test_config=None):
     @app.errorhandler(SQLAlchemyError)
     def handle_database_error(error):
         db.session.rollback()
-        app.logger.error("Database request failed (%s).", type(error).__name__)
-        message = (
-            "The database is unavailable. Check the MySQL settings in "
-            "device_monitoring_prototype\\.env and run the database setup commands."
+        original = getattr(error, "orig", None)
+        arguments = getattr(original, "args", ())
+        code = arguments[0] if arguments and isinstance(arguments[0], int) else None
+        app.logger.error(
+            "Database request failed (%s, code=%s).",
+            type(error).__name__,
+            code,
         )
+        message = _database_error_message(error)
         if request.path.startswith("/api/"):
             return jsonify(error=message), 503
         return render_template("service_unavailable.html", message=message), 503
@@ -1103,6 +1153,129 @@ def create_app(test_config=None):
         db.session.commit()
         click.echo(
             f"Created sample user {username!r} and a linked device with a log entry."
+        )
+
+    @app.cli.command("check-db")
+    def check_database_command():
+        """Check database tables, columns, indexes, foreign keys, and row counts."""
+        try:
+            inspector = sqlalchemy_inspect(db.engine)
+            actual_tables = set(inspector.get_table_names())
+            issues = []
+            for table in db.metadata.sorted_tables:
+                if table.name not in actual_tables:
+                    issues.append(f"missing table {table.name}")
+                    continue
+
+                actual_columns = {
+                    column["name"] for column in inspector.get_columns(table.name)
+                }
+                issues.extend(
+                    f"missing column {table.name}.{column.name}"
+                    for column in table.columns
+                    if column.name not in actual_columns
+                )
+
+                actual_indexes = {
+                    index.get("name")
+                    for index in inspector.get_indexes(table.name)
+                } | {
+                    constraint.get("name")
+                    for constraint in inspector.get_unique_constraints(table.name)
+                }
+                issues.extend(
+                    f"missing index {table.name}.{index.name}"
+                    for index in table.indexes
+                    if index.name not in actual_indexes
+                )
+
+                actual_unique_constraints = {
+                    tuple(constraint.get("column_names") or ())
+                    for constraint in inspector.get_unique_constraints(table.name)
+                }
+                expected_unique_constraints = {
+                    tuple(column.name for column in constraint.columns)
+                    for constraint in table.constraints
+                    if isinstance(constraint, UniqueConstraint)
+                }
+                issues.extend(
+                    f"missing unique constraint on {table.name}"
+                    for constraint in expected_unique_constraints
+                    if constraint not in actual_unique_constraints
+                )
+
+                actual_primary_key = tuple(
+                    inspector.get_pk_constraint(table.name).get(
+                        "constrained_columns"
+                    )
+                    or ()
+                )
+                expected_primary_key = tuple(
+                    column.name for column in table.primary_key.columns
+                )
+                if actual_primary_key != expected_primary_key:
+                    issues.append(f"primary key mismatch on {table.name}")
+
+                actual_foreign_keys = {
+                    (
+                        tuple(foreign_key["constrained_columns"]),
+                        foreign_key["referred_table"],
+                        tuple(foreign_key["referred_columns"]),
+                    )
+                    for foreign_key in inspector.get_foreign_keys(table.name)
+                }
+                for constraint in table.foreign_key_constraints:
+                    elements = list(constraint.elements)
+                    expected = (
+                        tuple(element.parent.name for element in elements),
+                        elements[0].column.table.name,
+                        tuple(element.column.name for element in elements),
+                    )
+                    if expected not in actual_foreign_keys:
+                        issues.append(f"missing foreign key on {table.name}")
+
+                actual_checks = {
+                    check.get("name")
+                    for check in inspector.get_check_constraints(table.name)
+                }
+                issues.extend(
+                    f"missing check constraint {table.name}.{constraint.name}"
+                    for constraint in table.constraints
+                    if isinstance(constraint, CheckConstraint)
+                    and constraint.name
+                    and constraint.name not in actual_checks
+                )
+        except SQLAlchemyError as error:
+            db.session.rollback()
+            raise click.ClickException(_database_error_message(error)) from error
+
+        if issues:
+            raise click.ClickException(
+                "Database schema mismatch:\n- " + "\n- ".join(issues)
+            )
+
+        try:
+            counts = {
+                "users": User.query.count(),
+                "devices": Device.query.count(),
+                "archived devices": Device.query.filter_by(
+                    lifecycle_status="archived"
+                ).count(),
+                "device specifications": DeviceSpecification.query.count(),
+                "device registration tokens": DeviceRegistrationToken.query.count(),
+            }
+        except SQLAlchemyError as error:
+            db.session.rollback()
+            raise click.ClickException(_database_error_message(error)) from error
+
+        click.echo(
+            f"Database schema is valid ({len(actual_tables)} tables, "
+            f"{sum(len(table.indexes) for table in db.metadata.sorted_tables)} "
+            "model indexes, primary/unique keys, foreign keys, and check constraints)."
+        )
+        click.echo(
+            "Row counts: "
+            + ", ".join(f"{name}={count}" for name, count in counts.items())
         )
 
     @app.cli.command("create-admin")
