@@ -330,9 +330,16 @@ def create_app(test_config=None):
         if current_user.is_authenticated and request.method == "GET":
             return redirect(url_for("dashboard"))
         if request.method == "POST":
-            username = request.form.get("username", "").strip()
+            identifier = request.form.get("username", "").strip()
             password = request.form.get("password", "")
-            user = User.query.filter(func.lower(User.username) == username.lower()).first()
+            if "@" in identifier:
+                user = User.query.filter(
+                    func.lower(User.email) == identifier.lower()
+                ).first()
+            else:
+                user = User.query.filter(
+                    func.lower(User.username) == identifier.lower()
+                ).first()
             if (
                 not user
                 or not user.is_active
@@ -344,7 +351,7 @@ def create_app(test_config=None):
                         event_type="auth.login_failed",
                         entity_type="user" if user else None,
                         entity_id=user.id if user else None,
-                        details={"username": username},
+                        details={"username": identifier},
                     )
                 )
                 db.session.commit()

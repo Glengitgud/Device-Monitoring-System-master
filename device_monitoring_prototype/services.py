@@ -42,6 +42,12 @@ SPECIFICATION_KEYS = {
     "network_adapters",
     "ip_addresses",
 }
+EMAIL_PATTERN = re.compile(
+    r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+    r"(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+)
 
 
 class ValidationError(ValueError):
@@ -129,9 +135,11 @@ def create_user(data, *, role_name="User"):
         raise ValidationError("Username must be 3-64 letters, numbers, dots, dashes, or underscores.")
     if username.casefold() == "admin":
         raise ValidationError("The username 'admin' is reserved for the system Administrator.")
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+    if not EMAIL_PATTERN.fullmatch(email):
         raise ValidationError("Enter a valid email address.")
-    if User.query.filter(or_(User.username == username, User.email == email)).first():
+    if User.query.filter(
+        or_(User.username == username, db.func.lower(User.email) == email)
+    ).first():
         raise ValidationError("That username or email address is already registered.")
 
     user = User(
@@ -160,9 +168,11 @@ def update_user(user, data):
         user.full_name = _required_text(data, "full_name", limit=120)
     if "email" in data:
         email = _required_text(data, "email", limit=254).lower()
-        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        if not EMAIL_PATTERN.fullmatch(email):
             raise ValidationError("Enter a valid email address.")
-        if User.query.filter(User.email == email, User.id != user.id).first():
+        if User.query.filter(
+            db.func.lower(User.email) == email, User.id != user.id
+        ).first():
             raise ValidationError("That email address is already registered.")
         user.email = email
     if "role" in data:

@@ -109,13 +109,102 @@ class DatabaseIntegrationTest(unittest.TestCase):
             return session["_csrf_token"]
 
     def test_login_and_registration_pages_render(self):
-        self.assertEqual(self.client.get("/").status_code, 200)
+        login_page = self.client.get("/")
+        self.assertEqual(login_page.status_code, 200)
+        self.assertIn(b'id="loginEmailValidation"', login_page.data)
         response = self.client.get("/register")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'id="registerForm"', response.data)
         self.assertIn(b'id="confirm_password"', response.data)
+        self.assertIn(b'id="registerEmailValidation"', response.data)
         self.assertIn(b"js/register.js", response.data)
-        self.assertIn(b"js/register.js", self.client.get("/login").data)
+        self.assertIn(b"js/register.js", login_page.data)
+
+    def test_login_accepts_registered_email_and_rejects_unknown_email(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        response = self.client.post(
+            "/register",
+            data={
+                "csrf_token": csrf,
+                "full_name": "Email Login User",
+                "email": "EmailLogin@example.com",
+                "username": "emaillogin",
+                "password": "EmailPass1!",
+                "confirm_password": "EmailPass1!",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        email_login = self.client.post(
+            "/login",
+            data={
+                "csrf_token": csrf,
+                "username": "EMAILLOGIN@example.com",
+                "password": "EmailPass1!",
+            },
+        )
+        self.assertEqual(email_login.status_code, 302)
+        self.assertEqual(self.client.get("/dashboard").status_code, 200)
+
+        self.client.post("/logout", data={"csrf_token": csrf})
+        self.client.get("/login")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        unknown_email_login = self.client.post(
+            "/login",
+            data={
+                "csrf_token": csrf,
+                "username": "unknown@example.com",
+                "password": "EmailPass1!",
+            },
+        )
+        self.assertEqual(unknown_email_login.status_code, 401)
+
+    def test_registration_rejects_malformed_and_duplicate_emails_case_insensitively(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        valid_payload = {
+            "csrf_token": csrf,
+            "full_name": "Email Validation User",
+            "email": "valid.address+tag@example.com",
+            "username": "emailvalidation",
+            "password": "EmailPass1!",
+            "confirm_password": "EmailPass1!",
+        }
+        created = self.client.post("/register", data=valid_payload)
+        self.assertEqual(created.status_code, 302)
+
+        duplicate = self.client.post(
+            "/register",
+            data={
+                **valid_payload,
+                "email": "VALID.ADDRESS+TAG@EXAMPLE.COM",
+                "username": "differentuser",
+            },
+        )
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn(b"already registered", duplicate.data)
+
+        malformed_addresses = (
+            "missing-at.example.com",
+            "no-domain@example",
+            "bad..dots@example.com",
+            "bad domain@example.com",
+        )
+        for index, email in enumerate(malformed_addresses):
+            with self.subTest(email=email):
+                response = self.client.post(
+                    "/register",
+                    data={
+                        **valid_payload,
+                        "email": email,
+                        "username": f"invalidemail{index}",
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(b"valid email address", response.data.lower())
 
     def test_environment_file_is_loaded_from_application_directory(self):
         with patch("device_monitoring_prototype.app.load_dotenv") as load_dotenv:

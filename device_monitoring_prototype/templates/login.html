@@ -31,14 +31,18 @@
             <form id="loginForm" method="post" action="{{ url_for('login') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
-                <!-- Username Field -->
+                <!-- Username or Email Field -->
                 <div class="mb-3">
                     <label for="username" class="form-label">
-                        <i class="bi bi-person me-1"></i>Username
+                        <i class="bi bi-person me-1"></i>Email Address or Username
                     </label>
                     <input type="text" class="form-control" id="username" name="username"
-                           placeholder="Enter your username" required autocomplete="username"
-                           maxlength="64" value="{{ request.form.get('username', '') }}">
+                           placeholder="Enter your email address or username" required
+                           autocomplete="username"
+                           maxlength="254" value="{{ request.form.get('username', '') }}">
+                    <div id="loginEmailValidation" class="validation-message" aria-live="polite">
+                        Enter your username or email address.
+                    </div>
                 </div>
 
                 <!-- Password Field -->
