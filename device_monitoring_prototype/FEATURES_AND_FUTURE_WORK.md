@@ -46,6 +46,7 @@ The application uses MySQL through Flask-SQLAlchemy. Public registration stores 
 | **Dashboard** | Fleet counts and rows are queried from MySQL. |
 | **Search, Sort and Pagination** | Browser-side presentation of records returned from the database-backed endpoints. |
 | **Input and Session Security** | Server-side validation, CSRF token checks, HttpOnly/SameSite cookies, and configurable Secure cookies. |
+| **Database Health Check** | `check-db` compares model tables, columns, indexes, foreign keys, and check constraints with the configured database and reports key record counts without modifying data. |
 
 ---
 
