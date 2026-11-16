@@ -3,10 +3,15 @@
 const ITEMS_PER_PAGE = 10;
 let devices = [];
 let users = [];
+const adminLogs = { activity: [], device: [] };
+const adminLogsLoaded = { activity: false, device: false };
+const adminLogsHaveMore = { activity: false, device: false };
+const adminLogQueries = { activity: '', device: '' };
 let selectedDeviceId = null;
 let selectedUserId = null;
 let devicePage = 1;
-let userPage = 1;
+let userVisibleCount = ITEMS_PER_PAGE;
+let usersLoaded = false;
 let deviceDetailsRequestId = 0;
 let deviceSearch = '';
 let archivedDeviceSearch = '';
@@ -552,8 +557,21 @@ async function scanDevice(deviceId) {
 }
 
 async function refreshUsers() {
-    users = await api('/api/users');
-    renderUsersTable();
+    const body = document.getElementById('usersTableBody');
+    if (body) {
+        body.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">Loading users...</td></tr>';
+    }
+    try {
+        users = await api('/api/users');
+        usersLoaded = true;
+        userVisibleCount = ITEMS_PER_PAGE;
+        renderUsersTable();
+    } catch (error) {
+        if (body) {
+            body.innerHTML = '<tr><td colspan="7" class="text-center text-danger py-4">Unable to load users. Try reopening this section.</td></tr>';
+        }
+        throw error;
+    }
 }
 
 function renderUsersTable() {
@@ -563,8 +581,7 @@ function renderUsersTable() {
         `${user.fullName} ${user.username} ${user.email}`.toLowerCase().includes(userSearch)
     );
     rows = sortRows(rows, userSort, 'fullName');
-    const start = (userPage - 1) * ITEMS_PER_PAGE;
-    const pageRows = rows.slice(start, start + ITEMS_PER_PAGE);
+    const pageRows = rows.slice(0, userVisibleCount);
     body.innerHTML = pageRows.length ? pageRows.map(user => `
         <tr>
             <td>${user.id}</td><td>${escapeHTML(user.fullName)}</td>
@@ -577,18 +594,32 @@ function renderUsersTable() {
                     onclick="confirmDeleteUser(${user.id})"><i class="bi bi-person-x"></i></button>
             </div></td>
         </tr>`).join('') : '<tr><td colspan="7" class="text-center text-muted py-4">No users found.</td></tr>';
-    renderPagination('usersPagination', rows.length, userPage, page => {
-        userPage = page;
-        renderUsersTable();
-    });
+    const showMoreButton = document.getElementById('usersShowMoreBtn');
+    if (showMoreButton) {
+        showMoreButton.classList.toggle('d-none', pageRows.length >= rows.length);
+    }
 }
 
 function initAdminPage() {
-    refreshUsers().catch(error => showToast(error.message, 'danger'));
-    refreshAdminLogs().catch(error => showToast(error.message, 'danger'));
+    document.getElementById('usersPanel')?.addEventListener('shown.bs.collapse', () => {
+        if (!usersLoaded) refreshUsers().catch(error => showToast(error.message, 'danger'));
+    });
+    for (const kind of ['activity', 'device']) {
+        const panel = document.getElementById(`${kind}LogsPanel`);
+        panel?.addEventListener('shown.bs.collapse', () => {
+            const query = getAdminLogQuery(kind);
+            if (!adminLogsLoaded[kind] || adminLogQueries[kind] !== query) {
+                refreshAdminLogs(kind).catch(error => showToast(error.message, 'danger'));
+            }
+        });
+        document.getElementById(`${kind}LogsShowMoreBtn`)?.addEventListener('click', () => {
+            refreshAdminLogs(kind, { append: true })
+                .catch(error => showToast(error.message, 'danger'));
+        });
+    }
     document.getElementById('userSearchInput')?.addEventListener('input', event => {
         userSearch = event.target.value.trim().toLowerCase();
-        userPage = 1;
+        userVisibleCount = ITEMS_PER_PAGE;
         renderUsersTable();
     });
     document.getElementById('userSortSelect')?.addEventListener('change', event => {
@@ -596,29 +627,77 @@ function initAdminPage() {
         renderUsersTable();
     });
     document.getElementById('confirmDeleteUserBtn')?.addEventListener('click', deactivateSelectedUser);
-    document.getElementById('searchLogsBtn')?.addEventListener('click', () => {
-        refreshAdminLogs().catch(error => showToast(error.message, 'danger'));
+    document.querySelectorAll('.log-search-btn').forEach(button => {
+        button.addEventListener('click', () => {
+            refreshAdminLogs(button.dataset.logKind)
+                .catch(error => showToast(error.message, 'danger'));
+        });
     });
-    document.getElementById('logKindFilter')?.addEventListener('change', () => {
-        refreshAdminLogs().catch(error => showToast(error.message, 'danger'));
+    document.querySelectorAll('.log-search-input').forEach(input => {
+        input.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                const kind = input.id.startsWith('activity') ? 'activity' : 'device';
+                refreshAdminLogs(kind).catch(error => showToast(error.message, 'danger'));
+            }
+        });
+        input.addEventListener('input', () => {
+            const kind = input.id.startsWith('activity') ? 'activity' : 'device';
+            const otherKind = kind === 'activity' ? 'device' : 'activity';
+            const otherInput = document.getElementById(`${otherKind}LogSearchInput`);
+            if (otherInput) otherInput.value = input.value;
+        });
     });
-    document.getElementById('logSearchInput')?.addEventListener('keydown', event => {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            refreshAdminLogs().catch(error => showToast(error.message, 'danger'));
-        }
+    document.getElementById('usersShowMoreBtn')?.addEventListener('click', () => {
+        userVisibleCount += ITEMS_PER_PAGE;
+        renderUsersTable();
     });
 }
 
-async function refreshAdminLogs() {
-    const body = document.getElementById('adminLogsTableBody');
+function getAdminLogQuery(kind) {
+    return document.getElementById(`${kind}LogSearchInput`)?.value.trim() || '';
+}
+
+async function refreshAdminLogs(kind, { append = false } = {}) {
+    const body = document.getElementById(`${kind}LogsTableBody`);
     if (!body) return;
-    body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Loading logs...</td></tr>';
-    const kind = document.getElementById('logKindFilter').value;
-    const query = document.getElementById('logSearchInput').value.trim();
-    const params = new URLSearchParams({ kind, q: query });
-    const logs = await api(`/api/admin/logs?${params}`);
-    body.innerHTML = logs.length ? logs.map(entry => `
+    const showMoreButton = document.getElementById(`${kind}LogsShowMoreBtn`);
+    if (!append) {
+        body.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">Loading logs...</td></tr>';
+    }
+    const query = getAdminLogQuery(kind);
+    const offset = append && adminLogQueries[kind] === query ? adminLogs[kind].length : 0;
+    const params = new URLSearchParams({
+        kind,
+        q: query,
+        limit: String(ITEMS_PER_PAGE + 1),
+        offset: String(offset)
+    });
+    if (showMoreButton) showMoreButton.disabled = true;
+    try {
+        const logs = await api(`/api/admin/logs?${params}`);
+        adminLogs[kind] = append && offset
+            ? [...adminLogs[kind], ...logs.slice(0, ITEMS_PER_PAGE)]
+            : logs.slice(0, ITEMS_PER_PAGE);
+        adminLogsHaveMore[kind] = logs.length > ITEMS_PER_PAGE;
+        adminLogsLoaded[kind] = true;
+        adminLogQueries[kind] = query;
+        renderAdminLogs(kind);
+    } catch (error) {
+        if (!append) {
+            body.innerHTML = '<tr><td colspan="6" class="text-center text-danger py-4">Unable to load logs. Try again.</td></tr>';
+        }
+        throw error;
+    } finally {
+        if (showMoreButton) showMoreButton.disabled = false;
+    }
+}
+
+function renderAdminLogs(kind) {
+    const body = document.getElementById(`${kind}LogsTableBody`);
+    if (!body) return;
+    const visibleLogs = adminLogs[kind];
+    body.innerHTML = visibleLogs.length ? visibleLogs.map(entry => `
         <tr>
             <td>${escapeHTML(entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '')}</td>
             <td>${escapeHTML(entry.kind === 'activity' ? 'Account activity' : 'Device/system')}</td>
@@ -628,6 +707,10 @@ async function refreshAdminLogs() {
             <td>${escapeHTML(entry.details ? JSON.stringify(entry.details) : '')}</td>
         </tr>`).join('') :
         '<tr><td colspan="6" class="text-center text-muted py-4">No matching logs found.</td></tr>';
+    const showMoreButton = document.getElementById(`${kind}LogsShowMoreBtn`);
+    if (showMoreButton) {
+        showMoreButton.classList.toggle('d-none', !adminLogsHaveMore[kind]);
+    }
 }
 
 function openUserModal(mode, userId) {

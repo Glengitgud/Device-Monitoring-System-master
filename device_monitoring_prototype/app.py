@@ -958,10 +958,17 @@ def create_app(test_config=None):
     def admin_logs():
         kind = request.args.get("kind", "all")
         query_text = request.args.get("q", "").strip()
+        try:
+            limit = int(request.args.get("limit", 200))
+            offset = int(request.args.get("offset", 0))
+        except ValueError:
+            return api_error("Log limit and offset must be integers.")
         if kind not in {"all", "activity", "device"}:
             return api_error("Log kind must be all, activity, or device.")
         if len(query_text) > 100:
             return api_error("Log search text must be 100 characters or fewer.")
+        if not 1 <= limit <= 200 or offset < 0:
+            return api_error("Log limit must be 1-200 and offset cannot be negative.")
 
         pattern = f"%{query_text}%"
         results = []
@@ -992,8 +999,10 @@ def create_app(test_config=None):
                     "timestamp": entry.occurred_at.isoformat(),
                 }
                 for entry in activity_query.order_by(
-                    ActivityLog.occurred_at.desc()
-                ).limit(200)
+                    ActivityLog.occurred_at.desc(), ActivityLog.id.desc()
+                ).offset(offset if kind == "activity" else 0).limit(
+                    limit if kind == "activity" else 200
+                )
             )
 
         if kind in {"all", "device"}:
@@ -1017,11 +1026,17 @@ def create_app(test_config=None):
                     "details": {"device_name": entry.device.device_name},
                     "timestamp": entry.timestamp.isoformat(),
                 }
-                for entry in device_query.order_by(Log.timestamp.desc()).limit(200)
+                for entry in device_query.order_by(
+                    Log.timestamp.desc(), Log.id.desc()
+                ).offset(offset if kind == "device" else 0).limit(
+                    limit if kind == "device" else 200
+                )
             )
 
         results.sort(key=lambda entry: entry["timestamp"], reverse=True)
-        return jsonify(results[:200])
+        if kind == "all":
+            results = results[offset:offset + limit]
+        return jsonify(results)
 
     return app
 

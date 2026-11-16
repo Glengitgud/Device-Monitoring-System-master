@@ -181,7 +181,14 @@ class DatabaseIntegrationTest(unittest.TestCase):
             data={"csrf_token": token, "username": "admin", "password": "admin123"},
         )
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(self.client.get("/admin").status_code, 200)
+        admin_page = self.client.get("/admin")
+        self.assertEqual(admin_page.status_code, 200)
+        self.assertIn(b'id="usersPanel" class="accordion-collapse collapse"', admin_page.data)
+        self.assertIn(b'id="activityLogsPanel" class="accordion-collapse collapse"', admin_page.data)
+        self.assertIn(b'id="deviceLogsPanel" class="accordion-collapse collapse"', admin_page.data)
+        self.assertIn(b'id="usersShowMoreBtn"', admin_page.data)
+        self.assertIn(b'id="activityLogsShowMoreBtn"', admin_page.data)
+        self.assertIn(b'id="deviceLogsShowMoreBtn"', admin_page.data)
         self.assertNotIn(
             "admin",
             {user["username"] for user in self.client.get("/api/users").json},
@@ -827,6 +834,32 @@ class DatabaseIntegrationTest(unittest.TestCase):
         logs = self.client.get("/api/admin/logs?kind=activity&q=auth.login_succeeded")
         self.assertEqual(logs.status_code, 200, logs.get_data(as_text=True))
         self.assertTrue(any(entry["event"] == "auth.login_succeeded" for entry in logs.json))
+        with self.app.app_context():
+            db.session.add_all(
+                ActivityLog(
+                    actor_user_id=admin_id,
+                    event_type="pagination-test",
+                    details={"index": index},
+                )
+                for index in range(25)
+            )
+            db.session.commit()
+        first_log_page = self.client.get(
+            "/api/admin/logs?kind=activity&q=pagination-test&limit=10&offset=0"
+        )
+        second_log_page = self.client.get(
+            "/api/admin/logs?kind=activity&q=pagination-test&limit=10&offset=10"
+        )
+        self.assertEqual(first_log_page.status_code, 200)
+        self.assertEqual(second_log_page.status_code, 200)
+        self.assertEqual(len(first_log_page.json), 10)
+        self.assertEqual(len(second_log_page.json), 10)
+        self.assertFalse(
+            {entry["id"] for entry in first_log_page.json}
+            & {entry["id"] for entry in second_log_page.json}
+        )
+        invalid_page = self.client.get("/api/admin/logs?kind=activity&limit=0")
+        self.assertEqual(invalid_page.status_code, 400)
         invalid_filter = self.client.get("/api/admin/logs?kind=unknown")
         self.assertEqual(invalid_filter.status_code, 400)
         response = self.client.delete(
