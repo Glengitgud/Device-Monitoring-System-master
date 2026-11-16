@@ -1163,3 +1163,30 @@ code {
     border-left: 3px solid currentColor;
     font-weight: 600;
 }
+
+.password-strength {
+    min-height: 1.4rem;
+    margin-top: 0.35rem;
+    color: #d1d5db;
+    font-size: 0.875rem;
+}
+
+.password-strength.is-strong {
+    color: #4ade80;
+}
+
+.password-strength.is-weak {
+    color: #f87171;
+}
+
+.password-strength.is-medium {
+    color: #fbbf24;
+}
+
+.password-strength.is-weak,
+.password-strength.is-medium,
+.password-strength.is-strong {
+    padding-left: 0.5rem;
+    border-left: 3px solid currentColor;
+    font-weight: 600;
+}
