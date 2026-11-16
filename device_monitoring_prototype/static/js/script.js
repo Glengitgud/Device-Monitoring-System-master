@@ -639,6 +639,9 @@ function openUserModal(mode, userId) {
     document.getElementById('userModalTitle').textContent =
         mode === 'add' ? 'Add User' : 'Edit User';
     document.getElementById('userPasswordGroup').classList.toggle('d-none', mode !== 'add');
+    document.getElementById('userConfirmPasswordGroup').classList.toggle('d-none', mode !== 'add');
+    document.getElementById('userFormPassword').required = mode === 'add';
+    document.getElementById('userFormConfirmPassword').required = mode === 'add';
     document.getElementById('userFormUsername').disabled = mode !== 'add';
     if (user) {
         document.getElementById('userFormFullName').value = user.fullName;
@@ -652,6 +655,8 @@ function openUserModal(mode, userId) {
 
 async function saveUser() {
     const mode = document.getElementById('userFormMode').value;
+    const form = document.getElementById('userForm');
+    if (!form.reportValidity()) return;
     const data = {
         full_name: document.getElementById('userFormFullName').value.trim(),
         username: document.getElementById('userFormUsername').value.trim(),
@@ -659,7 +664,14 @@ async function saveUser() {
         role: document.getElementById('userFormRole').value,
         status: document.getElementById('userFormStatus').value.toLowerCase()
     };
-    if (mode === 'add') data.password = document.getElementById('userFormPassword').value;
+    if (mode === 'add') {
+        data.password = document.getElementById('userFormPassword').value;
+        data.confirm_password = document.getElementById('userFormConfirmPassword').value;
+        if (data.password !== data.confirm_password) {
+            showToast('Passwords do not match.', 'danger');
+            return;
+        }
+    }
     try {
         await api(mode === 'add' ? '/api/users' : `/api/users/${selectedUserId}`, {
             method: mode === 'add' ? 'POST' : 'PATCH',

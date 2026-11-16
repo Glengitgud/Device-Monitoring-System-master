@@ -47,8 +47,14 @@
                 <div class="mb-3">
                     <label for="password" class="form-label">Password</label>
                     <input id="password" name="password" type="password" class="form-control"
-                           required minlength="12" maxlength="1024" autocomplete="new-password">
-                    <div class="form-text">Use at least 12 characters.</div>
+                           required minlength="8" maxlength="16" autocomplete="new-password">
+                    <div class="form-text">Use 8-16 characters, including a capital letter and a special character.</div>
+                </div>
+                <div class="mb-3">
+                    <label for="confirm_password" class="form-label">Confirm Password</label>
+                    <input id="confirm_password" name="confirm_password" type="password"
+                           class="form-control" required minlength="8" maxlength="16"
+                           autocomplete="new-password">
                 </div>
                 <button type="submit" class="btn btn-primary w-100 login-btn">
                     <i class="bi bi-person-plus me-1"></i>Create Account

@@ -52,6 +52,7 @@ from device_monitoring_prototype.services import (
     record_diagnostic,
     restore_device,
     soft_delete_device,
+    validate_password,
     update_device,
     update_user,
 )
@@ -866,12 +867,14 @@ def create_app(test_config=None):
             )
 
         password = click.prompt(
-            "Sample account password (minimum 12 characters)",
+            "Sample account password",
             hide_input=True,
             confirmation_prompt=True,
         )
-        if len(password) < 12:
-            raise click.ClickException("Password must contain at least 12 characters.")
+        try:
+            validate_password(password)
+        except ValidationError as error:
+            raise click.ClickException(str(error)) from error
 
         user = User(
             username=username,
@@ -931,9 +934,13 @@ def create_app(test_config=None):
             raise click.ClickException(
                 "Run `flask --app device_monitoring_prototype.app init-db` from the repository root."
             )
-        password = click.prompt("Password (minimum 12 characters)", hide_input=True, confirmation_prompt=True)
-        if len(password) < 12:
-            raise click.ClickException("Password must contain at least 12 characters.")
+        password = click.prompt(
+            "Password", hide_input=True, confirmation_prompt=True
+        )
+        try:
+            validate_password(password)
+        except ValidationError as error:
+            raise click.ClickException(str(error)) from error
         user = User(
             username=username,
             email=email,

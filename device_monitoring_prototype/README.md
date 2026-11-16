@@ -34,7 +34,7 @@ Set `COOKIE_SECURE=true` when using HTTPS. The generated fallback session key is
 
 ## Test sample data
 
-After running `init-db`, add a sample user, device, network record, and linked device log. The command prompts for a password and stores only its hash:
+After running `init-db`, add a sample user, device, network record, and linked device log. The command prompts twice for an 8-16 character password with at least one capital letter and one special character, and stores only its hash:
 
 ```powershell
 python -m flask --app device_monitoring_prototype.app seed-sample-data
@@ -52,7 +52,7 @@ with app.app_context():
 
 ## Features
 
-- Account registration/login stores only Werkzeug password hashes and uses Flask-Login.
+- Account creation requires a matching confirmation and an 8-16 character password with at least one capital letter and one special character. Passwords are stored as Werkzeug hashes and Flask-Login manages sessions.
 - RBAC roles are seeded by `init-db`; creating an administrator requires the CLI or another administrator.
 - Device list and CRUD are owner-scoped; administrators can view/manage all accounts and devices.
 - Device registration saves a hardware specification and network snapshot; diagnostic actions save history entries. Deactivation and device removal are soft operations so historical records remain.

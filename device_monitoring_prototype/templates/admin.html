@@ -186,8 +186,15 @@
                         <div class="col-12" id="userPasswordGroup">
                             <label for="userFormPassword" class="form-label">Temporary Password *</label>
                             <input type="password" class="form-control" id="userFormPassword"
-                                   minlength="12" maxlength="1024" autocomplete="new-password">
-                            <div class="form-text">At least 12 characters. Only a password hash is stored.</div>
+                                   minlength="8" maxlength="16" autocomplete="new-password">
+                            <div class="form-text">Use 8-16 characters, including a capital letter and a special character.</div>
+                        </div>
+                        <div class="col-12" id="userConfirmPasswordGroup">
+                            <label for="userFormConfirmPassword" class="form-label">
+                                Confirm Password *
+                            </label>
+                            <input type="password" class="form-control" id="userFormConfirmPassword"
+                                   minlength="8" maxlength="16" autocomplete="new-password">
                         </div>
                         <!-- Role -->
                         <div class="col-md-6">

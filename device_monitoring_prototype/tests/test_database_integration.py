@@ -61,16 +61,17 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "full_name": "Test User",
                 "email": "test@example.com",
                 "username": "testuser",
-                "password": "correct-horse-battery-staple",
+                "password": "Passw0rd!",
+                "confirm_password": "Passw0rd!",
             },
         )
         self.assertEqual(response.status_code, 302)
         with self.app.app_context():
             user = User.query.filter_by(username="testuser").one()
             self.assertTrue(
-                check_password_hash(user.password_hash, "correct-horse-battery-staple")
+                check_password_hash(user.password_hash, "Passw0rd!")
             )
-            self.assertNotEqual(user.password_hash, "correct-horse-battery-staple")
+            self.assertNotEqual(user.password_hash, "Passw0rd!")
 
         response = self.client.post(
             "/login",
@@ -86,7 +87,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             data={
                 "csrf_token": token,
                 "username": "testuser",
-                "password": "correct-horse-battery-staple",
+                "password": "Passw0rd!",
             },
         )
         self.assertEqual(response.status_code, 302)
@@ -148,7 +149,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "full_name": "Duplicate Administrator",
                 "email": "duplicate-admin@example.com",
                 "username": "Admin",
-                "password": "valid-registration-password",
+                "password": "Passw0rd!",
+                "confirm_password": "Passw0rd!",
             },
         )
         self.assertEqual(response.status_code, 400)
@@ -236,7 +238,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
                     "full_name": "Test User",
                     "email": "setup@example.com",
                     "username": "setupuser",
-                    "password": "correct-horse-battery-staple",
+                    "password": "Passw0rd!",
+                    "confirm_password": "Passw0rd!",
                 },
             )
             self.assertEqual(register_response.status_code, 503)
@@ -249,6 +252,55 @@ class DatabaseIntegrationTest(unittest.TestCase):
     def test_registration_login_and_password_hash(self):
         self.register_and_login()
         self.assertEqual(self.client.get("/dashboard").status_code, 200)
+
+    def test_registration_enforces_password_policy_and_confirmation(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            token = session["_csrf_token"]
+
+        invalid_passwords = (
+            ("short", "Abcdef!", "Abcdef!"),
+            ("long", "Abcdefghijklmnop!", "Abcdefghijklmnop!"),
+            ("no-capital", "abcdefg!", "abcdefg!"),
+            ("no-special", "Abcdefg1", "Abcdefg1"),
+            ("mismatch", "Abcdefg!", "Abcdefg?"),
+        )
+        for username, password, confirmation in invalid_passwords:
+            with self.subTest(username=username):
+                response = self.client.post(
+                    "/register",
+                    data={
+                        "csrf_token": token,
+                        "full_name": "Password Test",
+                        "email": f"{username}@example.com",
+                        "username": username,
+                        "password": password,
+                        "confirm_password": confirmation,
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+                with self.app.app_context():
+                    self.assertIsNone(
+                        User.query.filter_by(username=username).one_or_none()
+                    )
+
+        for username, password in (
+            ("eightchar", "Abcdefg!"),
+            ("sixteenchar", "Abcdefghijklmno!"),
+        ):
+            with self.subTest(username=username):
+                response = self.client.post(
+                    "/register",
+                    data={
+                        "csrf_token": token,
+                        "full_name": "Password Test",
+                        "email": f"{username}@example.com",
+                        "username": username,
+                        "password": password,
+                        "confirm_password": password,
+                    },
+                )
+                self.assertEqual(response.status_code, 302)
 
     def test_failed_login_is_recorded_without_storing_password(self):
         token = self.register_and_login()
@@ -397,7 +449,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
     def test_sample_data_command_creates_linked_records(self):
         result = self.app.test_cli_runner().invoke(
             args=["seed-sample-data"],
-            input="sample-password-long\nsample-password-long\n",
+            input="Sample1!\nSample1!\n",
         )
         self.assertEqual(result.exit_code, 0, result.output)
         with self.app.app_context():
@@ -408,7 +460,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             self.assertEqual(len(device.logs), 1)
             self.assertNotEqual(
                 user.password_hash,
-                "sample-password-long",
+                "Sample1!",
             )
 
     def test_device_archive_search_restore_and_soft_delete_retains_row(self):
@@ -702,6 +754,20 @@ class DatabaseIntegrationTest(unittest.TestCase):
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
 
+        invalid_response = self.client.post(
+            "/api/users",
+            headers={"X-CSRF-Token": token},
+            json={
+                "full_name": "Weak User",
+                "email": "weak@example.com",
+                "username": "weakuser",
+                "password": "weakpass",
+                "confirm_password": "weakpass",
+                "role": "User",
+            },
+        )
+        self.assertEqual(invalid_response.status_code, 400)
+
         response = self.client.post(
             "/api/users",
             headers={"X-CSRF-Token": token},
@@ -709,7 +775,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "full_name": "Managed User",
                 "email": "managed@example.com",
                 "username": "managed",
-                "password": "managed-password-long-enough",
+                "password": "Managed1!",
+                "confirm_password": "Managed1!",
                 "role": "User",
             },
         )

@@ -30,6 +30,16 @@ class DatabaseSetupError(RuntimeError):
     """Raised when required seed data is missing from the database."""
 
 
+def validate_password(password):
+    if not isinstance(password, str) or not 8 <= len(password) <= 16:
+        raise ValidationError("Password must be 8-16 characters long.")
+    if not any(char.isupper() for char in password):
+        raise ValidationError("Password must include at least one capital letter.")
+    if not any(not char.isalnum() and not char.isspace() for char in password):
+        raise ValidationError("Password must include at least one special character.")
+    return password
+
+
 def _text(data, key, *, required=False, limit):
     value = data.get(key)
     if value is None:
@@ -85,8 +95,10 @@ def create_user(data, *, role_name="User"):
     username = _required_text(data, "username", limit=64)
     email = _required_text(data, "email", limit=254).lower()
     password = data.get("password")
-    if not isinstance(password, str) or len(password) < 12 or len(password) > 1024:
-        raise ValidationError("Password must be between 12 and 1024 characters.")
+    validate_password(password)
+    confirm_password = data.get("confirm_password")
+    if not isinstance(confirm_password, str) or password != confirm_password:
+        raise ValidationError("Passwords do not match.")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
         raise ValidationError("Username must be 3-64 letters, numbers, dots, dashes, or underscores.")
     if username.casefold() == "admin":

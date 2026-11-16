@@ -31,11 +31,11 @@ Design principles followed:
 
 ## Implemented Database Features
 
-The application now uses MySQL through Flask-SQLAlchemy. Public registration stores standard-user accounts with Werkzeug password hashes; Flask-Login manages sessions. `init-db` ensures the reserved `admin` account is active, has the Administrator role, and uses the hashed bootstrap password `admin123`. The account is excluded from user management and protected from public registration. Administrator-only user management/log access and owner-scoped device operations are enforced by Flask views, not by JavaScript alone.
+The application now uses MySQL through Flask-SQLAlchemy. Public registration stores standard-user accounts with Werkzeug password hashes; account creation requires the password and confirmation to match and enforces 8-16 characters, at least one capital letter, and at least one special character. Flask-Login manages sessions. `init-db` ensures the reserved `admin` account is active, has the Administrator role, and uses the hashed bootstrap password `admin123`. The account is excluded from user management and protected from public registration. Administrator-only user management/log access and owner-scoped device operations are enforced by Flask views, not by JavaScript alone.
 
 | Feature | Current implementation |
 |---|---|
-| **User Registration and Login** | User records and hashed passwords are persisted in MySQL; invalid credentials are rejected and login attempts are recorded in activity logs. |
+| **User Registration and Login** | Account creation enforces the password length/complexity policy and confirmation match; user records and hashed passwords are persisted in MySQL, invalid credentials are rejected, and login attempts are recorded in activity logs. |
 | **Role-Based Access** | Roles and permissions are stored in RBAC tables; `/admin`, user-management, and administrator log endpoints require an administrator. |
 | **Device Registration** | Device and owner foreign key, specification row, and network record are persisted together. |
 | **Device Editing and Removal** | Active devices can be updated; archive/restore uses a lifecycle state, while administrator deletion is a retained soft delete. No application route physically removes devices. |

@@ -31,7 +31,7 @@
 
 ## Authentication and authorization
 
-Public registration always creates a `User` role and rejects the reserved `admin` username. `init-db` restores the reserved account as an active Administrator with the hashed `admin123` bootstrap password; it is excluded from user management. Passwords are hashed using `werkzeug.security.generate_password_hash` and checked using `check_password_hash`. Flask-Login manages sessions. Admin-only account management is checked server-side, device data is limited to owners/registrants, write operations require the session CSRF token, and disabled users are rejected on subsequent requests (except the reserved Administrator).
+Public registration always creates a `User` role and rejects the reserved `admin` username. New accounts require matching password and confirmation values, and passwords must be 8-16 characters with at least one capital letter and one special character. The same policy applies to administrator-created accounts and account-creation CLI commands. `init-db` restores the reserved account as an active Administrator with the hashed `admin123` bootstrap password; it is excluded from user management. Passwords are hashed using `werkzeug.security.generate_password_hash` and checked using `check_password_hash`. Flask-Login manages sessions. Admin-only account management is checked server-side, device data is limited to owners/registrants, write operations require the session CSRF token, and disabled users are rejected on subsequent requests (except the reserved Administrator).
 
 Create the initial Administrator and RBAC tables:
 
