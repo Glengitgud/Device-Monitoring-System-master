@@ -23,7 +23,7 @@
                 <div class="alert alert-{{ category }}" role="alert">{{ message }}</div>
                 {% endfor %}
             {% endwith %}
-            <form method="post" action="{{ url_for('register') }}">
+            <form id="registerForm" method="post" action="{{ url_for('register') }}" novalidate>
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <div class="mb-3">
                     <label for="full_name" class="form-label">Full Name</label>
@@ -47,14 +47,13 @@
                 <div class="mb-3">
                     <label for="password" class="form-label">Password</label>
                     <input id="password" name="password" type="password" class="form-control"
-                           required minlength="8" maxlength="16" autocomplete="new-password">
+                           required autocomplete="new-password">
                     <div class="form-text">Use 8-16 characters, including a capital letter and a special character.</div>
                 </div>
                 <div class="mb-3">
                     <label for="confirm_password" class="form-label">Confirm Password</label>
                     <input id="confirm_password" name="confirm_password" type="password"
-                           class="form-control" required minlength="8" maxlength="16"
-                           autocomplete="new-password">
+                           class="form-control" required autocomplete="new-password">
                 </div>
                 <button type="submit" class="btn btn-primary w-100 login-btn">
                     <i class="bi bi-person-plus me-1"></i>Create Account
@@ -66,5 +65,6 @@
             </p>
         </div>
     </div>
+    <script src="{{ url_for('static', filename='js/register.js') }}" defer></script>
 </body>
 </html>

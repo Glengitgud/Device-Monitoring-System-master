@@ -97,7 +97,11 @@ class DatabaseIntegrationTest(unittest.TestCase):
 
     def test_login_and_registration_pages_render(self):
         self.assertEqual(self.client.get("/").status_code, 200)
-        self.assertEqual(self.client.get("/register").status_code, 200)
+        response = self.client.get("/register")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'id="registerForm"', response.data)
+        self.assertIn(b'id="confirm_password"', response.data)
+        self.assertIn(b"js/register.js", response.data)
 
     def test_environment_file_is_loaded_from_application_directory(self):
         with patch("device_monitoring_prototype.app.load_dotenv") as load_dotenv:
