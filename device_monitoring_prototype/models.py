@@ -1,5 +1,5 @@
 """Flask-SQLAlchemy models for the device monitoring system."""
-
+##
 from flask_login import UserMixin
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import CheckConstraint, UniqueConstraint, func
