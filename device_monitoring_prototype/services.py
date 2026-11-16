@@ -33,7 +33,7 @@ class DatabaseSetupError(RuntimeError):
 def validate_password(password):
     if not isinstance(password, str) or not 8 <= len(password) <= 16:
         raise ValidationError("Password must be 8-16 characters long.")
-    if not any(char.isupper() for char in password):
+    if not any("A" <= char <= "Z" for char in password):
         raise ValidationError("Password must include at least one capital letter.")
     if not any(not char.isalnum() and not char.isspace() for char in password):
         raise ValidationError("Password must include at least one special character.")

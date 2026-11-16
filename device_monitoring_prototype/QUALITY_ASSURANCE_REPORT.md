@@ -2,7 +2,7 @@
 
 **System:** Centralized End-User Device Monitoring and Diagnostic System (DevMonitor)
 **Review date:** 2026-11-16
-**Result:** 16 application integration tests pass against isolated SQLite databases. A live XAMPP/MySQL deployment and browser-level checks remain to be verified.
+**Result:** 17 application integration tests pass against isolated SQLite databases. A live XAMPP/MySQL deployment and browser-level checks remain to be verified.
 
 ## System scope
 
@@ -11,7 +11,7 @@ This report covers the user-facing pages, Flask routes and services, and the ORM
 | Area | Implemented behavior | QA coverage and limits |
 |---|---|---|
 | Startup and configuration | Flask app, environment-file loading, database URL configuration, CLI initialization/seed-data commands, and setup guidance when the database or seed roles are unavailable. | Tests cover environment selection, default XAMPP/MySQL URL, initialization, sample data, and database/seed-data error responses. Actual MySQL credentials, connectivity, migrations, and recovery are unverified. |
-| Account creation and sign-in | Public registration creates standard-user accounts; passwords are Werkzeug hashes. New passwords must be 8–16 characters, include a capital letter and a special character, and match the confirmation field. Registration JavaScript shows validation alerts, while the server independently enforces the same policy for public, administrator-created, and CLI-created accounts. | Integration tests cover registration, hashed-password login, policy boundaries, invalid passwords, confirmation mismatch, and rendering the registration validator and confirmation input. Failed-login auditing and administrator account recovery are also covered. Browser automation has not been run. The reserved development `admin` / `admin123` bootstrap account is an explicit exception; replace its credential before deployment. |
+| Account creation and sign-in | Public registration creates standard-user accounts; passwords are Werkzeug hashes. New passwords must be 8–16 characters, include an A-Z uppercase letter and a special character, and match the confirmation field. Registration JavaScript shows validation and success alerts; the server independently enforces policy for public, administrator-created, and CLI-created accounts. | Integration tests cover registration, hashed-password login, policy boundaries, invalid passwords, confirmation mismatch, and registration feedback markup. Failed-login auditing and administrator account recovery are also covered. Browser automation has not been run. The reserved development `admin` / `admin123` bootstrap account is an explicit exception; replace its credential before deployment. |
 | Sessions and request security | Flask-Login sessions, CSRF checks on writes, HttpOnly/SameSite cookies, configurable Secure cookies, and server-side authorization. | Integration tests exercise authenticated/unauthenticated routes and user/device access boundaries. This is not a penetration test; rate limiting, production HTTPS, and external security testing are not implemented or verified. |
 | Roles and administration | Seeded Administrator/User roles and permissions; administrator account creation, editing, deactivation, and log search/filtering. The reserved admin and final active administrator are protected. | Tests cover initialization, administrator access, user management, log queries, and role/status protections. |
 | Device inventory and ownership | Owners/registrants register, edit, and view devices; administrators can manage all devices. Standard-user detail responses expose approved fields only. | Tests cover device registration/persistence, owner boundaries, administrator access, details, and API error responses. |
@@ -23,7 +23,7 @@ This report covers the user-facing pages, Flask routes and services, and the ORM
 
 ### Security and error-handling coverage
 
-Tests exercise password hashing and policy enforcement, login failure handling/auditing, CSRF-protected writes, role and ownership boundaries, protected administrator accounts, and retention behavior. Input-validation tests reject invalid password length/complexity, confirmation mismatch, duplicate/reserved usernames, invalid user/device data, and invalid log filters. Database unavailability or missing seeded roles returns setup guidance (503) rather than a generic 500; invalid registration/API operations return validation errors. No penetration, dependency, production-configuration, or browser security assessment has been performed.
+Tests exercise password hashing and policy enforcement, login failure handling/auditing, writes using valid CSRF tokens, role and ownership boundaries, protected administrator accounts, and retention behavior. Missing/invalid CSRF-token rejection is not separately asserted. Input-validation tests reject invalid password length/complexity, confirmation mismatch, duplicate/reserved usernames, invalid user/device data, and invalid log filters. Database unavailability or missing seeded roles returns setup guidance (503) rather than a generic 500; invalid registration/API operations return validation errors. No penetration, dependency, production-configuration, or browser security assessment has been performed.
 
 ## User workflows and validation
 
@@ -63,7 +63,7 @@ Run from the repository root:
 .\.venv\Scripts\python.exe -m unittest discover -s device_monitoring_prototype\tests -v
 ```
 
-**Result:** 16 integration tests passed. Coverage includes page rendering; environment/database configuration; ORM schema and RBAC initialization; account creation/login, hash storage, and password policy; administrator and standard-user permissions; device inventory, history, lifecycle transitions, and retained deletion; log persistence/search; failure handling; and sample data. Tests use disposable SQLite databases; no production database, browser automation, or visual/accessibility testing was performed.
+**Result:** 17 integration tests passed. Coverage includes page rendering; environment/database configuration; ORM schema and RBAC initialization; account creation/login, hash storage, password policy, and registration feedback; administrator and standard-user permissions; device inventory, history, lifecycle transitions, and retained deletion; log persistence/search; failure handling; and sample data. Tests use disposable SQLite databases; no production database, browser automation, or visual/accessibility testing was performed.
 
 ## Release follow-up
 

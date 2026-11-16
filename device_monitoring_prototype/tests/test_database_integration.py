@@ -102,6 +102,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b'id="registerForm"', response.data)
         self.assertIn(b'id="confirm_password"', response.data)
         self.assertIn(b"js/register.js", response.data)
+        self.assertIn(b"js/register.js", self.client.get("/login").data)
 
     def test_environment_file_is_loaded_from_application_directory(self):
         with patch("device_monitoring_prototype.app.load_dotenv") as load_dotenv:
@@ -266,6 +267,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             ("short", "Abcdef!", "Abcdef!"),
             ("long", "Abcdefghijklmnop!", "Abcdefghijklmnop!"),
             ("no-capital", "abcdefg!", "abcdefg!"),
+            ("non-ascii-capital", "Äbcdefg!", "Äbcdefg!"),
             ("no-special", "Abcdefg1", "Abcdefg1"),
             ("mismatch", "Abcdefg!", "Abcdefg?"),
         )
@@ -305,6 +307,27 @@ class DatabaseIntegrationTest(unittest.TestCase):
                     },
                 )
                 self.assertEqual(response.status_code, 302)
+
+    def test_registration_success_shows_popup_on_sign_in_page(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            token = session["_csrf_token"]
+
+        response = self.client.post(
+            "/register",
+            data={
+                "csrf_token": token,
+                "full_name": "Registered User",
+                "email": "registered@example.com",
+                "username": "registered",
+                "password": "Passw0rd!",
+                "confirm_password": "Passw0rd!",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        login_page = self.client.get(response.headers["Location"])
+        self.assertIn(b"data-registration-success", login_page.data)
+        self.assertIn(b"Account created. You can now sign in.", login_page.data)
 
     def test_failed_login_is_recorded_without_storing_password(self):
         token = self.register_and_login()
