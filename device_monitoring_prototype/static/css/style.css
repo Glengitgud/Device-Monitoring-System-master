@@ -152,6 +152,11 @@ code {
     color: #ffffff;
 }
 
+.login-card .form-text,
+.login-card p .text-muted {
+    color: #ffffff !important;
+}
+
 .login-card .input-group .btn-outline-secondary {
     border-color: var(--dm-border);
     color: var(--dm-text-muted);
@@ -676,8 +681,18 @@ code {
     font-size: 0.9rem;
 }
 
+#deviceFormOwner {
+    background-color: var(--dm-darkest);
+}
+
 .form-select {
     color-scheme: dark;
+}
+
+#scanResults .table {
+    --bs-table-color: var(--dm-text);
+    --bs-table-bg: transparent;
+    color: var(--dm-text);
 }
 
 .form-control:focus, .form-select:focus {
