@@ -6,12 +6,12 @@
 
 ## System scope
 
-This report covers the implemented application described in `FEATURES_AND_FUTURE_WORK.md`. Items identified as future work are not treated as delivered or passing.
+This report covers the user-facing pages, Flask routes and services, and the ORM/MySQL schema described in `FEATURES_AND_FUTURE_WORK.md`. Items identified as future work are not treated as delivered or passing.
 
 | Area | Implemented behavior | QA coverage and limits |
 |---|---|---|
 | Startup and configuration | Flask app, environment-file loading, database URL configuration, setup guidance for unavailable databases. | Tests check environment-file selection, the default XAMPP/MySQL URL, initialization, and database/seed-data error responses. Actual local MySQL credentials and connectivity were not tested. |
-| Account creation and sign-in | Public registration creates standard-user accounts; passwords are Werkzeug hashes. New passwords must be 8–16 characters, include a capital letter and a special character, and match the confirmation field. The same password policy is applied to administrator-created and CLI-created accounts. | Tests cover registration, hashed-password login, policy boundaries, invalid passwords, confirmation mismatch, failed-login auditing, and administrator account recovery. The reserved development `admin` / `admin123` bootstrap account is an explicit exception; replace its credential before deployment. |
+| Account creation and sign-in | Public registration creates standard-user accounts; passwords are Werkzeug hashes. New passwords must be 8–16 characters, include a capital letter and a special character, and match the confirmation field. The same password policy is applied to administrator-created and CLI-created accounts. | Integration tests cover registration, hashed-password login, policy boundaries, invalid passwords, confirmation mismatch, failed-login auditing, and administrator account recovery. Password policy and confirmation are enforced server-side; custom browser-side password alerts are not yet implemented or tested. The reserved development `admin` / `admin123` bootstrap account is an explicit exception; replace its credential before deployment. |
 | Sessions and request security | Flask-Login sessions, CSRF checks on writes, HttpOnly/SameSite cookies, configurable Secure cookies, and server-side authorization. | Route and access-boundary checks run in integration tests. Rate limiting and production HTTPS are not implemented or tested. |
 | Roles and administration | Seeded Administrator/User roles and permissions; administrator account creation, editing, deactivation, and log search/filtering. The reserved admin and final active administrator are protected. | Tests cover initialization, administrator access, user management, log queries, and role/status protections. |
 | Device inventory and ownership | Owners/registrants register, edit, view, archive, and restore devices; administrators can manage all devices. Standard-user detail responses expose approved fields only. | Tests cover registration and persistence, owner boundaries, role-specific details, and administrative device management. |
@@ -39,9 +39,9 @@ The SQLAlchemy models and `schema.sql` define all 15 application tables:
 | `activity_logs` | Timestamped account/system actions with optional actor and entity reference. |
 | `logs` | Device-linked events such as registration, edits, archiving, and diagnostic history. |
 
-The models and schema define the keys, foreign-key relationships, uniqueness rules, status checks, and lookup indexes. Devices belong to an account and can have specifications, network history, interfaces, diagnostic runs, metrics, and device logs; diagnostic runs can have multiple checks. Account deactivation and device lifecycle changes retain their records. Connectivity status is distinct from active/archived/deleted lifecycle state.
+The models and schema define the primary and foreign keys, uniqueness rules, status and metric checks, and lookup indexes. Devices belong to an account and can have specifications, network history and interfaces, diagnostic runs, metrics, and device logs; diagnostic runs can have multiple checks. The account-role and role-permission associations implement RBAC. Account deactivation and device lifecycle changes retain their records. Connectivity status is distinct from active/archived/deleted lifecycle state.
 
-**Database verification boundary:** the test suite uses SQLite. It does not establish XAMPP/MySQL connectivity, MySQL DDL or migration compatibility, database permissions, or persistence after a MySQL restart. `db.create_all()` creates missing tables but does not update existing ones. Back up existing data and apply the applicable migration (`001`, `003`, and/or `004`, depending on the starting schema) before initialization. See `README.md` and `DATABASE_DESIGN.md`.
+**Database verification boundary:** the test suite uses isolated SQLite databases. It does not establish XAMPP/MySQL connectivity, MySQL DDL or migration compatibility, database permissions, or persistence after a MySQL restart. `db.create_all()` creates missing tables but does not update existing ones. Back up existing data and apply the migration path for the starting schema: earlier project schemas may need `001`, `002` (if device event logs are absent), and `004`; the original XAMPP prototype requires `003` and `004`. See `README.md` and `DATABASE_DESIGN.md`.
 
 ## Test results
 
@@ -51,7 +51,7 @@ Run from the repository root:
 .\.venv\Scripts\python.exe -m unittest discover -s device_monitoring_prototype\tests -v
 ```
 
-**Result:** 16 integration tests passed. Coverage includes page rendering, environment/database configuration, schema and RBAC initialization, account creation/login and password policy, admin and standard-user permissions, device inventory and lifecycle transitions, history/log persistence and filtering, and sample data. Tests use disposable SQLite databases; no production database, browser automation, or visual/accessibility testing was performed.
+**Result:** 16 integration tests passed. Coverage includes page rendering, environment/database configuration, ORM schema and RBAC initialization, account creation/login and password policy, admin and standard-user permissions, device inventory and lifecycle transitions, history/log persistence and filtering, and sample data. Tests use disposable SQLite databases; no production database, browser automation, or visual/accessibility testing was performed.
 
 ## Release follow-up
 
