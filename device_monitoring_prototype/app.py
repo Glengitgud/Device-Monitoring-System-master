@@ -7,6 +7,7 @@ import uuid
 import base64
 import io
 import json
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
@@ -504,7 +505,18 @@ def create_app(test_config=None):
             border=4,
         )
         image_buffer = io.BytesIO()
-        qr_code.save(image_buffer)
+        svg_root = ET.fromstring(qr_code.to_string())
+        svg_namespace = "{http://www.w3.org/2000/svg}"
+        svg_root.insert(
+            0,
+            ET.Element(
+                f"{svg_namespace}rect",
+                {"width": "100%", "height": "100%", "fill": "#ffffff"},
+            ),
+        )
+        for path in svg_root.iter(f"{svg_namespace}path"):
+            path.set("fill", "#111827")
+        image_buffer.write(ET.tostring(svg_root, encoding="utf-8"))
         encoded_qr = base64.b64encode(image_buffer.getvalue()).decode("ascii")
         response = jsonify(
             enrollment_url=enrollment_url,

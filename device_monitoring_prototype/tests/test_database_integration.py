@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import json
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 from sqlalchemy import inspect
@@ -1131,6 +1132,16 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
+        svg_bytes = base64.b64decode(first.json["qr_code"].split(",", 1)[1])
+        svg_root = ET.fromstring(svg_bytes)
+        svg_namespace = "{http://www.w3.org/2000/svg}"
+        background = next(svg_root.iter(f"{svg_namespace}rect"))
+        qr_pattern = next(svg_root.iter(f"{svg_namespace}path"))
+        self.assertEqual(background.get("fill"), "#ffffff")
+        self.assertEqual(qr_pattern.get("fill"), "#111827")
+        devices_page = self.client.get("/devices")
+        self.assertIn(b"qr-code-card", devices_page.data)
+        self.assertIn(b"deviceQrExpiryCard", devices_page.data)
         first_token = first.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         second_token = second.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         self.assertNotEqual(first_token, second_token)

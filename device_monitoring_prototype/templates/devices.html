@@ -89,11 +89,35 @@
                 <p id="deviceQrStatus" role="status">
                     Generate a one-use QR code for a Windows desktop or laptop.
                 </p>
-                <img id="deviceRegistrationQrImage" class="img-fluid d-none mb-3"
-                     alt="One-time device registration QR code">
-                <a id="deviceRegistrationQrLink" class="d-none" target="_blank"
-                   rel="noopener noreferrer">Open registration link</a>
-                <p id="deviceQrExpiry" class="small text-muted mt-2"></p>
+                <div id="deviceQrCard" class="qr-code-card d-none mx-auto mb-3">
+                    <img id="deviceRegistrationQrImage"
+                         class="img-fluid"
+                         alt="One-time device registration QR code">
+                </div>
+                <div id="deviceQrExpiryCard" class="qr-expiration-card d-none mx-auto mb-3"
+                     aria-live="polite">
+                    <h6 class="mb-3">Registration code status</h6>
+                    <div class="row g-2 text-start">
+                        <div class="col-4">
+                            <span class="qr-status-label">Remaining time</span>
+                            <strong id="deviceQrRemainingTime">--</strong>
+                        </div>
+                        <div class="col-4">
+                            <span class="qr-status-label">Expiration</span>
+                            <strong id="deviceQrExpiryStatus">--</strong>
+                        </div>
+                        <div class="col-4">
+                            <span class="qr-status-label">Token</span>
+                            <strong id="deviceQrTokenStatus">--</strong>
+                        </div>
+                    </div>
+                </div>
+                <div class="d-flex flex-wrap justify-content-center align-items-center gap-2">
+                    <a id="deviceRegistrationQrLink" class="d-none" target="_blank"
+                       rel="noopener noreferrer">Open registration link</a>
+                    <button id="copyDeviceQrLinkBtn" class="btn btn-sm btn-outline-secondary d-none"
+                            type="button">Copy link</button>
+                </div>
                 <p class="small mb-0">
                     Scanning starts the agent download. The agent displays the requested
                     specifications and asks for your confirmation before sending them.
