@@ -2,6 +2,11 @@ import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+import base64
+import hashlib
+import json
+from types import SimpleNamespace
 
 from sqlalchemy import inspect
 from sqlalchemy.engine import make_url
@@ -10,9 +15,11 @@ from werkzeug.security import generate_password_hash
 
 from device_monitoring_prototype.app import _database_uri, create_app
 from device_monitoring_prototype.app import app as default_app
+from device_monitoring_prototype import device_agent
 from device_monitoring_prototype.models import (
     ActivityLog,
     Device,
+    DeviceRegistrationToken,
     DeviceMetric,
     DiagnosticRun,
     Log,
@@ -210,6 +217,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
         for path in ("/dashboard", "/devices", "/api/dashboard", "/api/devices"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 200)
+        devices_page = self.client.get("/devices")
+        self.assertIn(b'id="generateDeviceQrBtn"', devices_page.data)
+        self.assertIn(b'id="deviceStatusFilter"', devices_page.data)
         self.assertEqual(self.client.get("/archived-devices").status_code, 200)
         static_response = self.client.get("/static/css/style.css")
         self.assertEqual(static_response.status_code, 200)
@@ -869,6 +879,247 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 204)
         with self.app.app_context():
             self.assertEqual(db.session.get(User, managed_user_id).status, "inactive")
+    def test_qr_agent_enrollment_persists_specs_and_rejects_token_reuse(self):
+        csrf = self.register_and_login()
+        qr_response = self.client.post(
+            "/api/device-registration-tokens",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(qr_response.status_code, 200, qr_response.get_data(as_text=True))
+        qr_data = qr_response.json
+        self.assertTrue(qr_data["qr_code"].startswith("data:image/svg+xml;base64,"))
+        qr_svg = base64.b64decode(qr_data["qr_code"].split(",", 1)[1])
+        self.assertIn(b"<svg", qr_svg)
+        token = qr_data["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
+        with self.app.app_context():
+            registration = DeviceRegistrationToken.query.one()
+            self.assertEqual(registration.user.username, "testuser")
+            self.assertNotEqual(registration.token_hash, token)
+            self.assertEqual(len(registration.token_hash), 64)
+
+        enrollment_page = self.client.get(f"/enroll/{token}")
+        self.assertEqual(enrollment_page.status_code, 200)
+        self.assertIn(b"agentDownload", enrollment_page.data)
+        self.assertIn(b"agentDownload').click()", enrollment_page.data)
+        download = self.client.get(f"/enroll/{token}/agent.py")
+        self.assertEqual(download.status_code, 200)
+        self.assertIn(token.encode(), download.data)
+        self.assertNotIn(b"__REGISTRATION_TOKEN__", download.data)
+        self.assertIn("no-store", download.headers["Cache-Control"])
+
+        specifications = {
+            "cpu_name": "Example CPU",
+            "ram_capacity_bytes": 16 * 1024**3,
+            "ram_usage_bytes": 8 * 1024**3,
+            "cpu_cores": 8,
+            "storage_devices": [
+                {
+                    "name": "C:",
+                    "total_bytes": 512 * 1024**3,
+                    "available_bytes": 256 * 1024**3,
+                }
+            ],
+            "storage_total_bytes": 512 * 1024**3,
+            "storage_available_bytes": 256 * 1024**3,
+            "gpu_information": ["Example GPU"],
+            "motherboard_brand": "Example Board",
+            "operating_system_name": "Windows 11 Pro",
+            "operating_system_version": "10.0.26100",
+            "network_adapters": ["Ethernet"],
+            "ip_addresses": ["192.0.2.15", "2001:db8::1"],
+        }
+        payload = {
+            "name": "Test Desktop",
+            "device_type": "Desktop",
+            "specifications": specifications,
+        }
+        agent_client = self.app.test_client()
+        invalid_payload = {
+            **payload,
+            "specifications": {**specifications, "ram_usage_bytes": 17 * 1024**3},
+        }
+        invalid = agent_client.post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json=invalid_payload,
+        )
+        self.assertEqual(invalid.status_code, 400, invalid.get_data(as_text=True))
+        invalid_specifications = [
+            {**specifications, "ip_addresses": ["not-an-ip"]},
+            {**specifications, "storage_total_bytes": 1},
+            {**specifications, "cpu_cores": 513},
+            {**specifications, "unexpected": "field"},
+        ]
+        for invalid_spec in invalid_specifications:
+            response = agent_client.post(
+                "/api/device-agent/enroll",
+                headers={"Authorization": f"Bearer {token}"},
+                json={**payload, "specifications": invalid_spec},
+            )
+            self.assertEqual(response.status_code, 400)
+
+        response = agent_client.post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        device_id = response.json["device_id"]
+        details = self.client.get(f"/api/devices/{device_id}")
+        self.assertEqual(details.status_code, 200)
+        self.assertEqual(details.json["specification"]["cpu_model"], "Example CPU")
+        self.assertEqual(
+            details.json["specification"]["ram_usage_bytes"], 8 * 1024**3
+        )
+        self.assertEqual(
+            details.json["specification"]["storage_devices"],
+            specifications["storage_devices"],
+        )
+        self.assertEqual(
+            details.json["specification"]["network_adapters"], ["Ethernet"]
+        )
+        self.assertEqual(
+            details.json["specification"]["ip_addresses"],
+            ["192.0.2.15", "2001:db8::1"],
+        )
+        specifications_page = self.client.get(
+            f"/devices/{device_id}/specifications"
+        )
+        self.assertEqual(specifications_page.status_code, 200)
+        self.assertIn(b"Detected Device Specifications", specifications_page.data)
+        self.assertIn(b"Example Board", specifications_page.data)
+        self.assertIn(b"Device registered with QR-based agent", specifications_page.data)
+        with self.app.app_context():
+            device = db.session.get(Device, device_id)
+            self.assertEqual(device.owner.username, "testuser")
+            self.assertEqual(device.registered_by.id, device.owner_user_id)
+            self.assertEqual(device.status, "online")
+            self.assertIsNotNone(device.registered_at)
+            self.assertIsNotNone(device.updated_at)
+            self.assertEqual(device.network_records[0].ip_address, "192.0.2.15")
+            token_record = DeviceRegistrationToken.query.one()
+            self.assertIsNotNone(token_record.used_at)
+            self.assertEqual(token_record.device_id, device.id)
+            self.assertEqual(token_record.user_id, device.owner_user_id)
+
+        replay = agent_client.post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+        )
+        self.assertEqual(replay.status_code, 401)
+
+        other_client = self.app.test_client()
+        other_client.get("/register")
+        with other_client.session_transaction() as session:
+            other_csrf = session["_csrf_token"]
+        other_client.post(
+            "/register",
+            data={
+                "csrf_token": other_csrf,
+                "full_name": "Other User",
+                "email": "other@example.com",
+                "username": "otheruser",
+                "password": "OtherUser1!",
+                "confirm_password": "OtherUser1!",
+            },
+        )
+        other_client.post(
+            "/login",
+            data={
+                "csrf_token": other_csrf,
+                "username": "otheruser",
+                "password": "OtherUser1!",
+            },
+        )
+        self.assertEqual(
+            other_client.get(f"/devices/{device_id}/specifications").status_code,
+            404,
+        )
+        self.assertEqual(
+            self.app.test_cli_runner().invoke(args=["init-db"]).exit_code,
+            0,
+        )
+        admin_client = self.app.test_client()
+        admin_client.get("/login")
+        with admin_client.session_transaction() as session:
+            admin_csrf = session["_csrf_token"]
+        admin_login = admin_client.post(
+            "/login",
+            data={
+                "csrf_token": admin_csrf,
+                "username": "admin",
+                "password": "admin123",
+            },
+        )
+        self.assertEqual(admin_login.status_code, 302)
+        self.assertEqual(
+            admin_client.get(f"/devices/{device_id}/specifications").status_code,
+            200,
+        )
+
+    def test_device_registration_qr_expires_and_requires_authenticated_creation(self):
+        self.assertEqual(
+            self.client.post("/api/device-registration-tokens").status_code, 400
+        )
+        csrf = self.register_and_login()
+        first = self.client.post(
+            "/api/device-registration-tokens",
+            headers={"X-CSRF-Token": csrf},
+        )
+        second = self.client.post(
+            "/api/device-registration-tokens",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_token = first.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
+        second_token = second.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
+        self.assertNotEqual(first_token, second_token)
+        with self.app.app_context():
+            registration = DeviceRegistrationToken.query.filter_by(
+                token_hash=hashlib.sha256(first_token.encode()).hexdigest()
+            ).one()
+            registration.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            db.session.commit()
+        expired_page = self.client.get(f"/enroll/{first_token}")
+        self.assertEqual(expired_page.status_code, 410)
+
+    def test_windows_agent_parses_only_the_requested_inventory_fields(self):
+        expected = {
+            "cpu_name": "Example CPU",
+            "cpu_cores": 4,
+            "ram_capacity_bytes": 8 * 1024**3,
+            "ram_usage_bytes": 3 * 1024**3,
+            "storage_devices": [
+                {"name": "C:", "total_bytes": 256, "available_bytes": 128}
+            ],
+            "storage_total_bytes": 256,
+            "storage_available_bytes": 128,
+            "gpu_information": ["Example GPU"],
+            "motherboard_brand": "Example Board",
+            "operating_system_name": "Windows 11",
+            "operating_system_version": "10.0.26100",
+            "network_adapters": ["Ethernet"],
+            "ip_addresses": ["192.0.2.20"],
+        }
+        with patch.dict(
+            device_agent.collect_specifications.__globals__,
+            {"os": SimpleNamespace(name="nt")},
+        ):
+            with patch.object(
+                device_agent.subprocess,
+                "run",
+                return_value=SimpleNamespace(stdout=json.dumps(expected)),
+            ) as powershell:
+                detected = device_agent.collect_specifications()
+        self.assertEqual(detected, expected)
+        self.assertIn("Win32_Processor", powershell.call_args.args[0][-1])
+        self.assertNotIn("-ExecutionPolicy", powershell.call_args.args[0])
+        self.assertEqual(
+            {key for _, key in device_agent.FIELD_LABELS},
+            set(expected),
+        )
 
 
 if __name__ == "__main__":

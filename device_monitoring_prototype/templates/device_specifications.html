@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Detected Specifications - DevMonitor{% endblock %}
+{% block page_title %}Detected Device Specifications{% endblock %}
+
+{% block content %}
+<div class="content-card mb-4">
+    <div class="content-card-header d-flex justify-content-between align-items-center">
+        <h6 class="mb-0"><i class="bi bi-pc-display me-2"></i>{{ device.device_name }}</h6>
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('devices') }}">
+            <i class="bi bi-arrow-left me-1"></i>Back to My Devices
+        </a>
+    </div>
+    <div class="content-card-body">
+        <p class="text-muted">
+            Device ID {{ device.id }} · {{ device.device_type }} ·
+            {{ device.status|capitalize }} · Owner {{ device.owner.full_name }}
+        </p>
+        {% if specification_fields %}
+            <div class="table-responsive">
+                <table class="table table-hover align-middle">
+                    <tbody>
+                        {% for label, value in specification_fields %}
+                        <tr>
+                            <th scope="row" class="w-25">{{ label }}</th>
+                            <td>
+                                {% if value is none or value == '' or value == [] %}
+                                    Not available
+                                {% else %}
+                                    {{ value }}
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <div class="alert alert-info mb-0">
+                No detected specifications have been registered for this device.
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="content-card">
+    <div class="content-card-header">
+        <h6 class="mb-0"><i class="bi bi-clock-history me-2"></i>Device Registration History</h6>
+    </div>
+    <div class="content-card-body">
+        {% if registration_history %}
+            <div class="table-responsive">
+                <table class="table table-hover align-middle">
+                    <thead><tr><th>Event</th><th>Date and Time</th></tr></thead>
+                    <tbody>
+                        {% for entry in registration_history %}
+                        <tr>
+                            <td>{{ entry.event }}</td>
+                            <td>{{ entry.timestamp.isoformat() }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="text-muted mb-0">No device events have been recorded.</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

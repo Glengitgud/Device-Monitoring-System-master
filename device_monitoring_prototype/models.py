@@ -97,6 +97,11 @@ class User(UserMixin, db.Model):
     registered_devices = db.relationship(
         "Device", foreign_keys="Device.registered_by_user_id", back_populates="registered_by"
     )
+    registration_tokens = db.relationship(
+        "DeviceRegistrationToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     diagnostic_runs = db.relationship("DiagnosticRun", back_populates="initiated_by")
     activity_logs = db.relationship("ActivityLog", back_populates="actor")
 
@@ -193,6 +198,9 @@ class Device(db.Model):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    registration_token = db.relationship(
+        "DeviceRegistrationToken", back_populates="device", uselist=False
+    )
     network_interfaces = db.relationship(
         "NetworkInterface",
         back_populates="device",
@@ -227,6 +235,30 @@ class Device(db.Model):
 
 class DeviceSpecification(db.Model):
     __tablename__ = "device_specifications"
+    __table_args__ = (
+        CheckConstraint(
+            "cpu_cores IS NULL OR (cpu_cores >= 0 AND cpu_cores <= 512)",
+            name="ck_device_specifications_cpu_cores",
+        ),
+        CheckConstraint(
+            "memory_bytes IS NULL OR memory_bytes >= 0",
+            name="ck_device_specifications_memory",
+        ),
+        CheckConstraint(
+            "ram_usage_bytes IS NULL OR (ram_usage_bytes >= 0 AND "
+            "(memory_bytes IS NULL OR ram_usage_bytes <= memory_bytes))",
+            name="ck_device_specifications_ram_usage",
+        ),
+        CheckConstraint(
+            "storage_bytes IS NULL OR storage_bytes >= 0",
+            name="ck_device_specifications_storage",
+        ),
+        CheckConstraint(
+            "storage_available_bytes IS NULL OR (storage_available_bytes >= 0 AND "
+            "(storage_bytes IS NULL OR storage_available_bytes <= storage_bytes))",
+            name="ck_device_specifications_storage_available",
+        ),
+    )
 
     device_id = db.Column(
         ID_TYPE,
@@ -237,16 +269,48 @@ class DeviceSpecification(db.Model):
     cpu_cores = db.Column(db.SmallInteger)
     cpu_threads = db.Column(db.SmallInteger)
     memory_bytes = db.Column(ID_TYPE)
+    ram_usage_bytes = db.Column(ID_TYPE)
     storage_bytes = db.Column(ID_TYPE)
+    storage_available_bytes = db.Column(ID_TYPE)
+    storage_devices = db.Column(db.JSON)
     gpu_model = db.Column(db.String(255))
     bios_version = db.Column(db.String(120))
     motherboard_model = db.Column(db.String(120))
+    motherboard_brand = db.Column(db.String(120))
+    operating_system_name = db.Column(db.String(120))
     operating_system_version = db.Column(db.String(255))
+    network_adapters = db.Column(db.JSON)
+    ip_addresses = db.Column(db.JSON)
     collected_at = db.Column(
         db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
 
     device = db.relationship("Device", back_populates="hardware_spec")
+
+
+class DeviceRegistrationToken(db.Model):
+    __tablename__ = "device_registration_tokens"
+    __table_args__ = (
+        db.Index("ix_device_registration_tokens_user_expiry", "user_id", "expires_at"),
+    )
+
+    id = db.Column(ID_TYPE, primary_key=True)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True)
+    user_id = db.Column(
+        ID_TYPE, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    device_id = db.Column(
+        ID_TYPE, db.ForeignKey("devices.id", ondelete="SET NULL"), unique=True
+    )
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    used_at = db.Column(db.DateTime(timezone=True))
+    revoked_at = db.Column(db.DateTime(timezone=True))
+
+    user = db.relationship("User", back_populates="registration_tokens")
+    device = db.relationship("Device", back_populates="registration_token")
 
 
 class NetworkInterface(db.Model):

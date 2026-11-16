@@ -73,6 +73,25 @@ CREATE TABLE devices (
     )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE device_registration_tokens (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    token_hash CHAR(64) NOT NULL,
+    user_id BIGINT NOT NULL,
+    device_id BIGINT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME NULL,
+    revoked_at DATETIME NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_device_registration_tokens_hash (token_hash),
+    UNIQUE KEY uq_device_registration_tokens_device (device_id),
+    KEY ix_device_registration_tokens_user_expiry (user_id, expires_at),
+    CONSTRAINT fk_device_registration_tokens_user FOREIGN KEY (user_id)
+        REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT fk_device_registration_tokens_device FOREIGN KEY (device_id)
+        REFERENCES devices (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE logs (
     id BIGINT NOT NULL AUTO_INCREMENT,
     device_id BIGINT NOT NULL,
@@ -112,15 +131,40 @@ CREATE TABLE device_specifications (
     cpu_cores SMALLINT NULL,
     cpu_threads SMALLINT NULL,
     memory_bytes BIGINT NULL,
+    ram_usage_bytes BIGINT NULL,
     storage_bytes BIGINT NULL,
+    storage_available_bytes BIGINT NULL,
+    storage_devices JSON NULL,
     gpu_model VARCHAR(255) NULL,
     bios_version VARCHAR(120) NULL,
     motherboard_model VARCHAR(120) NULL,
+    motherboard_brand VARCHAR(120) NULL,
+    operating_system_name VARCHAR(120) NULL,
     operating_system_version VARCHAR(255) NULL,
+    network_adapters JSON NULL,
+    ip_addresses JSON NULL,
     collected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (device_id),
     CONSTRAINT fk_device_specifications_device FOREIGN KEY (device_id)
-        REFERENCES devices (id) ON DELETE CASCADE
+        REFERENCES devices (id) ON DELETE CASCADE,
+    CONSTRAINT ck_device_specifications_cpu_cores CHECK (
+        cpu_cores IS NULL OR (cpu_cores >= 0 AND cpu_cores <= 512)
+    ),
+    CONSTRAINT ck_device_specifications_memory CHECK (
+        memory_bytes IS NULL OR memory_bytes >= 0
+    ),
+    CONSTRAINT ck_device_specifications_ram_usage CHECK (
+        ram_usage_bytes IS NULL OR
+        (ram_usage_bytes >= 0 AND (memory_bytes IS NULL OR ram_usage_bytes <= memory_bytes))
+    ),
+    CONSTRAINT ck_device_specifications_storage CHECK (
+        storage_bytes IS NULL OR storage_bytes >= 0
+    ),
+    CONSTRAINT ck_device_specifications_storage_available CHECK (
+        storage_available_bytes IS NULL OR
+        (storage_available_bytes >= 0 AND
+         (storage_bytes IS NULL OR storage_available_bytes <= storage_bytes))
+    )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE network_interfaces (

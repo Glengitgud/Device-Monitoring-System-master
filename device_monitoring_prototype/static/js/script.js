@@ -14,6 +14,7 @@ let userVisibleCount = ITEMS_PER_PAGE;
 let usersLoaded = false;
 let deviceDetailsRequestId = 0;
 let deviceSearch = '';
+let deviceStatusFilter = 'all';
 let archivedDeviceSearch = '';
 let archivedDevices = [];
 let userSearch = '';
@@ -137,7 +138,11 @@ async function refreshDevices() {
 function renderDevicesCards() {
     const grid = document.getElementById('devicesCardGrid');
     if (!grid) return;
-    let rows = devices.filter(device => device.name.toLowerCase().includes(deviceSearch));
+    let rows = devices.filter(device =>
+        device.name.toLowerCase().includes(deviceSearch)
+        && (deviceStatusFilter === 'all'
+            || device.status.toLowerCase() === deviceStatusFilter)
+    );
     rows = sortRows(rows, deviceSort, 'name');
     const start = (devicePage - 1) * ITEMS_PER_PAGE;
     const pageRows = rows.slice(start, start + ITEMS_PER_PAGE);
@@ -281,6 +286,22 @@ function initDevicesPage() {
         deviceSort = event.target.value;
         renderDevicesCards();
     });
+    document.getElementById('deviceStatusFilter')?.addEventListener('change', event => {
+        deviceStatusFilter = event.target.value;
+        devicePage = 1;
+        renderDevicesCards();
+    });
+    const qrModal = bootstrap.Modal.getOrCreateInstance(
+        document.getElementById('deviceRegistrationQrModal')
+    );
+    document.getElementById('generateDeviceQrBtn')?.addEventListener('click', () => {
+        qrModal.show();
+        generateDeviceRegistrationQr();
+    });
+    document.getElementById('createDeviceQrBtn')?.addEventListener(
+        'click',
+        generateDeviceRegistrationQr
+    );
 }
 
 async function openDeviceModal(mode, deviceId) {
@@ -337,7 +358,22 @@ async function openDeviceModal(mode, deviceId) {
 }
 
 function renderDeviceDetails(device) {
-    const value = item => item == null || item === '' ? 'Not available' : String(item);
+    const displayBytes = bytes => `${Number(bytes).toLocaleString()} bytes`;
+    const value = item => {
+        if (item == null || item === '') return 'Not available';
+        if (Array.isArray(item)) {
+            return item.map(value).join(', ') || 'None detected';
+        }
+        if (typeof item === 'object') {
+            if ('name' in item && 'total_bytes' in item) {
+                return `${item.name}: ${displayBytes(item.total_bytes)} total, ${
+                    displayBytes(item.available_bytes)
+                } available`;
+            }
+            return JSON.stringify(item);
+        }
+        return String(item);
+    };
     const card = (label, item) => `
         <div class="device-information-card">
             <span class="device-information-label">${escapeHTML(label)}</span>
@@ -363,15 +399,21 @@ function renderDeviceDetails(device) {
             ['IP Address', device.ip_address],
             ['Date Registered', device.registered_at],
         ]) + section('Device Specifications', [
-            ['CPU', specification.cpu_model], ['CPU Cores', specification.cpu_cores],
-            ['CPU Threads', specification.cpu_threads],
-            ['Memory (bytes)', specification.memory_bytes],
-            ['Storage (bytes)', specification.storage_bytes],
-            ['GPU', specification.gpu_model],
-            ['BIOS Version', specification.bios_version],
-            ['Motherboard', specification.motherboard_model],
+            ['CPU Name', specification.cpu_model], ['Number of CPU Cores', specification.cpu_cores],
+            ['RAM Capacity', specification.memory_bytes],
+            ['RAM Usage', specification.ram_usage_bytes],
+            ['Storage Devices', specification.storage_devices],
+            ['Total Storage Capacity', specification.storage_bytes],
+            ['Available Storage Capacity', specification.storage_available_bytes],
+            ['GPU Information', specification.gpu_model],
+            ['Motherboard Brand', specification.motherboard_brand || specification.motherboard_model],
+            ['Operating System Name', specification.operating_system_name || device.operating_system],
             ['Operating System Version', specification.operating_system_version],
-        ]);
+            ['Installed Network Adapters', specification.network_adapters],
+            ['IP Addresses', specification.ip_addresses || [device.ip_address]],
+        ]) + `<p class="mt-3 mb-0"><a class="btn btn-sm btn-outline-primary"
+             href="/devices/${encodeURIComponent(device.id || selectedDeviceId)}/specifications">
+             View detected device specifications</a></p>`;
     }
     const sections = [
         section('Device', [
@@ -398,12 +440,19 @@ function renderDeviceDetails(device) {
         ]),
         section('Hardware Specification', [
             ['Device ID', specification.device_id],
-            ['CPU', specification.cpu_model], ['CPU Cores', specification.cpu_cores],
+            ['CPU Name', specification.cpu_model], ['CPU Cores', specification.cpu_cores],
             ['CPU Threads', specification.cpu_threads], ['Memory (bytes)', specification.memory_bytes],
-            ['Storage (bytes)', specification.storage_bytes], ['GPU', specification.gpu_model],
+            ['RAM Usage (bytes)', specification.ram_usage_bytes],
+            ['Storage Devices', specification.storage_devices],
+            ['Storage (bytes)', specification.storage_bytes],
+            ['Available Storage (bytes)', specification.storage_available_bytes],
+            ['GPU Information', specification.gpu_model],
             ['BIOS Version', specification.bios_version],
-            ['Motherboard', specification.motherboard_model],
+            ['Motherboard Brand', specification.motherboard_brand || specification.motherboard_model],
+            ['Operating System Name', specification.operating_system_name],
             ['Specification OS Version', specification.operating_system_version],
+            ['Installed Network Adapters', specification.network_adapters],
+            ['IP Addresses', specification.ip_addresses],
             ['Collected At', specification.collected_at],
         ]),
         section('Network Records', (device.network_records || []).flatMap(record => [
@@ -462,7 +511,36 @@ function renderDeviceDetails(device) {
             ['Occurred At', entry.occurred_at],
         ])),
     ];
-    return sections.join('');
+    return sections.join('') + `<p class="mt-3 mb-0"><a class="btn btn-sm btn-outline-primary"
+        href="/devices/${encodeURIComponent(device.id || selectedDeviceId)}/specifications">
+        View detected device specifications</a></p>`;
+}
+
+async function generateDeviceRegistrationQr() {
+    const button = document.getElementById('createDeviceQrBtn');
+    const image = document.getElementById('deviceRegistrationQrImage');
+    const link = document.getElementById('deviceRegistrationQrLink');
+    const status = document.getElementById('deviceQrStatus');
+    const expiry = document.getElementById('deviceQrExpiry');
+    button.disabled = true;
+    image.classList.add('d-none');
+    link.classList.add('d-none');
+    expiry.textContent = '';
+    status.textContent = 'Creating a secure one-use registration code...';
+    try {
+        const result = await api('/api/device-registration-tokens', { method: 'POST' });
+        image.src = result.qr_code;
+        image.classList.remove('d-none');
+        link.href = result.enrollment_url;
+        link.classList.remove('d-none');
+        expiry.textContent = `Expires ${new Date(result.expires_at).toLocaleString()}.`;
+        status.textContent = 'Your QR code is ready.';
+    } catch (error) {
+        status.textContent = error.message;
+        showToast(error.message, 'danger');
+    } finally {
+        button.disabled = false;
+    }
 }
 
 async function saveDevice() {

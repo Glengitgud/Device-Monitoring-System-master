@@ -4,6 +4,9 @@ import os
 import re
 import secrets
 import uuid
+import base64
+import io
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus, urljoin, urlsplit
@@ -17,6 +20,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     session,
     url_for,
 )
@@ -28,6 +32,8 @@ from flask_login import (
     logout_user,
 )
 from dotenv import load_dotenv
+import qrcode
+from qrcode.image.svg import SvgPathImage
 from sqlalchemy import String, cast, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -50,6 +56,10 @@ from device_monitoring_prototype.services import (
     create_user,
     deactivate_user,
     record_diagnostic,
+    find_valid_registration_token,
+    issue_device_registration_token,
+    register_agent_device,
+    RegistrationTokenError,
     restore_device,
     soft_delete_device,
     validate_password,
@@ -88,6 +98,7 @@ def create_app(test_config=None):
     )
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("SECRET_KEY") or secrets.token_hex(32),
+        PUBLIC_BASE_URL=os.environ.get("PUBLIC_BASE_URL", "").rstrip("/"),
         SQLALCHEMY_DATABASE_URI=_database_uri(),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True},
@@ -147,7 +158,7 @@ def create_app(test_config=None):
             if request.path.startswith("/api/"):
                 return jsonify(error="This account is inactive."), 401
             return redirect(url_for("login"))
-        if request.method == "POST":
+        if request.method == "POST" and request.endpoint != "submit_agent_enrollment":
             submitted = request.headers.get("X-CSRF-Token")
             if not submitted:
                 submitted = request.form.get("csrf_token")
@@ -189,6 +200,19 @@ def create_app(test_config=None):
 
     def api_error(error, status=400):
         return jsonify(error=str(error)), status
+
+    def enrollment_page(download_url=None, message=None, status=200):
+        response = app.make_response(
+            render_template(
+                "enroll.html",
+                download_url=download_url,
+                message=message,
+            )
+        )
+        response.status_code = status
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     def can_manage_device(device):
         can_access_device(device)
@@ -333,6 +357,66 @@ def create_app(test_config=None):
     def devices():
         return render_template("devices.html", active_page="devices")
 
+    @app.get("/devices/<int:device_id>/specifications")
+    @login_required
+    def device_specifications(device_id):
+        device = db.get_or_404(Device, device_id)
+        can_access_device(device)
+        specification = device.hardware_spec
+        fields = [
+            (
+                "Registration Date and Time",
+                device.registered_at.isoformat() if device.registered_at else None,
+            ),
+            (
+                "Last Updated Date and Time",
+                device.updated_at.isoformat() if device.updated_at else None,
+            ),
+            ("Device Status", device.status),
+        ]
+        if specification:
+            def format_bytes(value):
+                if value is None:
+                    return None
+                return f"{value:,} bytes ({value / (1024 ** 3):.2f} GiB)"
+
+            storage_devices = [
+                f"{item['name']}: {format_bytes(item['total_bytes'])} total, "
+                f"{format_bytes(item['available_bytes'])} available"
+                for item in (specification.storage_devices or [])
+            ]
+            fields = [
+                ("CPU Name", specification.cpu_model),
+                ("RAM Capacity", format_bytes(specification.memory_bytes)),
+                ("RAM Usage", format_bytes(specification.ram_usage_bytes)),
+                ("Number of CPU Cores", specification.cpu_cores),
+                ("Storage Devices", ", ".join(storage_devices)),
+                ("Total Storage Capacity", format_bytes(specification.storage_bytes)),
+                (
+                    "Available Storage Capacity",
+                    format_bytes(specification.storage_available_bytes),
+                ),
+                ("GPU Information", specification.gpu_model),
+                ("Motherboard Brand", specification.motherboard_brand),
+                ("Operating System Name", specification.operating_system_name),
+                ("Operating System Version", specification.operating_system_version),
+                (
+                    "Installed Network Adapters",
+                    ", ".join(specification.network_adapters or []),
+                ),
+                ("IP Address", ", ".join(specification.ip_addresses or [])),
+            ] + fields
+        registration_history = Log.query.filter_by(device_id=device.id).order_by(
+            Log.timestamp.desc(), Log.id.desc()
+        ).all()
+        return render_template(
+            "device_specifications.html",
+            active_page="devices",
+            device=device,
+            specification_fields=fields,
+            registration_history=registration_history,
+        )
+
     @app.get("/archived-devices")
     @login_required
     def archived_devices():
@@ -342,6 +426,111 @@ def create_app(test_config=None):
     @admin_required
     def admin():
         return render_template("admin.html", active_page="admin")
+
+    @app.post("/api/device-registration-tokens")
+    @login_required
+    def create_device_registration_token():
+        base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
+        parsed_base = urlsplit(base_url)
+        if (
+            parsed_base.scheme not in {"http", "https"}
+            or not parsed_base.netloc
+            or parsed_base.username
+            or parsed_base.password
+            or parsed_base.path not in {"", "/"}
+            or parsed_base.query
+            or parsed_base.fragment
+        ):
+            return api_error(
+                "Set PUBLIC_BASE_URL to the application origin before generating a QR code.",
+                500,
+            )
+        token, expires_at = issue_device_registration_token(current_user)
+        enrollment_url = f"{base_url}{url_for('device_enrollment', token=token)}"
+        qr_code = qrcode.make(
+            enrollment_url,
+            image_factory=SvgPathImage,
+            box_size=8,
+            border=4,
+        )
+        image_buffer = io.BytesIO()
+        qr_code.save(image_buffer)
+        encoded_qr = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        response = jsonify(
+            enrollment_url=enrollment_url,
+            qr_code=f"data:image/svg+xml;base64,{encoded_qr}",
+            expires_at=expires_at.isoformat(),
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/enroll/<token>")
+    def device_enrollment(token):
+        if find_valid_registration_token(token) is None:
+            return enrollment_page(
+                message="This device registration QR code has expired or was already used.",
+                status=410,
+            )
+        return enrollment_page(
+            download_url=url_for("download_device_agent", token=token)
+        )
+
+    @app.get("/enroll/<token>/agent.py")
+    def download_device_agent(token):
+        if find_valid_registration_token(token) is None:
+            return enrollment_page(
+                message="This device registration QR code has expired or was already used.",
+                status=410,
+            )
+        base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
+        parsed_base = urlsplit(base_url)
+        if (
+            parsed_base.scheme not in {"http", "https"}
+            or not parsed_base.netloc
+            or parsed_base.username
+            or parsed_base.password
+            or parsed_base.path not in {"", "/"}
+            or parsed_base.query
+            or parsed_base.fragment
+        ):
+            abort(503)
+        agent_path = Path(__file__).resolve().parent / "device_agent.py"
+        agent_source = agent_path.read_text(encoding="utf-8")
+        submission_url = f"{base_url}{url_for('submit_agent_enrollment')}"
+        agent_source = agent_source.replace(
+            '"__REGISTRATION_TOKEN__"', json.dumps(token)
+        ).replace('"__SUBMISSION_URL__"', json.dumps(submission_url))
+        response = send_file(
+            io.BytesIO(agent_source.encode("utf-8")),
+            mimetype="text/x-python",
+            as_attachment=True,
+            download_name="devmonitor-device-agent.py",
+            max_age=0,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    @app.post("/api/device-agent/enroll")
+    def submit_agent_enrollment():
+        authorization = request.headers.get("Authorization", "")
+        scheme, separator, token = authorization.partition(" ")
+        if not separator or scheme.casefold() != "bearer":
+            return api_error("A valid device registration token is required.", 401)
+        try:
+            device = register_agent_device(token, api_data())
+        except RegistrationTokenError as error:
+            return api_error(error, 401)
+        except ValidationError as error:
+            return api_error(error)
+        return jsonify(
+            device_id=device.id,
+            asset_tag=device.asset_tag,
+            name=device.device_name,
+            owner_user_id=device.owner_user_id,
+            registered_at=device.registered_at.isoformat(),
+        ), 201
 
     @app.get("/api/devices")
     @login_required
@@ -450,11 +639,18 @@ def create_app(test_config=None):
                 "cpu_cores": device.hardware_spec.cpu_cores,
                 "cpu_threads": device.hardware_spec.cpu_threads,
                 "memory_bytes": device.hardware_spec.memory_bytes,
+                "ram_usage_bytes": device.hardware_spec.ram_usage_bytes,
                 "storage_bytes": device.hardware_spec.storage_bytes,
+                "storage_available_bytes": device.hardware_spec.storage_available_bytes,
+                "storage_devices": device.hardware_spec.storage_devices or [],
                 "gpu_model": device.hardware_spec.gpu_model,
                 "bios_version": device.hardware_spec.bios_version,
                 "motherboard_model": device.hardware_spec.motherboard_model,
+                "motherboard_brand": device.hardware_spec.motherboard_brand,
+                "operating_system_name": device.hardware_spec.operating_system_name,
                 "operating_system_version": device.hardware_spec.operating_system_version,
+                "network_adapters": device.hardware_spec.network_adapters or [],
+                "ip_addresses": device.hardware_spec.ip_addresses or [],
                 "collected_at": (
                     device.hardware_spec.collected_at.isoformat()
                     if device.hardware_spec.collected_at else None

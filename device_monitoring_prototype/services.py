@@ -1,15 +1,20 @@
 """Validated database operations used by the Flask views."""
 
+import hashlib
+import ipaddress
 import re
+import secrets
 import uuid
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_
+from sqlalchemy import or_, update
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash
 
 from device_monitoring_prototype.models import (
     ActivityLog,
     Device,
+    DeviceRegistrationToken,
     DiagnosticCheck,
     DiagnosticRun,
     DeviceSpecification,
@@ -21,9 +26,30 @@ from device_monitoring_prototype.models import (
 )
 from device_monitoring_prototype.system_info import collect_hardware, collect_network
 
+REGISTRATION_TOKEN_LIFETIME = timedelta(minutes=30)
+SPECIFICATION_KEYS = {
+    "cpu_name",
+    "ram_capacity_bytes",
+    "ram_usage_bytes",
+    "cpu_cores",
+    "storage_devices",
+    "storage_total_bytes",
+    "storage_available_bytes",
+    "gpu_information",
+    "motherboard_brand",
+    "operating_system_name",
+    "operating_system_version",
+    "network_adapters",
+    "ip_addresses",
+}
+
 
 class ValidationError(ValueError):
     """Raised when submitted data fails application validation."""
+
+
+class RegistrationTokenError(ValidationError):
+    """Raised when a one-time device enrollment token cannot be accepted."""
 
 
 class DatabaseSetupError(RuntimeError):
@@ -219,6 +245,256 @@ def create_device(owner, data):
     _log_device_event(device, "Device registered")
     _log("device.created", "device", device.id)
     db.session.commit()
+    return device
+
+
+def issue_device_registration_token(user):
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    registration = DeviceRegistrationToken(
+        token_hash=hashlib.sha256(token.encode("ascii")).hexdigest(),
+        user=user,
+        created_at=now,
+        expires_at=now + REGISTRATION_TOKEN_LIFETIME,
+    )
+    db.session.add(registration)
+    db.session.add(
+        ActivityLog(
+            actor=user,
+            event_type="device.registration_token_created",
+            entity_type="device_registration_token",
+        )
+    )
+    db.session.commit()
+    return token, registration.expires_at
+
+
+def find_valid_registration_token(token):
+    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token):
+        return None
+    token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    registration = DeviceRegistrationToken.query.filter_by(
+        token_hash=token_hash,
+        used_at=None,
+        revoked_at=None,
+    ).one_or_none()
+    if registration is None:
+        return None
+    expires_at = registration.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
+        return None
+    return registration
+
+
+def _inventory_text(specifications, key, limit):
+    value = specifications.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValidationError(f"{key.replace('_', ' ').capitalize()} must be text.")
+    value = value.strip()
+    if len(value) > limit or any(ord(char) < 32 for char in value):
+        raise ValidationError(f"{key.replace('_', ' ').capitalize()} is invalid or too long.")
+    return value or None
+
+
+def _inventory_bytes(specifications, key, *, nullable=False, maximum=2**63 - 1):
+    value = specifications.get(key)
+    if value is None and nullable:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        raise ValidationError(f"{key.replace('_', ' ').capitalize()} must be a non-negative integer.")
+    return value
+
+
+def validate_detected_specifications(specifications):
+    if not isinstance(specifications, dict) or set(specifications) != SPECIFICATION_KEYS:
+        raise ValidationError("Detected specifications are incomplete or contain unsupported fields.")
+
+    cpu_name = _inventory_text(specifications, "cpu_name", 255)
+    motherboard_brand = _inventory_text(specifications, "motherboard_brand", 120)
+    os_name = _inventory_text(specifications, "operating_system_name", 120)
+    os_version = _inventory_text(specifications, "operating_system_version", 255)
+    gpu_values = specifications.get("gpu_information")
+    if not isinstance(gpu_values, list) or len(gpu_values) > 32:
+        raise ValidationError("GPU information must be a list of at most 32 names.")
+    gpu_information = []
+    for value in gpu_values:
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 255:
+            raise ValidationError("GPU information contains an invalid name.")
+        gpu_information.append(value.strip())
+
+    cores = specifications.get("cpu_cores")
+    if cores is not None and (
+        isinstance(cores, bool) or not isinstance(cores, int) or not 0 <= cores <= 512
+    ):
+        raise ValidationError("CPU core count must be an integer from 0 to 512.")
+    ram_capacity = _inventory_bytes(
+        specifications, "ram_capacity_bytes", nullable=True
+    )
+    ram_usage = _inventory_bytes(specifications, "ram_usage_bytes", nullable=True)
+    if ram_capacity is not None and ram_usage is not None and ram_usage > ram_capacity:
+        raise ValidationError("RAM usage cannot exceed RAM capacity.")
+
+    storage_devices = specifications.get("storage_devices")
+    if not isinstance(storage_devices, list) or len(storage_devices) > 64:
+        raise ValidationError("Storage devices must be a list of at most 64 items.")
+    validated_storage = []
+    for device in storage_devices:
+        if not isinstance(device, dict) or set(device) != {
+            "name", "total_bytes", "available_bytes"
+        }:
+            raise ValidationError("A storage device contains unsupported or missing fields.")
+        name = device["name"]
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 128:
+            raise ValidationError("A storage device name is invalid.")
+        total = _inventory_bytes(device, "total_bytes")
+        available = _inventory_bytes(device, "available_bytes")
+        if available > total:
+            raise ValidationError("Available storage cannot exceed total storage.")
+        validated_storage.append(
+            {"name": name.strip(), "total_bytes": total, "available_bytes": available}
+        )
+
+    storage_total = _inventory_bytes(specifications, "storage_total_bytes")
+    storage_available = _inventory_bytes(specifications, "storage_available_bytes")
+    if (
+        storage_total != sum(item["total_bytes"] for item in validated_storage)
+        or storage_available
+        != sum(item["available_bytes"] for item in validated_storage)
+    ):
+        raise ValidationError("Storage totals do not match the listed storage devices.")
+
+    adapters = specifications.get("network_adapters")
+    if not isinstance(adapters, list) or len(adapters) > 64:
+        raise ValidationError("Network adapters must be a list of at most 64 names.")
+    network_adapters = []
+    for adapter in adapters:
+        if not isinstance(adapter, str) or not adapter.strip() or len(adapter.strip()) > 128:
+            raise ValidationError("A network adapter name is invalid.")
+        network_adapters.append(adapter.strip())
+
+    addresses = specifications.get("ip_addresses")
+    if not isinstance(addresses, list) or len(addresses) > 64:
+        raise ValidationError("IP addresses must be a list of at most 64 addresses.")
+    ip_addresses = []
+    for address in addresses:
+        if not isinstance(address, str) or len(address) > 45:
+            raise ValidationError("An IP address is invalid.")
+        try:
+            normalized = str(ipaddress.ip_address(address))
+        except ValueError as error:
+            raise ValidationError("An IP address is invalid.") from error
+        if normalized not in ip_addresses:
+            ip_addresses.append(normalized)
+
+    return {
+        "cpu_name": cpu_name,
+        "ram_capacity_bytes": ram_capacity,
+        "ram_usage_bytes": ram_usage,
+        "cpu_cores": cores,
+        "storage_devices": validated_storage,
+        "storage_total_bytes": storage_total,
+        "storage_available_bytes": storage_available,
+        "gpu_information": gpu_information,
+        "motherboard_brand": motherboard_brand,
+        "operating_system_name": os_name,
+        "operating_system_version": os_version,
+        "network_adapters": network_adapters,
+        "ip_addresses": ip_addresses,
+    }
+
+
+def register_agent_device(token, data):
+    if not isinstance(data, dict) or set(data) != {
+        "name", "device_type", "specifications"
+    }:
+        raise ValidationError("Registration must contain a device name, type, and specifications.")
+    name = _required_text(data, "name", limit=120)
+    device_type = data.get("device_type")
+    if not isinstance(device_type, str) or device_type not in {"Desktop", "Laptop"}:
+        raise ValidationError("Device type must be Desktop or Laptop.")
+    specifications = validate_detected_specifications(data["specifications"])
+
+    registration = find_valid_registration_token(token)
+    if registration is None or registration.user.status != "active":
+        raise RegistrationTokenError(
+            "This registration token is invalid, expired, or already used."
+        )
+
+    now = datetime.now(timezone.utc)
+    claim = db.session.execute(
+        update(DeviceRegistrationToken)
+        .where(
+            DeviceRegistrationToken.id == registration.id,
+            DeviceRegistrationToken.used_at.is_(None),
+            DeviceRegistrationToken.revoked_at.is_(None),
+            DeviceRegistrationToken.expires_at > now,
+        )
+        .values(used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if claim.rowcount != 1:
+        db.session.rollback()
+        raise RegistrationTokenError(
+            "This registration token is invalid, expired, or already used."
+        )
+
+    user = registration.user
+    device = Device(
+        asset_tag=f"DM-{uuid.uuid4().hex[:16].upper()}",
+        device_name=name,
+        hostname=name,
+        device_type=device_type,
+        operating_system=specifications["operating_system_name"] or "Unknown",
+        operating_system_version=specifications["operating_system_version"],
+        status="online" if specifications["ip_addresses"] else "unknown",
+        owner=user,
+        registered_by=user,
+        hardware_spec=DeviceSpecification(
+            cpu_model=specifications["cpu_name"],
+            cpu_cores=specifications["cpu_cores"],
+            memory_bytes=specifications["ram_capacity_bytes"],
+            ram_usage_bytes=specifications["ram_usage_bytes"],
+            storage_bytes=specifications["storage_total_bytes"],
+            storage_available_bytes=specifications["storage_available_bytes"],
+            storage_devices=specifications["storage_devices"],
+            gpu_model=", ".join(specifications["gpu_information"]) or None,
+            motherboard_model=specifications["motherboard_brand"],
+            motherboard_brand=specifications["motherboard_brand"],
+            operating_system_name=specifications["operating_system_name"],
+            operating_system_version=specifications["operating_system_version"],
+            network_adapters=specifications["network_adapters"],
+            ip_addresses=specifications["ip_addresses"],
+        ),
+    )
+    if specifications["ip_addresses"]:
+        device.network_records.append(
+            NetworkRecord(
+                ip_address=specifications["ip_addresses"][0],
+                connectivity_status="connected",
+            )
+        )
+    db.session.add(device)
+    db.session.flush()
+    registration.device = device
+    _log_device_event(device, "Device registered with QR-based agent")
+    db.session.add(
+        ActivityLog(
+            actor=user,
+            event_type="device.registered_by_agent",
+            entity_type="device",
+            entity_id=device.id,
+            details={"registration_token_id": registration.id},
+        )
+    )
+    try:
+        db.session.commit()
+    except IntegrityError as error:
+        db.session.rollback()
+        raise ValidationError("The device could not be registered; review the information and try again.") from error
     return device
 
 
