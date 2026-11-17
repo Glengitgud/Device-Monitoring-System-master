@@ -56,6 +56,13 @@ class User(UserMixin, db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     display_name = db.Column(db.String(120))
     status = db.Column(db.String(16), nullable=False, server_default="active")
+    email_verified = db.Column(db.Boolean, nullable=False, server_default="0")
+    email_verified_at = db.Column(db.DateTime(timezone=True))
+    totp_enabled = db.Column(db.Boolean, nullable=False, server_default="0")
+    totp_secret_encrypted = db.Column(db.Text)
+    totp_verified_at = db.Column(db.DateTime(timezone=True))
+    totp_last_counter = db.Column(db.BigInteger)
+    totp_attempts = db.Column(db.Integer, nullable=False, server_default="0")
     created_at = db.Column(
         db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
@@ -89,7 +96,7 @@ class User(UserMixin, db.Model):
 
     @property
     def is_active(self):
-        return self.is_admin or self.status == "active"
+        return self.email_verified and (self.is_admin or self.status == "active")
 
     owned_devices = db.relationship(
         "Device", foreign_keys="Device.owner_user_id", back_populates="owner"
@@ -104,6 +111,70 @@ class User(UserMixin, db.Model):
     )
     diagnostic_runs = db.relationship("DiagnosticRun", back_populates="initiated_by")
     activity_logs = db.relationship("ActivityLog", back_populates="actor")
+
+
+class RegistrationChallenge(db.Model):
+    __tablename__ = "registration_challenges"
+    __table_args__ = (
+        db.Index("ix_registration_challenges_email_created", "email", "created_at"),
+        db.Index("ix_registration_challenges_expiry", "expires_at"),
+    )
+
+    id = db.Column(ID_TYPE, primary_key=True)
+    username = db.Column(db.String(64), nullable=False)
+    email = db.Column(db.String(254), nullable=False)
+    display_name = db.Column(db.String(120), nullable=False)
+    password_hash = db.Column(db.String(255))
+    email_code_hash = db.Column(db.String(64))
+    email_code_expires_at = db.Column(db.DateTime(timezone=True))
+    email_verified_at = db.Column(db.DateTime(timezone=True))
+    totp_secret_encrypted = db.Column(db.Text)
+    totp_verified_at = db.Column(db.DateTime(timezone=True))
+    totp_last_counter = db.Column(db.BigInteger)
+    email_attempts = db.Column(db.Integer, nullable=False, server_default="0")
+    totp_attempts = db.Column(db.Integer, nullable=False, server_default="0")
+    email_send_count = db.Column(db.Integer, nullable=False, server_default="1")
+    last_email_sent_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    completed_at = db.Column(db.DateTime(timezone=True))
+
+
+class EmailVerification(db.Model):
+    __tablename__ = "email_verifications"
+    __table_args__ = (
+        db.Index(
+            "ix_email_verifications_challenge_created",
+            "registration_challenge_id",
+            "created_at",
+        ),
+        db.Index("ix_email_verifications_email_created", "email", "created_at"),
+        db.Index("ix_email_verifications_expiry", "expires_at"),
+    )
+
+    id = db.Column(ID_TYPE, primary_key=True)
+    registration_challenge_id = db.Column(
+        ID_TYPE,
+        db.ForeignKey("registration_challenges.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    email = db.Column(db.String(254), nullable=False)
+    verification_code = db.Column(db.String(64), nullable=False)
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    verified = db.Column(db.Boolean, nullable=False, server_default="0")
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    used_at = db.Column(db.DateTime(timezone=True))
+
+    registration_challenge = db.relationship(
+        "RegistrationChallenge",
+        backref=db.backref("email_verifications", cascade="all, delete-orphan"),
+    )
 
 
 class Role(db.Model):
@@ -160,6 +231,7 @@ class Device(db.Model):
     operating_system = db.Column(db.String(120))
     operating_system_version = db.Column(db.String(120))
     status = db.Column(db.String(16), nullable=False, server_default="unknown")
+    is_verified = db.Column(db.Boolean, nullable=False, server_default=db.false())
     lifecycle_status = db.Column(
         db.String(16), nullable=False, server_default="active"
     )
@@ -306,6 +378,8 @@ class DeviceRegistrationToken(db.Model):
         db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )
     expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    verified_at = db.Column(db.DateTime(timezone=True))
+    download_confirmed_at = db.Column(db.DateTime(timezone=True))
     used_at = db.Column(db.DateTime(timezone=True))
     revoked_at = db.Column(db.DateTime(timezone=True))
 

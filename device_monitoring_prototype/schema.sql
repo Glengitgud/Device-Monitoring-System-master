@@ -7,6 +7,13 @@ CREATE TABLE users (
     password_hash VARCHAR(255) NOT NULL,
     display_name VARCHAR(120) NULL,
     status VARCHAR(16) NOT NULL DEFAULT 'active',
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    email_verified_at DATETIME NULL,
+    totp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    totp_secret_encrypted TEXT NULL,
+    totp_verified_at DATETIME NULL,
+    totp_last_counter BIGINT NULL,
+    totp_attempts INT NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     last_login_at DATETIME NULL,
@@ -14,6 +21,48 @@ CREATE TABLE users (
     UNIQUE KEY uq_users_username (username),
     UNIQUE KEY uq_users_email (email),
     CONSTRAINT ck_users_status CHECK (status IN ('active', 'inactive', 'locked'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE registration_challenges (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    username VARCHAR(64) NOT NULL,
+    email VARCHAR(254) NOT NULL,
+    display_name VARCHAR(120) NOT NULL,
+    password_hash VARCHAR(255) NULL,
+    email_code_hash CHAR(64) NULL,
+    email_code_expires_at DATETIME NULL,
+    email_verified_at DATETIME NULL,
+    totp_secret_encrypted TEXT NULL,
+    totp_verified_at DATETIME NULL,
+    totp_last_counter BIGINT NULL,
+    email_attempts INT NOT NULL DEFAULT 0,
+    totp_attempts INT NOT NULL DEFAULT 0,
+    email_send_count INT NOT NULL DEFAULT 1,
+    last_email_sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    completed_at DATETIME NULL,
+    PRIMARY KEY (id),
+    KEY ix_registration_challenges_email_created (email, created_at),
+    KEY ix_registration_challenges_expiry (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE email_verifications (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    registration_challenge_id BIGINT NOT NULL,
+    email VARCHAR(254) NOT NULL,
+    verification_code CHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    verified BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    used_at DATETIME NULL,
+    PRIMARY KEY (id),
+    KEY ix_email_verifications_challenge_created (registration_challenge_id, created_at),
+    KEY ix_email_verifications_email_created (email, created_at),
+    KEY ix_email_verifications_expiry (expires_at),
+    CONSTRAINT fk_email_verifications_registration_challenge
+        FOREIGN KEY (registration_challenge_id)
+        REFERENCES registration_challenges (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE roles (
@@ -45,6 +94,7 @@ CREATE TABLE devices (
     operating_system VARCHAR(120) NULL,
     operating_system_version VARCHAR(120) NULL,
     status VARCHAR(16) NOT NULL DEFAULT 'unknown',
+    is_verified BOOLEAN NOT NULL DEFAULT FALSE,
     lifecycle_status VARCHAR(16) NOT NULL DEFAULT 'active',
     archived_at DATETIME NULL,
     archived_by_user_id BIGINT NULL,
@@ -80,6 +130,8 @@ CREATE TABLE device_registration_tokens (
     device_id BIGINT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME NOT NULL,
+    verified_at DATETIME NULL,
+    download_confirmed_at DATETIME NULL,
     used_at DATETIME NULL,
     revoked_at DATETIME NULL,
     PRIMARY KEY (id),
