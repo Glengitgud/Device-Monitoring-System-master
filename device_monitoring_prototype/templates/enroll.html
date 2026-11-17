@@ -15,27 +15,48 @@
             <h1 class="h4 mb-3">DevMonitor Device Registration</h1>
             {% if message %}
                 <div class="alert alert-warning" role="alert">{{ message }}</div>
-                <p>Sign in and generate a new QR code to register a device.</p>
-            {% else %}
-                <p>The Windows agent will detect only the hardware and software
-                   specifications listed on the QR generation screen.</p>
-                <p>It will show the detected information and wait for your confirmation
-                   before sending anything to DevMonitor.</p>
-                <a id="agentDownload" class="btn btn-primary login-btn"
-                   href="{{ download_url }}" download>
-                    Download Windows Device Agent
-                </a>
-                <p class="small mt-3">
-                    If the download does not start automatically, use the button above.
-                    Run the downloaded Python file on the target Windows desktop or laptop.
-                    This one-use link expires in 30 minutes.
-                </p>
-                <script>
-                    window.addEventListener('load', () => {
-                        document.getElementById('agentDownload').click();
-                    });
-                </script>
             {% endif %}
+            {% if not message or verified %}
+                {% if verified %}
+                    <div class="alert alert-success" role="status">
+                        Account verification succeeded. Continue with the Device Agent download.
+                    </div>
+                    <p class="fw-semibold">
+                        Do you trust this application and want to download the Device Agent?
+                    </p>
+                    <form method="post"
+                          action="{{ url_for('download_device_agent', token=request.view_args.token) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="form-check text-start mb-3">
+                            <input class="form-check-input" id="trustDeviceAgent"
+                                   name="trust_device_agent" type="checkbox" value="yes" required>
+                            <label class="form-check-label" for="trustDeviceAgent">
+                                I trust this application and authorize this download.
+                            </label>
+                        </div>
+                        <button class="btn btn-primary login-btn" type="submit">
+                            Download Device Agent
+                        </button>
+                    </form>
+                {% else %}
+                    <p>Scan confirmed the one-time registration link. Verify the account
+                       before requesting the Windows Device Agent.</p>
+                    <form method="post"
+                          action="{{ url_for('verify_device_enrollment', token=request.view_args.token) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button class="btn btn-primary login-btn" type="submit">
+                            Verify Account
+                        </button>
+                    </form>
+                {% endif %}
+            {% else %}
+                <p>Sign in and generate a new QR code to register a device.</p>
+            {% endif %}
+            <p class="small mt-3">
+                The Windows agent displays the detected specifications and waits for
+                your approval before submitting anything. The one-use registration link
+                expires after 30 minutes.
+            </p>
         </section>
     </main>
 </body>

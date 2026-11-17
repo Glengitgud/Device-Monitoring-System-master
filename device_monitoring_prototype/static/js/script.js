@@ -93,6 +93,7 @@ function initSidebar() {
 
 function getCurrentPage() {
     const path = window.location.pathname;
+    if (path.includes('device-verification')) return 'device-verification';
     if (path.includes('archived-devices')) return 'archived-devices';
     if (path.includes('dashboard')) return 'dashboard';
     if (path.includes('devices')) return 'devices';
@@ -293,6 +294,10 @@ function initDevicesPage() {
         devicePage = 1;
         renderDevicesCards();
     });
+    initDeviceQrControls();
+}
+
+function initDeviceQrControls() {
     const qrModalElement = document.getElementById('deviceRegistrationQrModal');
     if (qrModalElement) {
         const qrModal = bootstrap.Modal.getOrCreateInstance(qrModalElement);
@@ -308,7 +313,45 @@ function initDevicesPage() {
             'click',
             copyDeviceRegistrationLink
         );
+        return;
     }
+
+    document.getElementById('createDeviceQrBtn')?.addEventListener(
+        'click',
+        generateDeviceRegistrationQr
+    );
+    document.getElementById('copyDeviceQrLinkBtn')?.addEventListener(
+        'click',
+        copyDeviceRegistrationLink
+    );
+}
+
+async function refreshDeviceVerificationStatus() {
+    const status = document.getElementById('deviceVerificationMessage');
+    try {
+        const result = await api('/api/device-verification-status');
+        if (!result.verified) return;
+
+        document.getElementById('deviceVerificationPending')?.classList.add('d-none');
+        document.getElementById('deviceVerificationComplete')?.classList.remove('d-none');
+        document.getElementById('deviceVerificationQrPanel')?.classList.remove('d-none');
+        status.textContent =
+            `${result.verified_devices} verified device${result.verified_devices === 1 ? '' : 's'} linked to your account.`;
+    } catch (error) {
+        status.textContent = `Unable to check device verification: ${error.message}`;
+    }
+}
+
+function initDeviceVerificationPage() {
+    initDeviceQrControls();
+    const qrCard = document.getElementById('deviceQrCard');
+    if (qrCard && !qrCard.classList.contains('d-none') && qrCard.dataset.enrollmentUrl) {
+        const token = new URL(qrCard.dataset.enrollmentUrl, window.location.origin)
+            .pathname.split('/').pop();
+        startDeviceQrCountdown(qrCard.dataset.expiresAt, qrCard.dataset.serverTime, token);
+    }
+    refreshDeviceVerificationStatus();
+    window.setInterval(refreshDeviceVerificationStatus, 10000);
 }
 
 async function openDeviceModal(mode, deviceId) {
@@ -604,6 +647,19 @@ function startDeviceQrCountdown(expiresAt, serverTime, token) {
         if (result.status === 'active') {
             tokenStatus.textContent = 'Unused';
             updateCountdown();
+            return;
+        }
+
+        if (result.status === 'verified' || result.status === 'download_confirmed') {
+            tokenStatus.textContent = result.status === 'verified'
+                ? 'Account verified'
+                : 'Download confirmed';
+            expiryStatus.textContent = 'Awaiting device registration';
+            remaining.textContent = `${Math.max(0, Math.ceil((expiration - (Date.now() - serverClockOffset)) / 1000))}s`;
+            document.getElementById('deviceQrStatus').textContent =
+                result.status === 'verified'
+                    ? 'Account verified. Confirm the Device Agent download on the scanned device.'
+                    : 'Download confirmed. Run the Device Agent and approve device registration.';
             return;
         }
 
@@ -1013,6 +1069,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (page === 'dashboard') initDashboard();
     if (page === 'devices') initDevicesPage();
+    if (page === 'device-verification') initDeviceVerificationPage();
     if (page === 'archived-devices') initArchivedDevicesPage();
     if (page === 'admin') initAdminPage();
 });

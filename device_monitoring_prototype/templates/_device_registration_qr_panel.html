@@ -1,0 +1,53 @@
+<p id="deviceQrStatus" role="status">
+    {% if registration_complete %}
+        Account created. Scan this one-use QR code on the Windows desktop or laptop to verify the account.
+    {% else %}
+        Generate a one-use verification QR code for a Windows desktop or laptop.
+    {% endif %}
+</p>
+<div id="deviceQrCard"
+     class="qr-code-card {{ '' if registration_qr else 'd-none' }} mx-auto mb-3"
+     data-enrollment-url="{{ registration_qr.enrollment_url if registration_qr else '' }}"
+     data-expires-at="{{ registration_qr.expires_at if registration_qr else '' }}"
+     data-server-time="{{ registration_qr.server_time if registration_qr else '' }}">
+    <img id="deviceRegistrationQrImage"
+         class="img-fluid"
+         src="{{ registration_qr.qr_code if registration_qr else '' }}"
+         alt="One-time account and device verification QR code">
+</div>
+<div id="deviceQrExpiryCard"
+     class="qr-expiration-card {{ '' if registration_qr else 'd-none' }} mx-auto mb-3"
+     aria-live="polite">
+    <h6 class="mb-3">Registration code status</h6>
+    <div class="row g-2 text-start">
+        <div class="col-4">
+            <span class="qr-status-label">Remaining time</span>
+            <strong id="deviceQrRemainingTime">--</strong>
+        </div>
+        <div class="col-4">
+            <span class="qr-status-label">Expiration</span>
+            <strong id="deviceQrExpiryStatus">--</strong>
+        </div>
+        <div class="col-4">
+            <span class="qr-status-label">Token</span>
+            <strong id="deviceQrTokenStatus">--</strong>
+        </div>
+    </div>
+</div>
+<div class="d-flex flex-wrap justify-content-center align-items-center gap-2 mb-3">
+    <a id="deviceRegistrationQrLink"
+       class="{{ '' if registration_qr else 'd-none' }}"
+       href="{{ registration_qr.enrollment_url if registration_qr else '' }}"
+       target="_blank" rel="noopener noreferrer">Open verification link</a>
+    <button id="copyDeviceQrLinkBtn"
+            class="btn btn-sm btn-outline-secondary {{ '' if registration_qr else 'd-none' }}"
+            type="button">Copy link</button>
+</div>
+<p class="small">
+    Scan with the device you want to verify. Confirm the account, then download
+    and run the Windows agent, review its detected specifications, and approve
+    registration. QR codes expire after 30 minutes and can be used once.
+</p>
+<button type="button" class="btn btn-primary" id="createDeviceQrBtn">
+    <i class="bi bi-qr-code me-1"></i>{{ 'Regenerate Verification QR' if registration_qr else 'Generate Verification QR' }}
+</button>

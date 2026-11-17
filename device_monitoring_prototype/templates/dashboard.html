@@ -4,6 +4,14 @@
 {% block page_title %}Dashboard{% endblock %}
 
 {% block content %}
+<div class="alert {{ 'alert-info' if current_user.is_admin else 'alert-success' }}"
+     id="dashboardVerificationStatus" role="status">
+    {% if current_user.is_admin %}
+        Administrator access is active. Account QR verification is not required.
+    {% else %}
+        Account verified. {{ verified_device_count }} registered device{{ '' if verified_device_count == 1 else 's' }} linked to your account.
+    {% endif %}
+</div>
 <!-- ======================================================
      DASHBOARD PAGE
      Shows summary cards, device overview table,

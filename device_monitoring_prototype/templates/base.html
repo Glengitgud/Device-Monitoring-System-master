@@ -43,6 +43,15 @@
                     <span>My Devices</span>
                 </a>
             </li>
+            {% if not current_user.is_admin %}
+            <li>
+                <a href="{{ url_for('device_verification') }}" id="navDeviceVerification"
+                   class="sidebar-link {% if active_page == 'device-verification' %}active{% endif %}">
+                    <i class="bi bi-shield-check"></i>
+                    <span>Device Verification</span>
+                </a>
+            </li>
+            {% endif %}
             <li>
                 <a href="/archived-devices" id="navArchivedDevices"
                    class="sidebar-link {% if active_page == 'archived-devices' %}active{% endif %}">
