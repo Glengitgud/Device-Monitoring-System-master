@@ -48,10 +48,55 @@ document.addEventListener('DOMContentLoaded', () => {
     const passwordInput = document.getElementById('password');
     const confirmInput = document.getElementById('confirm_password');
 
-    form?.addEventListener('submit', event => {
+    const verificationDialog = document.getElementById('registrationVerificationDialog');
+    const dialogStatus = document.getElementById('registrationDialogStatus');
+    const emailStage = document.getElementById('emailVerificationStage');
+    const authenticatorStage = document.getElementById('authenticatorVerificationStage');
+    const csrfInput = form?.querySelector('[name="csrf_token"]');
+
+    function setDialogStatus(message, state = 'info') {
+        dialogStatus.textContent = message;
+        dialogStatus.dataset.state = state;
+    }
+
+    async function postRegistration(url, data) {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': csrfInput.value },
+            body: data,
+        });
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || 'Verification could not be completed.');
+        }
+        return result;
+    }
+
+    async function withLoading(button, message, operation) {
+        const label = button?.querySelector('.button-label');
+        const spinner = button?.querySelector('.button-spinner');
+        if (button) {
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+            if (label) label.textContent = message;
+            if (spinner) spinner.hidden = false;
+        }
+        try {
+            return await operation();
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+                if (label) label.textContent = label.dataset.defaultLabel;
+                if (spinner) spinner.hidden = true;
+            }
+        }
+    }
+
+    form?.addEventListener('submit', async event => {
+        event.preventDefault();
         const emailIsValid = validateEmail(registerEmail, registerEmailMessage);
         if (!emailIsValid) {
-            event.preventDefault();
             registerEmail.focus();
             return;
         }
@@ -59,21 +104,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const characters = Array.from(password);
 
         if (characters.length < 8) {
-            event.preventDefault();
             alert('Password must be at least 8 characters long.');
             passwordInput.focus();
             return;
         }
 
         if (characters.length > 16) {
-            event.preventDefault();
             alert('Password must be no more than 16 characters long.');
             passwordInput.focus();
             return;
         }
 
         if (!characters.some(character => /[A-Z]/.test(character))) {
-            event.preventDefault();
             alert('Password must include at least one capital letter.');
             passwordInput.focus();
             return;
@@ -82,24 +124,118 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!characters.some(character =>
             !/[\p{L}\p{N}]/u.test(character) && !/\s/u.test(character)
         )) {
-            event.preventDefault();
             alert('Password must include at least one special character.');
             passwordInput.focus();
             return;
         }
 
         if (password !== confirmInput.value) {
-            event.preventDefault();
             alert('Passwords do not match.');
             confirmInput.focus();
             return;
         }
 
         if (!form.checkValidity()) {
-            event.preventDefault();
             form.reportValidity();
+            return;
+        }
+
+        verificationDialog.showModal();
+        setDialogStatus('Email verification is required. Sending your code...');
+        try {
+            const button = form.querySelector('button[type="submit"]');
+            const result = await withLoading(button, 'Sending code...', () =>
+                postRegistration('/api/registration/start', new FormData(form))
+            );
+            setDialogStatus(result.message, 'success');
+            document.getElementById('emailVerificationCode').focus();
+        } catch (error) {
+            setDialogStatus(error.message, 'error');
         }
     });
+
+    document.getElementById('emailVerificationForm')?.addEventListener('submit', async event => {
+        event.preventDefault();
+        const data = new FormData(event.currentTarget);
+        try {
+            const button = event.currentTarget.querySelector('button[type="submit"]');
+            const result = await withLoading(button, 'Verifying...', () =>
+                postRegistration('/api/registration/verify-email', data)
+            );
+            document.getElementById('authenticatorQrCode').src = result.qr_code;
+            emailStage.hidden = true;
+            authenticatorStage.hidden = false;
+            document.getElementById('registrationDialogTitle').textContent =
+                'Set up Google Authenticator';
+            setDialogStatus(result.message, 'success');
+            document.getElementById('authenticatorVerificationCode').focus();
+        } catch (error) {
+            setDialogStatus(error.message, 'error');
+        }
+    });
+
+    document.getElementById('resendVerificationCode')?.addEventListener('click', async () => {
+        const button = document.getElementById('resendVerificationCode');
+        try {
+            const result = await withLoading(button, 'Sending...', () =>
+                postRegistration('/api/registration/resend-code', new FormData())
+            );
+            setDialogStatus(result.message, 'success');
+        } catch (error) {
+            setDialogStatus(error.message, 'error');
+        }
+    });
+
+    document.getElementById('authenticatorVerificationForm')?.addEventListener(
+        'submit',
+        async event => {
+            event.preventDefault();
+            const authenticatorForm = event.currentTarget;
+            try {
+                const button = authenticatorForm.querySelector('button[type="submit"]');
+                const result = await withLoading(button, 'Creating account...', () =>
+                    postRegistration(
+                        '/api/registration/verify-authenticator',
+                        new FormData(authenticatorForm)
+                    )
+                );
+                setDialogStatus(result.message, 'success');
+                document.getElementById('registrationDialogTitle').textContent = 'Account created';
+                authenticatorForm.hidden = true;
+                window.setTimeout(() => {
+                    window.location.assign(result.redirect_url);
+                }, 1200);
+            } catch (error) {
+                setDialogStatus(error.message, 'error');
+            }
+        }
+    );
+
+    document.getElementById('closeRegistrationDialog')?.addEventListener('click', async () => {
+        const cancelButton = document.getElementById('closeRegistrationDialog');
+        cancelButton.disabled = true;
+        try {
+            await postRegistration('/api/registration/cancel', new FormData());
+            verificationDialog.close();
+            form.reset();
+            document.getElementById('authenticatorQrCode').removeAttribute('src');
+            document.getElementById('emailVerificationCode').value = '';
+            document.getElementById('authenticatorVerificationCode').value = '';
+            document.getElementById('registrationDialogTitle').textContent = 'Verify your email';
+            emailStage.hidden = false;
+            authenticatorStage.hidden = true;
+            setDialogStatus(
+                'Email verification is required before account creation.',
+                'info'
+            );
+        } catch (error) {
+            setDialogStatus(error.message, 'error');
+        } finally {
+            cancelButton.disabled = false;
+        }
+    });
+
+    verificationDialog?.addEventListener('cancel', event => event.preventDefault());
 
     loginForm?.addEventListener('submit', event => {
         if (!validateEmail(loginIdentifier, loginEmailMessage, true)) {

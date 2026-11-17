@@ -62,9 +62,74 @@
                            class="form-control" required autocomplete="new-password">
                 </div>
                 <button type="submit" class="btn btn-primary w-100 login-btn">
-                    <i class="bi bi-person-plus me-1"></i>Create Account
+                    <span class="spinner-border spinner-border-sm button-spinner me-1"
+                          aria-hidden="true" hidden></span>
+                    <i class="bi bi-person-plus me-1"></i>
+                    <span class="button-label" data-default-label="Create Account">Create Account</span>
                 </button>
             </form>
+            <dialog id="registrationVerificationDialog" class="registration-dialog"
+                    aria-labelledby="registrationDialogTitle">
+                <div class="registration-dialog-content">
+                    <h2 id="registrationDialogTitle">Verify your email</h2>
+                    <p id="registrationDialogStatus" class="registration-status"
+                       role="status" aria-live="polite">
+                        Email verification is required before account creation.
+                    </p>
+                    <section id="emailVerificationStage">
+                        <form id="emailVerificationForm">
+                            <label for="emailVerificationCode" class="form-label">
+                                6-digit email verification code
+                            </label>
+                            <input id="emailVerificationCode" class="form-control verification-code"
+                                   name="code" inputmode="numeric" autocomplete="one-time-code"
+                                   pattern="[0-9]{6}" minlength="6" maxlength="6" required>
+                            <button type="submit" class="btn btn-primary w-100 mt-3">
+                                <span class="spinner-border spinner-border-sm button-spinner me-1"
+                                      aria-hidden="true" hidden></span>
+                                <span class="button-label" data-default-label="Verify email">
+                                Verify email
+                                </span>
+                            </button>
+                        </form>
+                        <button id="resendVerificationCode" type="button"
+                                class="btn btn-link mt-2">
+                            <span class="spinner-border spinner-border-sm button-spinner me-1"
+                                  aria-hidden="true" hidden></span>
+                            <span class="button-label" data-default-label="Resend code">
+                                Resend code
+                            </span>
+                        </button>
+                    </section>
+                    <section id="authenticatorVerificationStage" hidden>
+                        <h3>Set up Google Authenticator</h3>
+                        <p>In Google Authenticator, tap <strong>+</strong>, choose
+                           <strong>Scan a QR code</strong>, then scan this code.</p>
+                        <img id="authenticatorQrCode" class="authenticator-qr"
+                             alt="Google Authenticator setup QR code">
+                        <p>Enter the current 6-digit code shown for DevMonitor to finish creating your account.</p>
+                        <form id="authenticatorVerificationForm">
+                            <label for="authenticatorVerificationCode" class="form-label">
+                                Authenticator code
+                            </label>
+                            <input id="authenticatorVerificationCode"
+                                   class="form-control verification-code" name="code"
+                                   inputmode="numeric" autocomplete="one-time-code"
+                                   pattern="[0-9]{6}" minlength="6" maxlength="6" required>
+                            <button type="submit" class="btn btn-primary w-100 mt-3">
+                                <span class="spinner-border spinner-border-sm button-spinner me-1"
+                                      aria-hidden="true" hidden></span>
+                                <span class="button-label"
+                                      data-default-label="Verify and create account">
+                                Verify and create account
+                                </span>
+                            </button>
+                        </form>
+                    </section>
+                    <button id="closeRegistrationDialog" type="button"
+                            class="btn btn-outline-secondary w-100 mt-3">Cancel registration</button>
+                </div>
+            </dialog>
             <p class="text-center mt-4 mb-0">
                 <span class="text-muted">Already registered?</span>
                 <a href="{{ url_for('login') }}">Sign in</a>

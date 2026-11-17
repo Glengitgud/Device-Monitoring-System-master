@@ -30,8 +30,8 @@
             <!-- Login Form -->
             <form id="loginForm" method="post" action="{{ url_for('login') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                {% if not requires_totp %}
                 <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
-                <!-- Username or Email Field -->
                 <div class="mb-3">
                     <label for="username" class="form-label">
                         <i class="bi bi-person me-1"></i>Email Address or Username
@@ -63,19 +63,26 @@
                         Enter a password to see its strength.
                     </div>
                 </div>
-
+                {% else %}
+                <div class="mb-3">
+                    <label for="totp_code" class="form-label">Google Authenticator code</label>
+                    <input id="totp_code" name="totp_code" class="form-control"
+                           inputmode="numeric" autocomplete="one-time-code"
+                           pattern="[0-9]{6}" minlength="6" maxlength="6" required autofocus>
+                    <div class="form-text">Enter the current 6-digit code from your authenticator app.</div>
+                </div>
+                {% endif %}
                 {% with messages = get_flashed_messages(with_categories=true) %}
                     {% for category, message in messages %}
-                    <div class="alert alert-{{ category }}" role="alert"
-                         {% if category == 'success' %}data-registration-success{% endif %}>
-                        {{ message }}
-                    </div>
+                    <div class="alert alert-{{ category }}" role="alert">{{ message }}</div>
                     {% endfor %}
                 {% endwith %}
-
-                <!-- Login Button -->
                 <button type="submit" class="btn btn-primary w-100 login-btn" id="loginBtn">
+                    {% if requires_totp %}
+                    <i class="bi bi-shield-lock me-1"></i>Verify code
+                    {% else %}
                     <i class="bi bi-box-arrow-in-right me-1"></i>Sign In
+                    {% endif %}
                 </button>
             </form>
             <p class="text-center mt-4 mb-0">
