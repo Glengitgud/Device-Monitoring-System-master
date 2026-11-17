@@ -895,6 +895,109 @@ class DatabaseIntegrationTest(unittest.TestCase):
                     self.assertIsNotNone(challenge.password_hash)
                     self.assertNotEqual(challenge.password_hash, "NoMailPass1!")
 
+    def test_initial_email_failure_expires_unsent_code_and_allows_immediate_resend(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        with patch(
+            "device_monitoring_prototype.authentication._send_email",
+            side_effect=EmailDeliveryError("Email service unavailable."),
+        ):
+            failed = self.client.post(
+                "/api/registration/start",
+                data={
+                    "csrf_token": csrf,
+                    "full_name": "Retry Mail User",
+                    "email": "retry-mail@example.com",
+                    "username": "retry_mail_user",
+                    "password": "RetryMail1!",
+                    "confirm_password": "RetryMail1!",
+                },
+            )
+        self.assertEqual(failed.status_code, 503)
+        with self.client.session_transaction() as session:
+            challenge_id = session["registration_challenge_id"]
+        with self.app.app_context():
+            challenge = db.session.get(RegistrationChallenge, challenge_id)
+            verification = EmailVerification.query.filter_by(
+                registration_challenge_id=challenge_id
+            ).one()
+            self.assertLessEqual(verification.expires_at, utcnow())
+            self.assertEqual(challenge.email_send_count, 0)
+            self.assertIsNone(User.query.filter_by(username="retry_mail_user").one_or_none())
+
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            resent = self.client.post(
+                "/api/registration/resend-code", data={"csrf_token": csrf}
+            )
+        self.assertEqual(resent.status_code, 200, resent.get_data(as_text=True))
+        self.assertEqual(send_email.call_args.args[0], "retry-mail@example.com")
+        delivered_code = send_email.call_args.args[1]
+        with self.app.app_context():
+            challenge = db.session.get(RegistrationChallenge, challenge_id)
+            challenge.last_email_sent_at = utcnow() - timedelta(seconds=61)
+            db.session.commit()
+            verifications = EmailVerification.query.filter_by(
+                registration_challenge_id=challenge_id
+            ).order_by(EmailVerification.id).all()
+            self.assertEqual(challenge.email_send_count, 1)
+            self.assertGreater(verifications[-1].expires_at, utcnow())
+        with patch(
+            "device_monitoring_prototype.authentication._send_email",
+            side_effect=EmailDeliveryError("Email service unavailable."),
+        ):
+            failed_resend = self.client.post(
+                "/api/registration/resend-code", data={"csrf_token": csrf}
+            )
+        self.assertEqual(failed_resend.status_code, 503)
+        with self.app.app_context():
+            challenge = db.session.get(RegistrationChallenge, challenge_id)
+            self.assertEqual(challenge.email_send_count, 2)
+        verified = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": csrf, "code": delivered_code},
+        )
+        self.assertEqual(verified.status_code, 200, verified.get_data(as_text=True))
+
+    def test_email_verification_is_bound_to_registration_email(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            started = self.client.post(
+                "/api/registration/start",
+                data={
+                    "csrf_token": csrf,
+                    "full_name": "Email Binding Test",
+                    "email": "email-binding@example.com",
+                    "username": "email_binding",
+                    "password": "EmailBinding1!",
+                    "confirm_password": "EmailBinding1!",
+                },
+            )
+        self.assertEqual(started.status_code, 200)
+        code = send_email.call_args.args[1]
+        with self.app.app_context():
+            with self.client.session_transaction() as session:
+                challenge_id = session["registration_challenge_id"]
+                challenge = db.session.get(
+                    RegistrationChallenge, session["registration_challenge_id"]
+                )
+            verification = EmailVerification.query.filter_by(
+                registration_challenge_id=challenge_id
+            ).one()
+            verification.email = "different@example.com"
+            db.session.commit()
+        response = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": csrf, "code": code},
+        )
+        self.assertEqual(response.status_code, 400)
+        with self.app.app_context():
+            challenge = db.session.get(RegistrationChallenge, challenge_id)
+            self.assertIsNone(challenge.email_verified_at)
+            self.assertIsNone(User.query.filter_by(username="email_binding").one_or_none())
+
     def test_registration_code_expiry_invalid_code_and_resend_limits(self):
         self.client.get("/register")
         with self.client.session_transaction() as session:
@@ -1027,9 +1130,26 @@ class DatabaseIntegrationTest(unittest.TestCase):
         smtp.login.assert_called_once_with("mailer@example.test", "mail-secret")
         message = smtp.send_message.call_args.args[0]
         self.assertEqual(message["To"], "recipient@example.test")
-        self.assertIn("123456", message.get_content())
-        self.assertIn("5 minutes", message.get_content())
+        self.assertEqual(message["From"], "DevMonitor <mailer@example.test>")
+        plain_body = message.get_body(preferencelist=("plain",)).get_content()
+        self.assertIn("123456", plain_body)
+        self.assertIn("5 minutes", plain_body)
+        self.assertIn("DevMonitor", message.get_body(preferencelist=("html",)).get_content())
+        self.assertIn("123456", message.get_body(preferencelist=("html",)).get_content())
         smtp.close.assert_called_once()
+
+    def test_gmail_sender_must_match_authenticated_account(self):
+        with self.app.app_context():
+            self.app.config.update(
+                MAIL_SERVER="smtp.gmail.com",
+                MAIL_PORT=587,
+                MAIL_USERNAME="mailer@example.test",
+                MAIL_PASSWORD="mail-secret",
+                MAIL_DEFAULT_SENDER="different@example.test",
+                MAIL_USE_TLS=True,
+            )
+            with self.assertRaises(EmailDeliveryError):
+                _send_email("recipient@example.test", "123456")
 
     def test_smtp_connectivity_check_authenticates_without_sending_email(self):
         with self.app.app_context():

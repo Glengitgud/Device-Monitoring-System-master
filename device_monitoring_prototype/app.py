@@ -563,6 +563,7 @@ def create_app(test_config=None):
         try:
             challenge = start_registration(request.form)
         except ValidationError as error:
+            app.logger.warning("Registration start rejected: %s", error)
             return jsonify(error=str(error)), 400
         except EmailDeliveryError as error:
             if error.challenge_id is not None:
@@ -607,6 +608,11 @@ def create_app(test_config=None):
                 registration_challenge(), request.form.get("code", "")
             )
         except ValidationError as error:
+            app.logger.warning(
+                "Registration email verification request rejected (challenge_id=%s): %s",
+                session.get("registration_challenge_id"),
+                error,
+            )
             return jsonify(error=str(error)), 400
         return jsonify(
             message="Email verified. Scan the QR code with Google Authenticator.",
@@ -620,6 +626,11 @@ def create_app(test_config=None):
             verify_registration_totp(challenge, request.form.get("code", ""))
             user = complete_registration(challenge)
         except ValidationError as error:
+            app.logger.warning(
+                "Registration completion rejected (challenge_id=%s): %s",
+                session.get("registration_challenge_id"),
+                error,
+            )
             return jsonify(error=str(error)), 400
         except RuntimeError as error:
             app.logger.error("Account registration could not be completed: %s", error)

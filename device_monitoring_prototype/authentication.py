@@ -140,25 +140,51 @@ def _validate_registration(data):
 def _send_email(email, code):
     host = current_app.config.get("MAIL_SERVER")
     if not host:
+        current_app.logger.error("SMTP host is not configured.")
         raise EmailDeliveryError(
             "Email verification is not configured. Please contact the system administrator."
+        )
+    if not EMAIL_PATTERN.fullmatch(email or "") or not EMAIL_CODE_PATTERN.fullmatch(code or ""):
+        current_app.logger.error("Refusing to send a malformed verification email.")
+        raise EmailDeliveryError(
+            "We could not prepare the verification email. Please check the address and try again."
         )
 
     message = EmailMessage()
     message["Subject"] = "Your DevMonitor verification code"
-    message["From"] = current_app.config.get("MAIL_DEFAULT_SENDER") or current_app.config.get(
-        "MAIL_USERNAME"
-    ) or "DevMonitor"
+    username = current_app.config.get("MAIL_USERNAME")
+    sender = current_app.config.get("MAIL_DEFAULT_SENDER") or username
+    if host.lower() == "smtp.gmail.com" and (
+        not username or sender.lower() != username.lower()
+    ):
+        current_app.logger.error(
+            "Gmail sender must match the authenticated SMTP username."
+        )
+        raise EmailDeliveryError(
+            "Email sender settings are inconsistent. Please contact the system administrator."
+        )
+    message["From"] = f"DevMonitor <{sender}>" if sender else "DevMonitor"
     message["To"] = email
     message.set_content(
-        f"Your DevMonitor email verification code is {code}.\n\n"
+        "DevMonitor\n\n"
+        f"Your email verification code is: {code}\n\n"
         "This code expires in 5 minutes. If you did not request an account, "
         "you can ignore this message."
+    )
+    message.add_alternative(
+        "<!doctype html><html><body style=\"font-family:Arial,sans-serif;color:#172033\">"
+        "<main style=\"max-width:560px;margin:24px auto;padding:24px;border:1px solid #dbe2ea;"
+        "border-radius:12px\"><p style=\"color:#26408b;font-weight:bold\">DevMonitor</p>"
+        "<h1 style=\"font-size:22px\">Verify your email address</h1>"
+        "<p>Use this verification code to continue creating your account:</p>"
+        f"<p style=\"font-size:30px;font-weight:bold;letter-spacing:6px\">{code}</p>"
+        "<p>This code expires in <strong>5 minutes</strong>. If you did not request "
+        "an account, you can ignore this message.</p></main></body></html>",
+        subtype="html",
     )
 
     port = int(current_app.config.get("MAIL_PORT", 587))
     timeout = int(current_app.config.get("MAIL_TIMEOUT", 15))
-    username = current_app.config.get("MAIL_USERNAME")
     password = current_app.config.get("MAIL_PASSWORD")
     use_tls = current_app.config.get("MAIL_USE_TLS", True)
     smtp = None
@@ -178,12 +204,18 @@ def _send_email(email, code):
         refused = smtp.send_message(message)
         if isinstance(refused, dict) and refused:
             current_app.logger.error(
-                "SMTP refused %d verification email recipient(s).",
+                "SMTP refused %d verification email recipient(s) (codes=%s).",
                 len(refused),
+                sorted(
+                    response[0]
+                    for response in refused.values()
+                    if isinstance(response, tuple) and response
+                ),
             )
             raise EmailDeliveryError(
                 "We could not deliver the verification email. Check the address or try again later."
             )
+        current_app.logger.info("SMTP accepted a DevMonitor verification email.")
     except EmailDeliveryError:
         raise
     except (OSError, smtplib.SMTPException) as error:
@@ -312,6 +344,14 @@ def start_registration(data):
     try:
         _send_email(email, code)
     except EmailDeliveryError as error:
+        verification.expires_at = utcnow()
+        challenge.last_email_sent_at = now - EMAIL_RESEND_INTERVAL - timedelta(seconds=1)
+        challenge.email_send_count = 0
+        db.session.commit()
+        current_app.logger.warning(
+            "Initial registration email delivery failed (challenge_id=%s).",
+            challenge.id,
+        )
         raise EmailDeliveryError(str(error), challenge_id=challenge.id) from error
     return challenge
 
@@ -361,6 +401,14 @@ def resend_email_code(challenge):
         _send_email(challenge.email, code)
     except EmailDeliveryError:
         db.session.rollback()
+        failed_challenge = db.session.get(RegistrationChallenge, challenge.id)
+        failed_challenge.last_email_sent_at = now
+        failed_challenge.email_send_count += 1
+        db.session.commit()
+        current_app.logger.warning(
+            "Resend email delivery failed (challenge_id=%s).",
+            challenge.id,
+        )
         raise
     db.session.commit()
 
@@ -385,23 +433,38 @@ def verify_email_code(challenge, code):
     if not EMAIL_CODE_PATTERN.fullmatch(code or ""):
         challenge.email_attempts += 1
         db.session.commit()
+        current_app.logger.warning(
+            "Email verification rejected (challenge_id=%s, reason=malformed_code, attempt=%s).",
+            challenge.id,
+            challenge.email_attempts,
+        )
         if challenge.email_attempts >= MAX_VERIFICATION_ATTEMPTS:
             raise ValidationError("Too many incorrect codes. Request a new code to continue.")
         raise ValidationError("Enter the 6-digit code sent to your email.")
     verification = (
         EmailVerification.query.filter_by(
             registration_challenge_id=challenge.id,
+            email=challenge.email,
             verified=False,
         )
         .order_by(EmailVerification.created_at.desc(), EmailVerification.id.desc())
         .first()
     )
     if verification is None or verification.expires_at <= utcnow():
+        current_app.logger.warning(
+            "Email verification rejected (challenge_id=%s, reason=expired_or_missing_code).",
+            challenge.id,
+        )
         raise ValidationError("That email code has expired. Request a new code.")
     expected = _email_code_hash(challenge.id, code)
     if not hmac.compare_digest(verification.verification_code, expected):
         challenge.email_attempts += 1
         db.session.commit()
+        current_app.logger.warning(
+            "Email verification rejected (challenge_id=%s, reason=incorrect_code, attempt=%s).",
+            challenge.id,
+            challenge.email_attempts,
+        )
         if challenge.email_attempts >= MAX_VERIFICATION_ATTEMPTS:
             raise ValidationError("Too many incorrect codes. Request a new code to continue.")
         raise ValidationError("That verification code is incorrect. Please try again.")
@@ -412,6 +475,7 @@ def verify_email_code(challenge, code):
     verification.used_at = challenge.email_verified_at
     challenge.totp_secret_encrypted = encrypt_totp_secret(secret)
     db.session.commit()
+    current_app.logger.info("Email verified for registration challenge_id=%s.", challenge.id)
     label = quote(f"DevMonitor:{challenge.email}")
     issuer = quote("DevMonitor")
     uri = (
@@ -470,6 +534,11 @@ def verify_registration_totp(challenge, code):
     ):
         challenge.totp_attempts += 1
         db.session.commit()
+        current_app.logger.warning(
+            "Authenticator verification rejected (challenge_id=%s, attempt=%s).",
+            challenge.id,
+            challenge.totp_attempts,
+        )
         if challenge.totp_attempts >= MAX_VERIFICATION_ATTEMPTS:
             raise ValidationError("Too many incorrect authenticator codes. Start registration again.")
         raise ValidationError("That authenticator code is invalid or expired. Please try again.")
@@ -521,6 +590,11 @@ def complete_registration(challenge):
         challenge.email_code_expires_at = None
         challenge.totp_secret_encrypted = None
         db.session.commit()
+        current_app.logger.info(
+            "Account registration completed (challenge_id=%s, user_id=%s).",
+            challenge.id,
+            user.id,
+        )
         return user
     except IntegrityError as error:
         db.session.rollback()
