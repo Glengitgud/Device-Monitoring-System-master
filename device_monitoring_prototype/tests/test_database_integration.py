@@ -5,7 +5,11 @@ from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
+import hmac
 import json
+import smtplib
+import struct
+import time
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
@@ -28,14 +32,34 @@ from device_monitoring_prototype.models import (
     DeviceRegistrationToken,
     DeviceMetric,
     DiagnosticRun,
+    EmailVerification,
     Log,
     NetworkInterface,
     NetworkObservation,
     NetworkRecord,
+    Permission,
     Role,
+    RegistrationChallenge,
     User,
     db,
 )
+from device_monitoring_prototype.authentication import (
+    EmailDeliveryError,
+    _send_email,
+    check_smtp_connection,
+    decrypt_totp_secret,
+    totp_counter,
+    utcnow,
+)
+from device_monitoring_prototype.services import hash_password, verify_password
+
+
+def _totp_code(secret, counter):
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return f"{value % 1_000_000:06d}"
 
 
 class DatabaseIntegrationTest(unittest.TestCase):
@@ -45,6 +69,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "TESTING": True,
                 "SECRET_KEY": "integration-test-secret",
                 "SQLALCHEMY_DATABASE_URI": "sqlite://",
+                "MAIL_SERVER": None,
             }
         )
         self.client = self.app.test_client()
@@ -63,50 +88,144 @@ class DatabaseIntegrationTest(unittest.TestCase):
             db.session.remove()
             db.drop_all()
 
-    def register_and_login(self):
-        self.client.get("/register")
-        with self.client.session_transaction() as session:
+    def register_and_login(
+        self,
+        email="test@example.com",
+        username="testuser",
+        full_name="Test User",
+        password="Passw0rd!",
+        client=None,
+    ):
+        client = client or self.client
+        client.get("/register")
+        with client.session_transaction() as session:
             token = session["_csrf_token"]
-        response = self.client.post(
-            "/register",
-            data={
-                "csrf_token": token,
-                "full_name": "Test User",
-                "email": "test@example.com",
-                "username": "testuser",
-                "password": "Passw0rd!",
-                "confirm_password": "Passw0rd!",
-            },
+        registration = {
+            "csrf_token": token,
+            "full_name": full_name,
+            "email": email,
+            "username": username,
+            "password": password,
+            "confirm_password": password,
+        }
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            response = client.post("/api/registration/start", data=registration)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        email_code = send_email.call_args.args[1]
+        email_verified = client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": token, "code": email_code},
         )
-        self.assertEqual(response.status_code, 302)
+        self.assertEqual(email_verified.status_code, 200)
+        self.assertTrue(
+            email_verified.json["qr_code"].startswith("data:image/svg+xml;base64,")
+        )
         with self.app.app_context():
-            user = User.query.filter_by(username="testuser").one()
-            self.assertTrue(
-                check_password_hash(user.password_hash, "Passw0rd!")
-            )
-            self.assertNotEqual(user.password_hash, "Passw0rd!")
+            with client.session_transaction() as session:
+                pending_id = session["registration_challenge_id"]
+            pending = db.session.get(RegistrationChallenge, pending_id)
+            secret = decrypt_totp_secret(pending.totp_secret_encrypted)
+            current_counter = int(time.time() // 30)
+            registration_totp = _totp_code(secret, current_counter)
+        completed = client.post(
+            "/api/registration/verify-authenticator",
+            data={"csrf_token": token, "code": registration_totp},
+        )
+        self.assertEqual(completed.status_code, 200, completed.get_data(as_text=True))
+        with self.app.app_context():
+            user = User.query.filter_by(username=username).one()
+            self.assertTrue(verify_password(password, user.password_hash))
+            self.assertTrue(user.password_hash.startswith("$2b$"))
+            self.assertNotEqual(user.password_hash, password)
+            self.assertTrue(user.email_verified)
+            self.assertTrue(user.totp_enabled)
+            secret = decrypt_totp_secret(user.totp_secret_encrypted)
 
-        response = self.client.post(
+        response = client.post(
             "/login",
             data={
                 "csrf_token": token,
-                "username": "testuser",
+                "username": username,
                 "password": "incorrect-password",
             },
         )
         self.assertEqual(response.status_code, 401)
-        response = self.client.post(
+        response = client.post(
             "/login",
             data={
                 "csrf_token": token,
-                "username": "testuser",
-                "password": "Passw0rd!",
+                "username": username,
+                "password": password,
             },
         )
+        self.assertEqual(response.status_code, 200)
+        with client.session_transaction() as session:
+            token = session["_csrf_token"]
+        with self.app.app_context():
+            user = User.query.filter_by(username=username).one()
+            login_counter = user.totp_last_counter + 1
+        with patch(
+            "device_monitoring_prototype.authentication.totp_counter",
+            side_effect=lambda secret, code: totp_counter(
+                secret, code, now=login_counter * 30 + 1
+            ),
+        ):
+            response = client.post(
+                "/login",
+                data={
+                    "csrf_token": token,
+                    "totp_code": _totp_code(secret, login_counter),
+                },
+            )
         self.assertEqual(response.status_code, 302)
-        self.client.get("/dashboard")
-        with self.client.session_transaction() as session:
-            return session["_csrf_token"]
+        self.assertEqual(response.location, "/device-verification")
+        return token
+
+    def complete_qr_enrollment(self, csrf, name="Verified test device"):
+        qr = self.client.post(
+            "/api/device-registration-tokens",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(qr.status_code, 200, qr.get_data(as_text=True))
+        token = qr.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
+        verified = self.client.post(
+            f"/enroll/{token}/verify",
+            data={"csrf_token": csrf},
+        )
+        self.assertEqual(verified.status_code, 302)
+        download = self.client.post(
+            f"/enroll/{token}/agent.py",
+            data={"csrf_token": csrf, "trust_device_agent": "yes"},
+        )
+        self.assertEqual(download.status_code, 200)
+        specifications = {
+            "cpu_name": "Test CPU",
+            "cpu_cores": 4,
+            "ram_capacity_bytes": 8 * 1024**3,
+            "ram_usage_bytes": 3 * 1024**3,
+            "storage_devices": [
+                {"name": "C:", "total_bytes": 256, "available_bytes": 128}
+            ],
+            "storage_total_bytes": 256,
+            "storage_available_bytes": 128,
+            "gpu_information": ["Test GPU"],
+            "motherboard_brand": "Test Board",
+            "operating_system_name": "Windows 11",
+            "operating_system_version": "10.0.26100",
+            "network_adapters": ["Ethernet"],
+            "ip_addresses": ["192.0.2.20"],
+        }
+        agent = self.app.test_client().post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": name,
+                "device_type": "Desktop",
+                "specifications": specifications,
+            },
+        )
+        self.assertEqual(agent.status_code, 201, agent.get_data(as_text=True))
+        return agent.json["device_id"]
 
     def test_login_and_registration_pages_render(self):
         login_page = self.client.get("/")
@@ -120,26 +239,23 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b'id="confirm_password"', response.data)
         self.assertIn(b'id="registerEmailValidation"', response.data)
         self.assertIn(b'id="registerPasswordStrength"', response.data)
+        self.assertIn(b'id="registrationVerificationDialog"', response.data)
+        self.assertIn(b'id="authenticatorQrCode"', response.data)
         self.assertIn(b"js/password-strength.js", response.data)
         self.assertIn(b"js/register.js", response.data)
         self.assertIn(b"js/register.js", login_page.data)
 
     def test_login_accepts_registered_email_and_rejects_unknown_email(self):
-        self.client.get("/register")
+        csrf = self.register_and_login(
+            full_name="Email Login User",
+            email="EmailLogin@example.com",
+            username="emaillogin",
+            password="EmailPass1!",
+        )
+        self.client.post("/logout", data={"csrf_token": csrf})
+        self.client.get("/login")
         with self.client.session_transaction() as session:
             csrf = session["_csrf_token"]
-        response = self.client.post(
-            "/register",
-            data={
-                "csrf_token": csrf,
-                "full_name": "Email Login User",
-                "email": "EmailLogin@example.com",
-                "username": "emaillogin",
-                "password": "EmailPass1!",
-                "confirm_password": "EmailPass1!",
-            },
-        )
-        self.assertEqual(response.status_code, 302)
         email_login = self.client.post(
             "/login",
             data={
@@ -148,9 +264,46 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "password": "EmailPass1!",
             },
         )
+        self.assertEqual(email_login.status_code, 200)
+        self.assertIn(b"Google Authenticator code", email_login.data)
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        with self.app.app_context():
+            user = User.query.filter_by(username="emaillogin").one()
+            secret = decrypt_totp_secret(user.totp_secret_encrypted)
+            login_counter = user.totp_last_counter + 1
+            invalid_codes = {
+                _totp_code(secret, candidate)
+                for candidate in (login_counter - 1, login_counter, login_counter + 1)
+            }
+        invalid_code = "000000" if "000000" not in invalid_codes else "000001"
+        failed_mfa = self.client.post(
+            "/login",
+            data={"csrf_token": csrf, "totp_code": invalid_code},
+        )
+        self.assertEqual(failed_mfa.status_code, 401)
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        with patch(
+            "device_monitoring_prototype.authentication.totp_counter",
+            side_effect=lambda secret, code: totp_counter(
+                secret, code, now=login_counter * 30 + 1
+            ),
+        ):
+            email_login = self.client.post(
+                "/login",
+                data={
+                    "csrf_token": csrf,
+                    "totp_code": _totp_code(secret, login_counter),
+                },
+            )
         self.assertEqual(email_login.status_code, 302)
-        self.assertEqual(self.client.get("/dashboard").status_code, 200)
+        self.assertEqual(email_login.location, "/device-verification")
+        self.assertEqual(self.client.get("/dashboard").status_code, 302)
 
+        self.client.get("/device-verification")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
         self.client.post("/logout", data={"csrf_token": csrf})
         self.client.get("/login")
         with self.client.session_transaction() as session:
@@ -166,6 +319,13 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(unknown_email_login.status_code, 401)
 
     def test_registration_rejects_malformed_and_duplicate_emails_case_insensitively(self):
+        csrf = self.register_and_login(
+            full_name="Email Validation User",
+            email="valid.address+tag@example.com",
+            username="emailvalidation",
+            password="EmailPass1!",
+        )
+        self.client.post("/logout", data={"csrf_token": csrf})
         self.client.get("/register")
         with self.client.session_transaction() as session:
             csrf = session["_csrf_token"]
@@ -177,11 +337,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
             "password": "EmailPass1!",
             "confirm_password": "EmailPass1!",
         }
-        created = self.client.post("/register", data=valid_payload)
-        self.assertEqual(created.status_code, 302)
-
         duplicate = self.client.post(
-            "/register",
+            "/api/registration/start",
             data={
                 **valid_payload,
                 "email": "VALID.ADDRESS+TAG@EXAMPLE.COM",
@@ -200,7 +357,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         for index, email in enumerate(malformed_addresses):
             with self.subTest(email=email):
                 response = self.client.post(
-                    "/register",
+                    "/api/registration/start",
                     data={
                         **valid_payload,
                         "email": email,
@@ -277,10 +434,34 @@ class DatabaseIntegrationTest(unittest.TestCase):
             self.assertIn("logs", inspect(db.engine).get_table_names())
             self.assertEqual(Role.query.count(), 2)
 
+    def test_init_db_reports_existing_schema_drift_without_overwriting_tables(self):
+        incomplete_app = create_app(
+            {
+                "TESTING": True,
+                "SECRET_KEY": "integration-test-secret",
+                "SQLALCHEMY_DATABASE_URI": "sqlite://",
+            }
+        )
+        with incomplete_app.app_context():
+            with db.engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "CREATE TABLE devices (id INTEGER PRIMARY KEY)"
+                )
+
+        result = incomplete_app.test_cli_runner().invoke(args=["init-db"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("devices.device_name", result.output)
+        self.assertIn("apply the required migrations", result.output)
+        with incomplete_app.app_context():
+            self.assertEqual(
+                {column["name"] for column in inspect(db.engine).get_columns("devices")},
+                {"id"},
+            )
+
     def test_check_db_command_validates_declared_schema_and_row_counts(self):
         result = self.app.test_cli_runner().invoke(args=["check-db"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("16 tables", result.output)
+        self.assertIn("18 tables", result.output)
         self.assertIn(
             "primary/unique keys, foreign keys, and check constraints",
             result.output,
@@ -297,17 +478,17 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(first_result.exit_code, 0, first_result.output)
         second_result = runner.invoke(args=["init-db"])
         self.assertEqual(second_result.exit_code, 0, second_result.output)
-        self.assertIn("active and ready", second_result.output)
+        self.assertIn("credentials were preserved", second_result.output)
 
         with self.app.app_context():
             administrator = User.query.filter_by(username="admin").one()
             self.assertTrue(administrator.is_admin)
             self.assertTrue(administrator.is_active)
-            self.assertTrue(check_password_hash(administrator.password_hash, "admin123"))
+            self.assertTrue(verify_password("admin123", administrator.password_hash))
             self.assertEqual(User.query.filter_by(username="admin").count(), 1)
 
         response = self.client.post(
-            "/register",
+            "/api/registration/start",
             data={
                 "full_name": "Duplicate Administrator",
                 "email": "duplicate-admin@example.com",
@@ -318,6 +499,13 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         with self.app.app_context():
+            user_role = Role.query.filter_by(name="User").one()
+            custom_permission = Permission(
+                code="custom.preserved",
+                description="Existing application permission",
+            )
+            user_role.permissions.append(custom_permission)
+            db.session.add(custom_permission)
             administrator = User.query.filter_by(username="admin").one()
             administrator.status = "inactive"
             administrator.password_hash = generate_password_hash("old-admin-password")
@@ -328,15 +516,30 @@ class DatabaseIntegrationTest(unittest.TestCase):
         with self.app.app_context():
             administrator = User.query.filter_by(username="admin").one()
             self.assertTrue(administrator.is_admin)
-            self.assertTrue(administrator.is_active)
-            self.assertTrue(check_password_hash(administrator.password_hash, "admin123"))
+            self.assertEqual(administrator.status, "inactive")
+            self.assertTrue(
+                check_password_hash(administrator.password_hash, "old-admin-password")
+            )
+            self.assertIn(
+                "Administrator",
+                {role.name for role in administrator.roles},
+            )
+            user_role = Role.query.filter_by(name="User").one()
+            self.assertIn(
+                "custom.preserved",
+                {permission.code for permission in user_role.permissions},
+            )
 
         self.client.get("/login")
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
         response = self.client.post(
             "/login",
-            data={"csrf_token": token, "username": "admin", "password": "admin123"},
+            data={
+                "csrf_token": token,
+                "username": "admin",
+                "password": "old-admin-password",
+            },
         )
         self.assertEqual(response.status_code, 302)
         admin_page = self.client.get("/admin")
@@ -364,17 +567,129 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(protected_admin.status_code, 400)
 
     def test_all_standard_user_pages_and_apis_render(self):
-        self.register_and_login()
-        for path in ("/dashboard", "/devices", "/api/dashboard", "/api/devices"):
+        csrf = self.register_and_login()
+        self.assertEqual(self.client.get("/dashboard").status_code, 302)
+        self.assertEqual(self.client.get("/api/dashboard").status_code, 403)
+        for path in ("/devices", "/archived-devices"):
             with self.subTest(path=path):
-                self.assertEqual(self.client.get(path).status_code, 200)
+                self.assertEqual(self.client.get(path).status_code, 302)
+        self.assertEqual(self.client.get("/api/devices").status_code, 403)
+        self.assertEqual(
+            self.client.get("/api/device-verification-status").status_code, 200
+        )
+        verification_page = self.client.get("/device-verification")
+        self.assertIn(b"deviceVerificationPending", verification_page.data)
+        self.assertIn(b"createDeviceQrBtn", verification_page.data)
+        self.complete_qr_enrollment(csrf)
         devices_page = self.client.get("/devices")
+        self.assertEqual(devices_page.status_code, 200)
         self.assertIn(b'id="generateDeviceQrBtn"', devices_page.data)
         self.assertIn(b'id="deviceStatusFilter"', devices_page.data)
         self.assertEqual(self.client.get("/archived-devices").status_code, 200)
         static_response = self.client.get("/static/css/style.css")
         self.assertEqual(static_response.status_code, 200)
         static_response.close()
+
+    def test_qr_device_registration_verifies_user_and_unlocks_dashboard(self):
+        csrf = self.register_and_login()
+        denied_page = self.client.get("/dashboard")
+        self.assertEqual(denied_page.status_code, 302)
+        self.assertEqual(denied_page.location, "/device-verification")
+        denied_api = self.client.get("/api/dashboard")
+        self.assertEqual(denied_api.status_code, 403)
+        self.assertIn("verify and register a device", denied_api.json["error"].lower())
+
+        qr_response = self.client.post(
+            "/api/device-registration-tokens",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(qr_response.status_code, 200)
+        token = qr_response.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
+        verification_page = self.client.get(f"/enroll/{token}")
+        self.assertEqual(verification_page.status_code, 200)
+        self.assertIn(b"Verify Account", verification_page.data)
+        unverified_download = self.client.post(
+            f"/enroll/{token}/agent.py",
+            data={"csrf_token": csrf, "trust_device_agent": "yes"},
+        )
+        self.assertEqual(unverified_download.status_code, 403)
+        verified_page = self.client.post(
+            f"/enroll/{token}/verify",
+            data={"csrf_token": csrf},
+        )
+        self.assertEqual(verified_page.status_code, 302)
+        confirmed_download = self.client.post(
+            f"/enroll/{token}/agent.py",
+            data={"csrf_token": csrf, "trust_device_agent": "yes"},
+        )
+        self.assertEqual(confirmed_download.status_code, 200)
+        self.assertIn(token.encode(), confirmed_download.data)
+        specifications = {
+            "cpu_name": "Verification CPU",
+            "cpu_cores": 4,
+            "ram_capacity_bytes": 8 * 1024**3,
+            "ram_usage_bytes": 3 * 1024**3,
+            "storage_devices": [
+                {
+                    "name": "C:",
+                    "total_bytes": 256 * 1024**3,
+                    "available_bytes": 128 * 1024**3,
+                }
+            ],
+            "storage_total_bytes": 256 * 1024**3,
+            "storage_available_bytes": 128 * 1024**3,
+            "gpu_information": ["Verification GPU"],
+            "motherboard_brand": "Verification Board",
+            "operating_system_name": "Windows 11",
+            "operating_system_version": "10.0.26100",
+            "network_adapters": ["Ethernet"],
+            "ip_addresses": ["192.0.2.45"],
+        }
+        enrolled = self.client.post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "Verified workstation",
+                "device_type": "Desktop",
+                "specifications": specifications,
+            },
+        )
+        self.assertEqual(enrolled.status_code, 201)
+        self.assertEqual(self.client.get("/dashboard").status_code, 200)
+        self.assertEqual(self.client.get("/api/dashboard").status_code, 200)
+        self.assertEqual(
+            self.client.get("/api/device-verification-status").json,
+            {"verified": True, "verified_devices": 1},
+        )
+        with self.app.app_context():
+            device = db.session.get(Device, enrolled.json["device_id"])
+            self.assertTrue(device.is_verified)
+            self.assertEqual(device.owner_user_id, enrolled.json["owner_user_id"])
+            self.assertEqual(device.hardware_spec.cpu_model, "Verification CPU")
+
+        self.assertEqual(
+            self.app.test_cli_runner().invoke(args=["init-db"]).exit_code,
+            0,
+        )
+        admin_client = self.app.test_client()
+        admin_client.get("/login")
+        with admin_client.session_transaction() as session:
+            admin_csrf = session["_csrf_token"]
+        admin_login = admin_client.post(
+            "/login",
+            data={
+                "csrf_token": admin_csrf,
+                "username": "admin",
+                "password": "admin123",
+            },
+        )
+        self.assertEqual(admin_login.location, "/dashboard")
+        self.assertEqual(admin_client.get("/dashboard").status_code, 200)
+        self.assertEqual(admin_client.get("/api/dashboard").status_code, 200)
+        self.assertEqual(admin_client.get("/device-verification").status_code, 404)
+        admin_devices = admin_client.get("/devices")
+        self.assertNotIn(b"Generate QR Code", admin_devices.data)
+        self.assertNotIn(b"navDeviceVerification", admin_devices.data)
 
     def test_auth_forms_report_database_setup_errors_without_500(self):
         app = create_app(
@@ -425,7 +740,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
 
     def test_registration_login_and_password_hash(self):
         self.register_and_login()
-        self.assertEqual(self.client.get("/dashboard").status_code, 200)
+        dashboard_response = self.client.get("/dashboard")
+        self.assertEqual(dashboard_response.status_code, 302)
+        self.assertEqual(dashboard_response.location, "/device-verification")
 
     def test_registration_enforces_password_policy_and_confirmation(self):
         self.client.get("/register")
@@ -443,7 +760,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         for username, password, confirmation in invalid_passwords:
             with self.subTest(username=username):
                 response = self.client.post(
-                    "/register",
+                    "/api/registration/start",
                     data={
                         "csrf_token": token,
                         "full_name": "Password Test",
@@ -464,39 +781,324 @@ class DatabaseIntegrationTest(unittest.TestCase):
             ("sixteenchar", "Abcdefghijklmno!"),
         ):
             with self.subTest(username=username):
-                response = self.client.post(
-                    "/register",
-                    data={
-                        "csrf_token": token,
-                        "full_name": "Password Test",
-                        "email": f"{username}@example.com",
-                        "username": username,
-                        "password": password,
-                        "confirm_password": password,
-                    },
-                )
-                self.assertEqual(response.status_code, 302)
+                with patch("device_monitoring_prototype.authentication._send_email"):
+                    response = self.client.post(
+                        "/api/registration/start",
+                        data={
+                            "csrf_token": token,
+                            "full_name": "Password Test",
+                            "email": f"{username}@example.com",
+                            "username": username,
+                            "password": password,
+                            "confirm_password": password,
+                        },
+                    )
+                self.assertEqual(response.status_code, 200)
+                with self.app.app_context():
+                    self.assertIsNone(
+                        User.query.filter_by(username=username).one_or_none()
+                    )
 
-    def test_registration_success_shows_popup_on_sign_in_page(self):
+    def test_registration_creates_account_and_displays_verification_qr(self):
         self.client.get("/register")
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
 
-        response = self.client.post(
-            "/register",
-            data={
-                "csrf_token": token,
-                "full_name": "Registered User",
-                "email": "registered@example.com",
-                "username": "registered",
-                "password": "Passw0rd!",
-                "confirm_password": "Passw0rd!",
-            },
+        registration = {
+            "csrf_token": token,
+            "full_name": "Registered User",
+            "email": "registered@example.com",
+            "username": "registered",
+            "password": "Passw0rd!",
+            "confirm_password": "Passw0rd!",
+        }
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            response = self.client.post("/api/registration/start", data=registration)
+        self.assertEqual(response.status_code, 200)
+        with self.app.app_context():
+            self.assertIsNone(User.query.filter_by(username="registered").one_or_none())
+        email_verified = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": token, "code": send_email.call_args.args[1]},
         )
-        self.assertEqual(response.status_code, 302)
-        login_page = self.client.get(response.headers["Location"])
-        self.assertIn(b"data-registration-success", login_page.data)
-        self.assertIn(b"Account created. You can now sign in.", login_page.data)
+        self.assertEqual(email_verified.status_code, 200)
+        self.assertTrue(
+            email_verified.json["qr_code"].startswith("data:image/svg+xml;base64,")
+        )
+        qr_svg = base64.b64decode(email_verified.json["qr_code"].split(",", 1)[1])
+        qr_root = ET.fromstring(qr_svg)
+        svg_namespace = "{http://www.w3.org/2000/svg}"
+        self.assertEqual(
+            next(qr_root.iter(f"{svg_namespace}rect")).get("fill"), "#ffffff"
+        )
+        self.assertEqual(
+            next(qr_root.iter(f"{svg_namespace}path")).get("fill"), "#111827"
+        )
+        with self.app.app_context():
+            self.assertIsNone(User.query.filter_by(username="registered").one_or_none())
+            with self.client.session_transaction() as session:
+                challenge = db.session.get(
+                    RegistrationChallenge, session["registration_challenge_id"]
+                )
+                secret = decrypt_totp_secret(challenge.totp_secret_encrypted)
+                counter = int(time.time() // 30)
+        self.assertNotIn(secret.encode("ascii"), email_verified.data)
+        valid_codes = {
+                _totp_code(secret, candidate)
+                for candidate in (counter - 1, counter, counter + 1)
+        }
+        invalid_code = "000000" if "000000" not in valid_codes else "000001"
+        invalid_totp = self.client.post(
+                "/api/registration/verify-authenticator",
+                data={"csrf_token": token, "code": invalid_code},
+        )
+        self.assertEqual(invalid_totp.status_code, 400)
+        valid_code = _totp_code(secret, counter)
+        response = self.client.post(
+            "/api/registration/verify-authenticator",
+            data={"csrf_token": token, "code": valid_code},
+        )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertTrue(response.json["redirect_url"].endswith("/device-verification"))
+        with self.app.app_context():
+            user = User.query.filter_by(username="registered").one()
+            self.assertTrue(user.email_verified)
+            self.assertIsNotNone(user.email_verified_at)
+            self.assertTrue(user.totp_enabled)
+            self.assertIsNotNone(user.totp_verified_at)
+            self.assertNotEqual(user.totp_secret_encrypted, secret)
+            self.assertNotEqual(user.password_hash, "Passw0rd!")
+
+    def test_missing_email_transport_blocks_registration_without_creating_user(self):
+            self.client.get("/register")
+            with self.client.session_transaction() as session:
+                csrf = session["_csrf_token"]
+            response = self.client.post(
+                "/api/registration/start",
+                data={
+                    "csrf_token": csrf,
+                    "full_name": "No Mail User",
+                    "email": "nomail@example.com",
+                    "username": "nomailuser",
+                    "password": "NoMailPass1!",
+                    "confirm_password": "NoMailPass1!",
+                },
+            )
+            self.assertEqual(response.status_code, 503)
+            self.assertIn("email verification is not configured", response.json["error"].lower())
+            with self.app.app_context():
+                self.assertIsNone(User.query.filter_by(username="nomailuser").one_or_none())
+                with self.client.session_transaction() as session:
+                    challenge = db.session.get(
+                        RegistrationChallenge, session["registration_challenge_id"]
+                    )
+                    self.assertIsNotNone(challenge.password_hash)
+                    self.assertNotEqual(challenge.password_hash, "NoMailPass1!")
+
+    def test_registration_code_expiry_invalid_code_and_resend_limits(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            started = self.client.post(
+                "/api/registration/start",
+                data={
+                    "csrf_token": csrf,
+                    "full_name": "Expiry Test",
+                    "email": "expiry@example.com",
+                    "username": "expiryuser",
+                    "password": "ExpiryPass1!",
+                    "confirm_password": "ExpiryPass1!",
+                },
+            )
+        self.assertEqual(started.status_code, 200)
+        first_code = send_email.call_args.args[1]
+        empty = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": csrf, "code": ""},
+        )
+        self.assertEqual(empty.status_code, 400)
+        wrong_code = "000000" if first_code != "000000" else "000001"
+        invalid = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": csrf, "code": wrong_code},
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("incorrect", invalid.json["error"].lower())
+        too_soon = self.client.post(
+            "/api/registration/resend-code", data={"csrf_token": csrf}
+        )
+        self.assertEqual(too_soon.status_code, 400)
+        self.assertIn("wait", too_soon.json["error"].lower())
+
+        with self.app.app_context():
+            with self.client.session_transaction() as session:
+                challenge = db.session.get(
+                    RegistrationChallenge, session["registration_challenge_id"]
+                )
+                verification = EmailVerification.query.filter_by(
+                    registration_challenge_id=challenge.id
+                ).one()
+                verification.expires_at = utcnow() - timedelta(seconds=1)
+                challenge.last_email_sent_at = utcnow() - timedelta(seconds=61)
+                db.session.commit()
+        expired = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": csrf, "code": first_code},
+        )
+        self.assertEqual(expired.status_code, 400)
+        self.assertIn("expired", expired.json["error"].lower())
+
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            resent = self.client.post(
+                "/api/registration/resend-code", data={"csrf_token": csrf}
+            )
+        self.assertEqual(resent.status_code, 200)
+        self.assertIn("sent", resent.json["message"].lower())
+        second_code = send_email.call_args.args[1]
+        self.assertNotEqual(first_code, second_code)
+        with self.app.app_context():
+            with self.client.session_transaction() as session:
+                challenge = db.session.get(
+                    RegistrationChallenge, session["registration_challenge_id"]
+                )
+                verifications = (
+                    EmailVerification.query.filter_by(
+                        registration_challenge_id=challenge.id
+                    )
+                    .order_by(EmailVerification.id)
+                    .all()
+                )
+                self.assertEqual(len(verifications), 2)
+                self.assertEqual(len(verifications[0].verification_code), 64)
+                self.assertNotEqual(verifications[0].verification_code, first_code)
+                self.assertLessEqual(
+                    verifications[1].expires_at - verifications[1].created_at,
+                    timedelta(minutes=5),
+                )
+        verified = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": csrf, "code": second_code},
+        )
+        self.assertEqual(verified.status_code, 200)
+        reused = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": csrf, "code": second_code},
+        )
+        self.assertEqual(reused.status_code, 400)
+        with self.app.app_context():
+            verification = EmailVerification.query.filter_by(verified=True).one()
+            self.assertIsNotNone(verification.used_at)
+
+        with self.app.app_context():
+            with self.client.session_transaction() as session:
+                challenge = db.session.get(
+                    RegistrationChallenge, session["registration_challenge_id"]
+                )
+                challenge.expires_at = utcnow() - timedelta(seconds=1)
+                db.session.commit()
+        expired_registration = self.client.post(
+            "/api/registration/verify-authenticator",
+            data={"csrf_token": csrf, "code": "123456"},
+        )
+        self.assertEqual(expired_registration.status_code, 400)
+        self.assertIn("registration has expired", expired_registration.json["error"].lower())
+        with self.app.app_context():
+            self.assertIsNone(User.query.filter_by(username="expiryuser").one_or_none())
+
+    def test_totp_uses_rfc6238_sha1_six_digit_code(self):
+        secret = base64.b32encode(b"12345678901234567890").decode("ascii").rstrip("=")
+        self.assertEqual(totp_counter(secret, "287082", now=59), 1)
+
+    def test_email_sender_uses_tls_and_delivers_the_verification_code(self):
+        with self.app.app_context():
+            self.app.config.update(
+                MAIL_SERVER="smtp.example.test",
+                MAIL_PORT=587,
+                MAIL_USERNAME="mailer@example.test",
+                MAIL_PASSWORD="mail-secret",
+                MAIL_DEFAULT_SENDER="mailer@example.test",
+                MAIL_USE_TLS=True,
+            )
+            with patch("device_monitoring_prototype.authentication.smtplib.SMTP") as smtp_factory:
+                smtp = smtp_factory.return_value
+                _send_email("recipient@example.test", "123456")
+        smtp.starttls.assert_called_once()
+        smtp.login.assert_called_once_with("mailer@example.test", "mail-secret")
+        message = smtp.send_message.call_args.args[0]
+        self.assertEqual(message["To"], "recipient@example.test")
+        self.assertIn("123456", message.get_content())
+        self.assertIn("5 minutes", message.get_content())
+        smtp.close.assert_called_once()
+
+    def test_smtp_connectivity_check_authenticates_without_sending_email(self):
+        with self.app.app_context():
+            self.app.config.update(
+                MAIL_SERVER="smtp.gmail.com",
+                MAIL_PORT=587,
+                MAIL_USERNAME="mailer@example.test",
+                MAIL_PASSWORD="mail-secret",
+                MAIL_USE_TLS=True,
+            )
+            with patch("device_monitoring_prototype.authentication.smtplib.SMTP") as smtp_factory:
+                smtp = smtp_factory.return_value
+                smtp.noop.return_value = (250, b"OK")
+                check_smtp_connection()
+        smtp.starttls.assert_called_once()
+        smtp.login.assert_called_once_with("mailer@example.test", "mail-secret")
+        smtp.send_message.assert_not_called()
+        smtp.noop.assert_called_once()
+        smtp.close.assert_called_once()
+
+    def test_smtp_authentication_and_recipient_failures_are_reported_safely(self):
+        with self.app.app_context():
+            self.app.config.update(
+                MAIL_SERVER="smtp.gmail.com",
+                MAIL_PORT=587,
+                MAIL_USERNAME="mailer@example.test",
+                MAIL_PASSWORD="mail-secret",
+                MAIL_DEFAULT_SENDER="mailer@example.test",
+                MAIL_USE_TLS=True,
+            )
+            with patch("device_monitoring_prototype.authentication.smtplib.SMTP") as smtp_factory:
+                smtp = smtp_factory.return_value
+                smtp.login.side_effect = smtplib.SMTPAuthenticationError(
+                    535, b"authentication rejected"
+                )
+                with self.assertLogs(self.app.logger, level="ERROR") as log_output:
+                    with self.assertRaises(EmailDeliveryError):
+                        _send_email("recipient@example.test", "123456")
+                self.assertIn("SMTP authentication failed", log_output.output[0])
+                self.assertNotIn("mail-secret", log_output.output[0])
+
+            with patch("device_monitoring_prototype.authentication.smtplib.SMTP") as smtp_factory:
+                smtp = smtp_factory.return_value
+                smtp.send_message.return_value = {
+                    "recipient@example.test": (550, b"recipient rejected")
+                }
+                with self.assertRaises(EmailDeliveryError):
+                    _send_email("recipient@example.test", "123456")
+                smtp.close.assert_called_once()
+
+    def test_bcrypt_password_hashes_and_legacy_hashes_are_verified(self):
+        bcrypt_hash = hash_password("Passw0rd!")
+        legacy_hash = generate_password_hash("OldPassw0rd!")
+        self.assertTrue(bcrypt_hash.startswith("$2b$"))
+        self.assertTrue(verify_password("Passw0rd!", bcrypt_hash))
+        self.assertFalse(verify_password("wrong", bcrypt_hash))
+        self.assertTrue(verify_password("OldPassw0rd!", legacy_hash))
+
+    def test_new_user_email_verified_database_default_is_false(self):
+        with self.app.app_context():
+            user = User(
+                username="unverified",
+                email="unverified@example.com",
+                password_hash=hash_password("Passw0rd!"),
+            )
+            db.session.add(user)
+            db.session.commit()
+            self.assertFalse(user.email_verified)
+            self.assertFalse(user.is_active)
 
     def test_failed_login_is_recorded_without_storing_password(self):
         token = self.register_and_login()
@@ -527,6 +1129,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
 
     def test_device_registration_and_history_are_persisted(self):
         token = self.register_and_login()
+        self.complete_qr_enrollment(token)
         hardware = {
             "cpu_model": "Test CPU",
             "cpu_cores": 4,
@@ -636,8 +1239,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
         with self.app.app_context():
             device = db.session.get(Device, device_id)
             self.assertEqual(DiagnosticRun.query.count(), 1)
-            self.assertEqual(NetworkRecord.query.count(), 1)
-            self.assertEqual(Log.query.count(), 2)
+            self.assertEqual(NetworkRecord.query.count(), 2)
+            self.assertEqual(Log.query.count(), 3)
             self.assertEqual(len(device.network_interfaces), 1)
             self.assertEqual(len(device.metric_samples), 1)
             self.assertEqual(len(device.diagnostic_runs), 1)
@@ -661,6 +1264,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
 
     def test_device_archive_search_restore_and_soft_delete_retains_row(self):
         token = self.register_and_login()
+        self.complete_qr_enrollment(token)
         with patch(
             "device_monitoring_prototype.services.collect_hardware",
             return_value={"cpu_model": "Archive Test CPU"},
@@ -720,6 +1324,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
 
     def test_standard_user_cannot_open_admin_panel(self):
         token = self.register_and_login()
+        self.complete_qr_enrollment(token)
         response = self.client.get("/admin")
         self.assertEqual(response.status_code, 403)
         self.assertIn(b"Administrator access is required", response.data)
@@ -807,6 +1412,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 full_name="Device Admin",
                 password_hash=generate_password_hash("device-admin-password"),
                 status="active",
+                email_verified=True,
             )
             owner = User(
                 username="deviceowner",
@@ -956,6 +1562,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 full_name="Root Admin",
                 password_hash=generate_password_hash("admin-password-long-enough"),
                 status="active",
+                email_verified=True,
             )
             administrator.roles.append(Role.query.filter_by(name="Administrator").one())
             db.session.add(administrator)
@@ -1073,16 +1680,31 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b"<svg", qr_svg)
         token = qr_data["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         with self.app.app_context():
-            registration = DeviceRegistrationToken.query.one()
+            registration = DeviceRegistrationToken.query.filter_by(
+                token_hash=hashlib.sha256(token.encode()).hexdigest()
+            ).one()
             self.assertEqual(registration.user.username, "testuser")
             self.assertNotEqual(registration.token_hash, token)
             self.assertEqual(len(registration.token_hash), 64)
 
         enrollment_page = self.client.get(f"/enroll/{token}")
         self.assertEqual(enrollment_page.status_code, 200)
-        self.assertIn(b"agentDownload", enrollment_page.data)
-        self.assertIn(b"agentDownload').click()", enrollment_page.data)
-        download = self.client.get(f"/enroll/{token}/agent.py")
+        self.assertIn(b"Verify Account", enrollment_page.data)
+        self.assertEqual(
+            self.client.post(
+                f"/enroll/{token}/agent.py",
+                data={"csrf_token": csrf, "trust_device_agent": "yes"},
+            ).status_code,
+            403,
+        )
+        self.client.post(
+            f"/enroll/{token}/verify",
+            data={"csrf_token": csrf},
+        )
+        download = self.client.post(
+            f"/enroll/{token}/agent.py",
+            data={"csrf_token": csrf, "trust_device_agent": "yes"},
+        )
         self.assertEqual(download.status_code, 200)
         self.assertIn(token.encode(), download.data)
         self.assertNotIn(b"__REGISTRATION_TOKEN__", download.data)
@@ -1183,7 +1805,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
             self.assertIsNotNone(device.registered_at)
             self.assertIsNotNone(device.updated_at)
             self.assertEqual(device.network_records[0].ip_address, "192.0.2.15")
-            token_record = DeviceRegistrationToken.query.one()
+            token_record = DeviceRegistrationToken.query.filter_by(
+                token_hash=hashlib.sha256(token.encode()).hexdigest()
+            ).one()
             self.assertIsNotNone(token_record.used_at)
             self.assertEqual(token_record.device_id, device.id)
             self.assertEqual(token_record.user_id, device.owner_user_id)
@@ -1196,31 +1820,16 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(replay.status_code, 401)
 
         other_client = self.app.test_client()
-        other_client.get("/register")
-        with other_client.session_transaction() as session:
-            other_csrf = session["_csrf_token"]
-        other_client.post(
-            "/register",
-            data={
-                "csrf_token": other_csrf,
-                "full_name": "Other User",
-                "email": "other@example.com",
-                "username": "otheruser",
-                "password": "OtherUser1!",
-                "confirm_password": "OtherUser1!",
-            },
-        )
-        other_client.post(
-            "/login",
-            data={
-                "csrf_token": other_csrf,
-                "username": "otheruser",
-                "password": "OtherUser1!",
-            },
+        self.register_and_login(
+            full_name="Other User",
+            email="other@example.com",
+            username="otheruser",
+            password="OtherUser1!",
+            client=other_client,
         )
         self.assertEqual(
             other_client.get(f"/devices/{device_id}/specifications").status_code,
-            404,
+            302,
         )
         self.assertEqual(
             self.app.test_cli_runner().invoke(args=["init-db"]).exit_code,
@@ -1267,14 +1876,17 @@ class DatabaseIntegrationTest(unittest.TestCase):
         qr_pattern = next(svg_root.iter(f"{svg_namespace}path"))
         self.assertEqual(background.get("fill"), "#ffffff")
         self.assertEqual(qr_pattern.get("fill"), "#111827")
-        devices_page = self.client.get("/devices")
+        devices_page = self.client.get("/device-verification")
         self.assertIn(b"qr-code-card", devices_page.data)
         self.assertIn(b"deviceQrExpiryCard", devices_page.data)
-        self.assertIn(b' id="generateDeviceQrBtn"', devices_page.data)
-        self.assertIn(b' id="addDeviceBtn"', devices_page.data)
+        self.assertIn(b' id="createDeviceQrBtn"', devices_page.data)
         first_token = first.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         second_token = second.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         self.assertNotEqual(first_token, second_token)
+        first_status = self.client.get(
+            f"/api/device-registration-tokens/{first_token}/status"
+        )
+        self.assertEqual(first_status.json["status"], "revoked")
         active_status = self.client.get(
             f"/api/device-registration-tokens/{second_token}/status"
         )
@@ -1282,27 +1894,12 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(active_status.json["status"], "active")
         self.assertIn("server_time", active_status.json)
         other_client = self.app.test_client()
-        other_client.get("/register")
-        with other_client.session_transaction() as session:
-            other_csrf = session["_csrf_token"]
-        other_client.post(
-            "/register",
-            data={
-                "csrf_token": other_csrf,
-                "full_name": "Another User",
-                "email": "another@example.com",
-                "username": "anotheruser",
-                "password": "AnotherUser1!",
-                "confirm_password": "AnotherUser1!",
-            },
-        )
-        other_client.post(
-            "/login",
-            data={
-                "csrf_token": other_csrf,
-                "username": "anotheruser",
-                "password": "AnotherUser1!",
-            },
+        self.register_and_login(
+            full_name="Another User",
+            email="another@example.com",
+            username="anotheruser",
+            password="AnotherUser1!",
+            client=other_client,
         )
         unauthorized_status = other_client.get(
             f"/api/device-registration-tokens/{second_token}/status"
@@ -1310,14 +1907,14 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(unauthorized_status.status_code, 404)
         with self.app.app_context():
             registration = DeviceRegistrationToken.query.filter_by(
-                token_hash=hashlib.sha256(first_token.encode()).hexdigest()
+                token_hash=hashlib.sha256(second_token.encode()).hexdigest()
             ).one()
             registration.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
             db.session.commit()
-        expired_page = self.client.get(f"/enroll/{first_token}")
+        expired_page = self.client.get(f"/enroll/{second_token}")
         self.assertEqual(expired_page.status_code, 410)
         expired_status = self.client.get(
-            f"/api/device-registration-tokens/{first_token}/status"
+            f"/api/device-registration-tokens/{second_token}/status"
         )
         self.assertEqual(expired_status.status_code, 200)
         self.assertEqual(expired_status.json["status"], "expired")

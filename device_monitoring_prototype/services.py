@@ -7,9 +7,10 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 from sqlalchemy import or_, update
 from sqlalchemy.exc import IntegrityError
-from werkzeug.security import generate_password_hash
+from werkzeug.security import check_password_hash
 
 from device_monitoring_prototype.models import (
     ActivityLog,
@@ -60,6 +61,27 @@ class RegistrationTokenError(ValidationError):
 
 class DatabaseSetupError(RuntimeError):
     """Raised when required seed data is missing from the database."""
+
+
+def hash_password(password):
+    """Hash new passwords with bcrypt while accepting legacy Werkzeug hashes."""
+    if not isinstance(password, str):
+        raise ValidationError("Password must be text.")
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("ascii")
+
+
+def verify_password(password, password_hash):
+    if not isinstance(password, str) or not isinstance(password_hash, str):
+        return False
+    if password_hash.startswith(("$2a$", "$2b$", "$2y$")):
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("ascii"))
+        except (ValueError, TypeError):
+            return False
+    try:
+        return check_password_hash(password_hash, password)
+    except (ValueError, TypeError):
+        return False
 
 
 def validate_password(password):
@@ -146,8 +168,9 @@ def create_user(data, *, role_name="User"):
         full_name=full_name,
         username=username,
         email=email,
-        password_hash=generate_password_hash(password),
+        password_hash=hash_password(password),
         status="active",
+        email_verified=True,
     )
     user.roles.append(_role(role_name))
     db.session.add(user)
@@ -261,6 +284,14 @@ def create_device(owner, data):
 def issue_device_registration_token(user):
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
+    DeviceRegistrationToken.query.filter_by(
+        user_id=user.id,
+        used_at=None,
+        revoked_at=None,
+    ).update(
+        {"revoked_at": now},
+        synchronize_session=False,
+    )
     registration = DeviceRegistrationToken(
         token_hash=hashlib.sha256(token.encode("ascii")).hexdigest(),
         user=user,
@@ -433,6 +464,10 @@ def register_agent_device(token, data):
         raise RegistrationTokenError(
             "This registration token is invalid, expired, or already used."
         )
+    if registration.verified_at is None or registration.download_confirmed_at is None:
+        raise RegistrationTokenError(
+            "Verify the account and confirm the Device Agent download before registering a device."
+        )
 
     now = datetime.now(timezone.utc)
     claim = db.session.execute(
@@ -461,6 +496,7 @@ def register_agent_device(token, data):
         operating_system=specifications["operating_system_name"] or "Unknown",
         operating_system_version=specifications["operating_system_version"],
         status="online" if specifications["ip_addresses"] else "unknown",
+        is_verified=True,
         owner=user,
         registered_by=user,
         hardware_spec=DeviceSpecification(

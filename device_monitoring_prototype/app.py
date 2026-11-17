@@ -40,14 +40,25 @@ from sqlalchemy import (
     CheckConstraint,
     String,
     UniqueConstraint,
+    and_,
     cast,
     func,
     inspect as sqlalchemy_inspect,
     or_,
+    select,
 )
 from sqlalchemy.exc import SQLAlchemyError
-from werkzeug.security import check_password_hash, generate_password_hash
-
+from device_monitoring_prototype.authentication import (
+    EmailDeliveryError,
+    cancel_registration,
+    check_smtp_connection,
+    complete_registration,
+    resend_email_code,
+    start_registration,
+    verify_email_code,
+    verify_login_totp,
+    verify_registration_totp,
+)
 from device_monitoring_prototype.models import (
     ActivityLog,
     Device,
@@ -56,6 +67,7 @@ from device_monitoring_prototype.models import (
     Log,
     NetworkRecord,
     Permission,
+    RegistrationChallenge,
     Role,
     User,
     db,
@@ -70,11 +82,13 @@ from device_monitoring_prototype.services import (
     record_diagnostic,
     find_valid_registration_token,
     issue_device_registration_token,
+    hash_password,
     register_agent_device,
     RegistrationTokenError,
     restore_device,
     soft_delete_device,
     validate_password,
+    verify_password,
     update_device,
     update_user,
 )
@@ -147,6 +161,14 @@ def create_app(test_config=None):
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("SECRET_KEY") or secrets.token_hex(32),
         PUBLIC_BASE_URL=os.environ.get("PUBLIC_BASE_URL", "").rstrip("/"),
+        TOTP_ENCRYPTION_KEY=os.environ.get("TOTP_ENCRYPTION_KEY"),
+        MAIL_SERVER=os.environ.get("MAIL_SERVER"),
+        MAIL_PORT=int(os.environ.get("MAIL_PORT", "587")),
+        MAIL_USERNAME=os.environ.get("MAIL_USERNAME"),
+        MAIL_PASSWORD=os.environ.get("MAIL_PASSWORD"),
+        MAIL_DEFAULT_SENDER=os.environ.get("MAIL_DEFAULT_SENDER"),
+        MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "true").lower() == "true",
+        MAIL_TIMEOUT=int(os.environ.get("MAIL_TIMEOUT", "15")),
         SQLALCHEMY_DATABASE_URI=_database_uri(),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True},
@@ -198,7 +220,8 @@ def create_app(test_config=None):
     @login_manager.user_loader
     def load_user(user_id):
         try:
-            return db.session.get(User, int(user_id))
+            user = db.session.get(User, int(user_id))
+            return user if user and user.email_verified else None
         except (TypeError, ValueError):
             return None
 
@@ -210,6 +233,30 @@ def create_app(test_config=None):
             if request.path.startswith("/api/"):
                 return jsonify(error="This account is inactive."), 401
             return redirect(url_for("login"))
+        if (
+            current_user.is_authenticated
+            and not current_user.is_admin
+            and not verified_device_count(current_user.id)
+            and request.endpoint not in {
+                "login",
+                "register",
+                "logout",
+                "static",
+                "device_verification",
+                "create_device_registration_token",
+                "device_registration_token_status",
+                "device_verification_status",
+                "device_enrollment",
+                "verify_device_enrollment",
+                "download_device_agent",
+                "submit_agent_enrollment",
+            }
+        ):
+            if request.path.startswith("/api/"):
+                return jsonify(
+                    error="Verify and register a device before accessing this resource."
+                ), 403
+            return redirect(url_for("device_verification"))
         if request.method == "POST" and request.endpoint != "submit_agent_enrollment":
             submitted = request.headers.get("X-CSRF-Token")
             if not submitted:
@@ -253,18 +300,62 @@ def create_app(test_config=None):
     def api_error(error, status=400):
         return jsonify(error=str(error)), status
 
-    def enrollment_page(download_url=None, message=None, status=200):
+    def enrollment_page(download_url=None, message=None, status=200, verified=False):
         response = app.make_response(
             render_template(
                 "enroll.html",
                 download_url=download_url,
                 message=message,
+                verified=verified,
             )
         )
         response.status_code = status
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
+
+    def registration_qr_payload(token, expires_at):
+        base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
+        parsed_base = urlsplit(base_url)
+        if (
+            parsed_base.scheme not in {"http", "https"}
+            or not parsed_base.netloc
+            or parsed_base.username
+            or parsed_base.password
+            or parsed_base.path not in {"", "/"}
+            or parsed_base.query
+            or parsed_base.fragment
+        ):
+            raise ValueError(
+                "Set PUBLIC_BASE_URL to the reachable application origin before generating a QR code."
+            )
+        enrollment_url = f"{base_url}{url_for('device_enrollment', token=token)}"
+        qr_code = qrcode.make(
+            enrollment_url,
+            image_factory=SvgPathImage,
+            box_size=8,
+            border=4,
+        )
+        svg_root = ET.fromstring(qr_code.to_string())
+        svg_namespace = "{http://www.w3.org/2000/svg}"
+        svg_root.insert(
+            0,
+            ET.Element(
+                f"{svg_namespace}rect",
+                {"width": "100%", "height": "100%", "fill": "#ffffff"},
+            ),
+        )
+        for path in svg_root.iter(f"{svg_namespace}path"):
+            path.set("fill", "#111827")
+        encoded_qr = base64.b64encode(
+            ET.tostring(svg_root, encoding="utf-8")
+        ).decode("ascii")
+        return {
+            "enrollment_url": enrollment_url,
+            "qr_code": f"data:image/svg+xml;base64,{encoded_qr}",
+            "expires_at": expires_at.isoformat(),
+            "server_time": datetime.now(timezone.utc).isoformat(),
+        }
 
     def can_manage_device(device):
         can_access_device(device)
@@ -302,6 +393,7 @@ def create_app(test_config=None):
                 else "—"
             ),
             "status": device.status.capitalize(),
+            "isVerified": device.is_verified,
             "lifecycleStatus": device.lifecycle_status,
             "archivedAt": device.archived_at.isoformat() if device.archived_at else "",
             "registered": device.registered_at.isoformat() if device.registered_at else "",
@@ -324,12 +416,70 @@ def create_app(test_config=None):
             "status": user.status.capitalize(),
         }
 
+    def verified_device_count(user_id):
+        return Device.query.filter_by(
+            owner_user_id=user_id,
+            is_verified=True,
+        ).filter(Device.lifecycle_status != "deleted").count()
+
     @app.route("/", methods=["GET", "POST"])
     @app.route("/login", methods=["GET", "POST"])
     def login():
         if current_user.is_authenticated and request.method == "GET":
-            return redirect(url_for("dashboard"))
+            destination = (
+                "dashboard" if current_user.is_admin else "device_verification"
+            )
+            return redirect(url_for(destination))
         if request.method == "POST":
+            pending_user_id = session.get("pending_login_user_id")
+            if pending_user_id:
+                user = db.session.get(User, pending_user_id)
+                if not user or not user.is_active or not user.totp_enabled:
+                    session.pop("pending_login_user_id", None)
+                    session.pop("pending_login_next", None)
+                    flash("Sign-in expired. Please enter your credentials again.", "warning")
+                    return render_template("login.html"), 401
+                if not verify_login_totp(user, request.form.get("totp_code", "")):
+                    user.totp_attempts += 1
+                    db.session.add(
+                        ActivityLog(
+                            actor_user_id=user.id,
+                            event_type="auth.login_2fa_failed",
+                            entity_type="user",
+                            entity_id=user.id,
+                            details={"username": user.username},
+                        )
+                    )
+                    db.session.commit()
+                    if user.totp_attempts >= 5:
+                        session.pop("pending_login_user_id", None)
+                        session.pop("pending_login_next", None)
+                        flash(
+                            "Too many incorrect authenticator codes. Sign in again to retry.",
+                            "danger",
+                        )
+                        return render_template("login.html"), 401
+                    flash("That authenticator code is invalid or expired. Please try again.", "danger")
+                    return render_template("login.html", requires_totp=True), 401
+                next_url = session.pop("pending_login_next", "")
+                session.pop("pending_login_user_id", None)
+                user.totp_attempts = 0
+                login_user(user, remember=False, fresh=True)
+                user.last_login_at = datetime.now(timezone.utc)
+                db.session.add(
+                    ActivityLog(
+                        actor_user_id=user.id,
+                        event_type="auth.login_succeeded",
+                        entity_type="user",
+                        entity_id=user.id,
+                        details={"username": user.username, "two_factor": True},
+                    )
+                )
+                db.session.commit()
+                if not user.is_admin:
+                    return redirect(url_for("device_verification"))
+                return redirect(next_url or url_for("dashboard"))
+
             identifier = request.form.get("username", "").strip()
             password = request.form.get("password", "")
             if "@" in identifier:
@@ -343,7 +493,7 @@ def create_app(test_config=None):
             if (
                 not user
                 or not user.is_active
-                or not check_password_hash(user.password_hash, password)
+                or not verify_password(password, user.password_hash)
             ):
                 db.session.add(
                     ActivityLog(
@@ -362,6 +512,13 @@ def create_app(test_config=None):
                 target = urlsplit(urljoin(request.host_url, next_url))
                 if target.scheme not in {"http", "https"} or target.netloc != request.host:
                     next_url = ""
+            if user.totp_enabled:
+                session.clear()
+                user.totp_attempts = 0
+                db.session.commit()
+                session["pending_login_user_id"] = user.id
+                session["pending_login_next"] = next_url
+                return render_template("login.html", requires_totp=True)
             session.clear()
             login_user(user, remember=False, fresh=True)
             user.last_login_at = datetime.now(timezone.utc)
@@ -375,28 +532,111 @@ def create_app(test_config=None):
                 )
             )
             db.session.commit()
+            if not user.is_admin:
+                return redirect(url_for("device_verification"))
             return redirect(next_url or url_for("dashboard"))
         return render_template("login.html")
 
     @app.route("/register", methods=["GET", "POST"])
     def register():
         if current_user.is_authenticated and request.method == "GET":
-            return redirect(url_for("dashboard"))
+            return redirect(
+                url_for("dashboard")
+                if current_user.is_admin
+                else url_for("device_verification")
+            )
         if request.method == "POST":
-            try:
-                create_user(request.form, role_name="User")
-            except ValidationError as error:
-                flash(str(error), "danger")
-                return render_template("register.html"), 400
-            except DatabaseSetupError as error:
-                app.logger.error("Account registration blocked: %s", error)
-                return render_template(
-                    "service_unavailable.html",
-                    message=str(error),
-                ), 503
-            flash("Account created. You can now sign in.", "success")
-            return redirect(url_for("login"))
+            return begin_registration()
         return render_template("register.html")
+
+    def registration_challenge():
+        challenge_id = session.get("registration_challenge_id")
+        if not isinstance(challenge_id, int):
+            raise ValidationError("Registration session expired. Please start again.")
+        challenge = db.session.get(RegistrationChallenge, challenge_id)
+        if not challenge:
+            raise ValidationError("Registration session expired. Please start again.")
+        return challenge
+
+    @app.post("/api/registration/start")
+    def begin_registration():
+        try:
+            challenge = start_registration(request.form)
+        except ValidationError as error:
+            return jsonify(error=str(error)), 400
+        except EmailDeliveryError as error:
+            if error.challenge_id is not None:
+                session["registration_challenge_id"] = error.challenge_id
+            return jsonify(error=str(error)), 503
+        except DatabaseSetupError as error:
+            app.logger.error("Account registration blocked: %s", error)
+            return jsonify(error=str(error)), 503
+        session.pop("registration_challenge_id", None)
+        session["registration_challenge_id"] = challenge.id
+        return jsonify(
+            message="We sent a 6-digit verification code to your email address.",
+        )
+
+    @app.post("/api/registration/resend-code")
+    def resend_registration_code():
+        try:
+            resend_email_code(registration_challenge())
+        except ValidationError as error:
+            return jsonify(error=str(error)), 400
+        except EmailDeliveryError as error:
+            return jsonify(error=str(error)), 503
+        return jsonify(message="A new verification code has been sent.")
+
+    @app.post("/api/registration/cancel")
+    def cancel_registration_verification():
+        if not session.get("registration_challenge_id"):
+            session.pop("registration_challenge_id", None)
+            return jsonify(message="Registration canceled.")
+        try:
+            cancel_registration(registration_challenge())
+        except ValidationError as error:
+            session.pop("registration_challenge_id", None)
+            return jsonify(error=str(error)), 400
+        session.pop("registration_challenge_id", None)
+        return jsonify(message="Registration canceled.")
+
+    @app.post("/api/registration/verify-email")
+    def verify_registration_email():
+        try:
+            qr_code = verify_email_code(
+                registration_challenge(), request.form.get("code", "")
+            )
+        except ValidationError as error:
+            return jsonify(error=str(error)), 400
+        return jsonify(
+            message="Email verified. Scan the QR code with Google Authenticator.",
+            qr_code=qr_code,
+        )
+
+    @app.post("/api/registration/verify-authenticator")
+    def verify_registration_authenticator():
+        try:
+            challenge = registration_challenge()
+            verify_registration_totp(challenge, request.form.get("code", ""))
+            user = complete_registration(challenge)
+        except ValidationError as error:
+            return jsonify(error=str(error)), 400
+        except RuntimeError as error:
+            app.logger.error("Account registration could not be completed: %s", error)
+            return jsonify(error="Account setup is temporarily unavailable."), 503
+        session.pop("registration_challenge_id", None)
+        login_user(user, remember=False, fresh=True)
+        device_qr = None
+        try:
+            token, expires_at = issue_device_registration_token(user)
+            device_qr = registration_qr_payload(token, expires_at)
+        except (DatabaseSetupError, ValueError) as error:
+            app.logger.error("Device enrollment QR generation blocked: %s", error)
+        return jsonify(
+            message="Your account is verified and ready.",
+            redirect_url=url_for("device_verification"),
+            device_qr=device_qr,
+        )
 
     @app.post("/logout")
     @login_required
@@ -406,10 +646,34 @@ def create_app(test_config=None):
         flash("You have been signed out.", "info")
         return redirect(url_for("login"))
 
+    @app.get("/device-verification")
+    @login_required
+    def device_verification():
+        if current_user.is_admin:
+            abort(404)
+        return render_template(
+            "device_verification.html",
+            active_page="device-verification",
+            verified_device_count=verified_device_count(current_user.id),
+            registration_qr=None,
+            registration_complete=False,
+        )
+
     @app.get("/dashboard")
     @login_required
     def dashboard():
-        return render_template("dashboard.html", active_page="dashboard")
+        registration_count = 0 if current_user.is_admin else verified_device_count(current_user.id)
+        if not current_user.is_admin and not registration_count:
+            flash(
+                "Verify at least one device with the QR registration workflow before opening the dashboard.",
+                "warning",
+            )
+            return redirect(url_for("device_verification"))
+        return render_template(
+            "dashboard.html",
+            active_page="dashboard",
+            verified_device_count=registration_count,
+        )
 
     @app.get("/devices")
     @login_required
@@ -423,6 +687,10 @@ def create_app(test_config=None):
         can_access_device(device)
         specification = device.hardware_spec
         fields = [
+            (
+                "Device Verification Status",
+                "Verified" if device.is_verified else "Not verified",
+            ),
             (
                 "Registration Date and Time",
                 device.registered_at.isoformat() if device.registered_at else None,
@@ -493,49 +761,27 @@ def create_app(test_config=None):
             return api_error(
                 "Device registration is only available to standard users.", 403
             )
-        base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
-        parsed_base = urlsplit(base_url)
-        if (
-            parsed_base.scheme not in {"http", "https"}
-            or not parsed_base.netloc
-            or parsed_base.username
-            or parsed_base.password
-            or parsed_base.path not in {"", "/"}
-            or parsed_base.query
-            or parsed_base.fragment
-        ):
-            return api_error(
-                "Set PUBLIC_BASE_URL to the application origin before generating a QR code.",
-                500,
-            )
-        token, expires_at = issue_device_registration_token(current_user)
-        enrollment_url = f"{base_url}{url_for('device_enrollment', token=token)}"
-        qr_code = qrcode.make(
-            enrollment_url,
-            image_factory=SvgPathImage,
-            box_size=8,
-            border=4,
-        )
-        image_buffer = io.BytesIO()
-        svg_root = ET.fromstring(qr_code.to_string())
-        svg_namespace = "{http://www.w3.org/2000/svg}"
-        svg_root.insert(
-            0,
-            ET.Element(
-                f"{svg_namespace}rect",
-                {"width": "100%", "height": "100%", "fill": "#ffffff"},
-            ),
-        )
-        for path in svg_root.iter(f"{svg_namespace}path"):
-            path.set("fill", "#111827")
-        image_buffer.write(ET.tostring(svg_root, encoding="utf-8"))
-        encoded_qr = base64.b64encode(image_buffer.getvalue()).decode("ascii")
-        response = jsonify(
-            enrollment_url=enrollment_url,
-            qr_code=f"data:image/svg+xml;base64,{encoded_qr}",
-            expires_at=expires_at.isoformat(),
-            server_time=datetime.now(timezone.utc).isoformat(),
-        )
+        try:
+            base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
+            parsed_base = urlsplit(base_url)
+            if (
+                parsed_base.scheme not in {"http", "https"}
+                or not parsed_base.netloc
+                or parsed_base.username
+                or parsed_base.password
+                or parsed_base.path not in {"", "/"}
+                or parsed_base.query
+                or parsed_base.fragment
+            ):
+                return api_error(
+                    "Set PUBLIC_BASE_URL to the reachable application origin before generating a QR code.",
+                    500,
+                )
+            token, expires_at = issue_device_registration_token(current_user)
+            qr_payload = registration_qr_payload(token, expires_at)
+        except ValueError as error:
+            return api_error(error, 500)
+        response = jsonify(**qr_payload)
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -565,6 +811,10 @@ def create_app(test_config=None):
             status = "revoked"
         elif expires_at <= datetime.now(timezone.utc):
             status = "expired"
+        elif registration.download_confirmed_at:
+            status = "download_confirmed"
+        elif registration.verified_at:
+            status = "verified"
         else:
             status = "active"
 
@@ -588,22 +838,63 @@ def create_app(test_config=None):
                 message="This device registration QR code has expired or was already used.",
                 status=410,
             )
-        return enrollment_page(
-            download_url=url_for("download_device_agent", token=token)
-        )
+        registration = find_valid_registration_token(token)
+        if registration is None:
+            return enrollment_page(
+                message="This device registration QR code has expired or was already used.",
+                status=410,
+            )
+        return enrollment_page(verified=registration.verified_at is not None)
 
-    @app.get("/enroll/<token>/agent.py")
+    @app.post("/enroll/<token>/verify")
+    def verify_device_enrollment(token):
+        if current_user.is_authenticated and current_user.is_admin:
+            return enrollment_page(
+                message="Device registration is only available to standard users.",
+                status=403,
+            )
+        registration = find_valid_registration_token(token)
+        if registration is None or registration.user.status != "active":
+            return enrollment_page(
+                message="This device registration QR code has expired or was already used.",
+                status=410,
+            )
+        if registration.verified_at is None:
+            registration.verified_at = datetime.now(timezone.utc)
+            db.session.commit()
+        return redirect(url_for("device_enrollment", token=token))
+
+    @app.route("/enroll/<token>/agent.py", methods=["GET", "POST"])
     def download_device_agent(token):
         if current_user.is_authenticated and current_user.is_admin:
             return enrollment_page(
                 message="Device registration is only available to standard users.",
                 status=403,
             )
-        if find_valid_registration_token(token) is None:
+        registration = find_valid_registration_token(token)
+        if registration is None or registration.user.status != "active":
             return enrollment_page(
                 message="This device registration QR code has expired or was already used.",
                 status=410,
             )
+        if request.method == "GET":
+            return enrollment_page(
+                message="Use the confirmation button to request the Device Agent download.",
+                verified=registration.verified_at is not None,
+            )
+        if registration.verified_at is None:
+            return enrollment_page(
+                message="Verify the account before downloading the Device Agent.",
+                status=403,
+            )
+        if request.form.get("trust_device_agent") != "yes":
+            return enrollment_page(
+                message="Confirm that you trust this application before downloading the Device Agent.",
+                status=400,
+                verified=True,
+            )
+        registration.download_confirmed_at = datetime.now(timezone.utc)
+        db.session.commit()
         base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
         parsed_base = urlsplit(base_url)
         if (
@@ -1077,6 +1368,11 @@ def create_app(test_config=None):
     @app.get("/api/dashboard")
     @login_required
     def dashboard_data():
+        if not current_user.is_admin and not verified_device_count(current_user.id):
+            return api_error(
+                "Verify a device with the QR registration workflow to access the dashboard.",
+                403,
+            )
         query = Device.query.filter(
             Device.lifecycle_status == "active",
             Device.status != "retired",
@@ -1096,12 +1392,58 @@ def create_app(test_config=None):
             offline=sum(device.status == "offline" for device in devices),
         )
 
+    @app.get("/api/device-verification-status")
+    @login_required
+    def device_verification_status():
+        if current_user.is_admin:
+            return api_error(
+                "Device verification is only available to standard users.", 403
+            )
+        count = verified_device_count(current_user.id)
+        response = jsonify(verified=count > 0, verified_devices=count)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.cli.command("check-mail")
+    def check_mail_command():
+        """Validate configured SMTP connectivity and authentication without sending mail."""
+        try:
+            check_smtp_connection()
+        except EmailDeliveryError as error:
+            raise click.ClickException(str(error)) from error
+        click.echo("SMTP connectivity and authentication succeeded.")
+
     @app.cli.command("init-db")
     def init_db_command():
         """Create missing model tables and seed standard RBAC roles/permissions."""
         # Existing tables are not altered; apply the documented schema migration
         # before this command when upgrading an existing database.
-        db.create_all()
+        try:
+            db.create_all()
+            inspector = sqlalchemy_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+            missing_columns = []
+            for table in db.metadata.sorted_tables:
+                if table.name not in existing_tables:
+                    continue
+                existing_columns = {
+                    item["name"] for item in inspector.get_columns(table.name)
+                }
+                missing_columns.extend(
+                    f"{table.name}.{column.name}"
+                    for column in table.columns
+                    if column.name not in existing_columns
+                )
+        except SQLAlchemyError as error:
+            db.session.rollback()
+            raise click.ClickException(_database_error_message(error)) from error
+        if missing_columns:
+            raise click.ClickException(
+                "The existing database schema is incomplete (missing "
+                + ", ".join(missing_columns)
+                + "). Back up the database, apply the required migrations, "
+                "and run `check-db`; `init-db` does not alter existing tables."
+            )
         role_definitions = {
             "Administrator": "Full administrative access",
             "User": "Standard device owner access",
@@ -1128,13 +1470,20 @@ def create_app(test_config=None):
                 db.session.add(permission)
             permission_rows[code] = permission
         db.session.flush()
-        roles["Administrator"].permissions = list(permission_rows.values())
-        roles["User"].permissions = [
+        administrator_permissions = list(permission_rows.values())
+        user_permissions = [
             permission_rows["devices.read"],
             permission_rows["devices.write"],
             permission_rows["diagnostics.read"],
             permission_rows["diagnostics.write"],
         ]
+        for role, permissions_to_add in (
+            (roles["Administrator"], administrator_permissions),
+            (roles["User"], user_permissions),
+        ):
+            for permission in permissions_to_add:
+                if permission not in role.permissions:
+                    role.permissions.append(permission)
         db.session.commit()
 
         default_admin = User.query.filter(
@@ -1150,8 +1499,9 @@ def create_app(test_config=None):
                 username=DEFAULT_ADMIN_USERNAME,
                 email="admin@localhost",
                 full_name="Administrator",
-                password_hash=generate_password_hash(DEFAULT_ADMIN_PASSWORD),
+                password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
                 status="active",
+                email_verified=True,
             )
             db.session.add(default_admin)
             db.session.flush()
@@ -1164,14 +1514,13 @@ def create_app(test_config=None):
                     details={"username": default_admin.username},
                 )
             )
-        default_admin.roles = [roles["Administrator"]]
-        default_admin.status = "active"
-        default_admin.password_hash = generate_password_hash(DEFAULT_ADMIN_PASSWORD)
+        if roles["Administrator"] not in default_admin.roles:
+            default_admin.roles.append(roles["Administrator"])
         db.session.commit()
         click.echo(
             "Created the default Administrator account."
             if created_admin
-            else "The default Administrator account is active and ready."
+            else "The existing Administrator account and credentials were preserved."
         )
         click.echo("Database tables and default RBAC roles are ready.")
 
@@ -1206,8 +1555,9 @@ def create_app(test_config=None):
             username=username,
             email=f"{username}@example.test",
             full_name="Sample User",
-            password_hash=generate_password_hash(password),
+            password_hash=hash_password(password),
             status="active",
+            email_verified=True,
         )
         user.roles.append(role)
         device = Device(
@@ -1325,6 +1675,52 @@ def create_app(test_config=None):
                     and constraint.name
                     and constraint.name not in actual_checks
                 )
+
+            for table in db.metadata.sorted_tables:
+                if table.name not in actual_tables:
+                    continue
+                available_columns = {
+                    column["name"] for column in inspector.get_columns(table.name)
+                }
+                for constraint in table.foreign_key_constraints:
+                    elements = list(constraint.elements)
+                    referenced_table = elements[0].column.table
+                    if referenced_table.name not in actual_tables:
+                        continue
+                    referenced_columns = {
+                        column["name"]
+                        for column in inspector.get_columns(referenced_table.name)
+                    }
+                    if any(
+                        element.parent.name not in available_columns
+                        or element.column.name not in referenced_columns
+                        for element in elements
+                    ):
+                        continue
+                    join_condition = and_(
+                        *(
+                            element.parent == element.column
+                            for element in elements
+                        )
+                    )
+                    missing_reference = and_(
+                        *(element.column.is_(None) for element in elements)
+                    )
+                    populated_key = and_(
+                        *(element.parent.is_not(None) for element in elements)
+                    )
+                    orphan_count = db.session.execute(
+                        select(func.count())
+                        .select_from(
+                            table.outerjoin(referenced_table, join_condition)
+                        )
+                        .where(populated_key, missing_reference)
+                    ).scalar_one()
+                    if orphan_count:
+                        issues.append(
+                            f"{orphan_count} orphan record(s) in {table.name} "
+                            f"for foreign key to {referenced_table.name}"
+                        )
         except SQLAlchemyError as error:
             db.session.rollback()
             raise click.ClickException(_database_error_message(error)) from error
@@ -1343,6 +1739,9 @@ def create_app(test_config=None):
                 ).count(),
                 "device specifications": DeviceSpecification.query.count(),
                 "device registration tokens": DeviceRegistrationToken.query.count(),
+                "registration challenges": RegistrationChallenge.query.filter_by(
+                    completed_at=None
+                ).count(),
             }
         except SQLAlchemyError as error:
             db.session.rollback()
@@ -1351,7 +1750,8 @@ def create_app(test_config=None):
         click.echo(
             f"Database schema is valid ({len(actual_tables)} tables, "
             f"{sum(len(table.indexes) for table in db.metadata.sorted_tables)} "
-            "model indexes, primary/unique keys, foreign keys, and check constraints)."
+            "model indexes, primary/unique keys, foreign keys, and check constraints; "
+            "no orphaned foreign-key records)."
         )
         click.echo(
             "Row counts: "
@@ -1394,8 +1794,9 @@ def create_app(test_config=None):
             username=username,
             email=email,
             full_name=full_name,
-            password_hash=generate_password_hash(password),
+            password_hash=hash_password(password),
             status="active",
+            email_verified=True,
         )
         user.roles.append(role)
         db.session.add(user)
