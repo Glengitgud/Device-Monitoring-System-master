@@ -3,6 +3,8 @@
 ## ERD and relationships
 
 - `users` own zero or more `devices`; each device created by the application has exactly one owner.
+- `registration_challenges` temporarily stage registration data before the `users` row exists; successful email and TOTP checks create the user and mark the challenge completed.
+- `email_verifications` stores HMAC-digested, short-lived, single-use codes linked to a registration challenge.
 - `users` may issue one-use `device_registration_tokens`; a successfully consumed token is linked to exactly one registered device through its owner and event history.
 - `devices` have one `device_specifications` row and many `network_records` and `diagnostic_runs`.
 - `devices` have many `logs`; deleting a device cascades to its device event history.
@@ -15,7 +17,9 @@
 
 | Table | Contents |
 |---|---|
-| `users` | Full name, unique username/email, Werkzeug password hash, status, timestamps |
+| `users` | Full name, unique username/email, Werkzeug password hash, email verification state, encrypted TOTP secret/state, status, timestamps |
+| `registration_challenges` | Staged account data, password hash, HMAC-hashed email code, code/challenge expiry, verification timestamps, attempt counters, resend limit state |
+| `email_verifications` | Email, HMAC-digested six-digit code, 5-minute expiry, verified/used state, creation and use timestamps |
 | `roles`, `permissions` | RBAC roles and permission codes |
 | `user_roles`, `role_permissions` | RBAC many-to-many associations |
 | `devices` | Device identity, owner/registrant, connectivity status, active/archive/delete lifecycle, and lifecycle timestamps |
@@ -29,11 +33,11 @@
 | `device_metrics` | Historical CPU, memory, storage, and network metrics (not currently collected) |
 | `activity_logs` | Auditable account and system actions for administrator oversight |
 
-`schema.sql` creates the full MySQL/MariaDB schema from scratch. Existing databases created from the earlier project design must first be backed up and upgraded with `migrations/001_database_integration.sql`. The original XAMPP prototype schema has a separate upgrade, `migrations/003_upgrade_xampp_prototype.sql`; back up first and use it only when the legacy `users`, `devices`, and `logs` tables are empty. Apply only the unapplied migrations required by the current schema (`004_device_lifecycle.sql`, `005_qr_device_enrollment.sql`, and, if `check-db` reports missing status checks, `006_account_and_device_status_checks.sql`). These are one-time scripts; fresh installs already contain the status constraints. Then run `flask --app device_monitoring_prototype.app init-db` to create missing tables and seed roles and permissions. `flask --app device_monitoring_prototype.app check-db` validates the live tables, columns, indexes, foreign keys, check constraints, and key record counts without changing data. `db.create_all()` does not alter existing tables.
+`schema.sql` creates the full MySQL/MariaDB schema from scratch. Existing databases created from the earlier project design must first be backed up and upgraded with `migrations/001_database_integration.sql`. The original XAMPP prototype schema has a separate upgrade, `migrations/003_upgrade_xampp_prototype.sql`; back up first and use it only when the legacy `users`, `devices`, and `logs` tables are empty. Apply only the unapplied migrations required by the current schema (`004_device_lifecycle.sql` through `010_gmail_email_verification.sql`), including `006_account_and_device_status_checks.sql` only when `check-db` reports missing status checks. Migration 009 preserves existing account access and adds the staged-registration and TOTP fields. Migration 010 creates `email_verifications` and changes the default for new `users.email_verified` values to false without changing existing rows. These are one-time scripts; fresh installs already contain the declared schema. Then run `flask --app device_monitoring_prototype.app init-db` to create missing tables and seed roles and permissions. `flask --app device_monitoring_prototype.app check-db` validates the live tables, columns, indexes, foreign keys, check constraints, and key record counts without changing data. `db.create_all()` does not alter existing tables.
 
 ## Authentication and authorization
 
-Public registration always creates a `User` role and rejects the reserved `admin` username. New accounts require matching password and confirmation values, and passwords must be 8-16 characters with at least one capital letter and one special character. The same policy applies to administrator-created accounts and account-creation CLI commands. `init-db` restores the reserved account as an active Administrator with the hashed `admin123` bootstrap password; it is excluded from user management. Passwords are hashed using `werkzeug.security.generate_password_hash` and checked using `check_password_hash`. Flask-Login manages sessions. Admin-only account management is checked server-side, device data is limited to owners/registrants, write operations require the session CSRF token, and disabled users are rejected on subsequent requests (except the reserved Administrator).
+Public registration rejects the reserved `admin` username and does not create a `User` row until both verification layers succeed. A six-digit email code is HMAC-hashed in `email_verifications`, expires after five minutes, and is single-use with attempt, resend-cooldown, and per-hour limits. Gmail SMTP uses STARTTLS and loads credentials from `.env`; `check-mail` verifies authentication without sending a message. After email verification, a unique TOTP secret is encrypted at rest and shown as an `otpauth://` QR; a valid 6-digit Google Authenticator code is required before account creation. TOTP login challenges are required for users with 2FA enabled and replayed counters are rejected. Password confirmation and the existing 8-16 character complexity policy are enforced. New passwords use bcrypt; existing Werkzeug hashes remain supported during migration. Flask-Login manages sessions. Admin-only account management is checked server-side, device data is limited to owners/registrants, write operations require the session CSRF token, and unverified or disabled users are rejected on subsequent requests (except the reserved Administrator).
 
 Create the initial Administrator and RBAC tables:
 
@@ -43,7 +47,7 @@ flask --app device_monitoring_prototype.app init-db
 
 The bootstrap login is `admin` / `admin123`. Change it before deployment. `create-admin` can add additional administrator accounts.
 
-Database credentials are read from `.env`/environment variables or `DATABASE_URL`. Set a persistent random `SECRET_KEY`; set `COOKIE_SECURE=true` when HTTPS is enabled.
+Database credentials are read from `.env`/environment variables or `DATABASE_URL`. Set persistent random `SECRET_KEY` and `TOTP_ENCRYPTION_KEY` values; rotating or losing the latter makes encrypted authenticator secrets unreadable. Configure Gmail with `MAIL_SERVER=smtp.gmail.com`, `MAIL_PORT=587`, `MAIL_USE_TLS=true`, a Gmail sender/username, and a Google App Password in `MAIL_PASSWORD`. Never commit `.env`. Run `flask --app device_monitoring_prototype.app check-mail` to test SMTP TLS and authentication. Set `COOKIE_SECURE=true` when HTTPS is enabled.
 
 ## Database CRUD and backend operations
 
@@ -51,8 +55,12 @@ Database credentials are read from `.env`/environment variables or `DATABASE_URL
 
 | Method and path | Access | Operation |
 |---|---|---|
-| `POST /register` | Public | Create a standard account |
-| `POST /login`, `POST /logout` | Public / signed-in | Verify password hash; start/end a Flask-Login session |
+| `POST /api/registration/start` | Public | Stage a registration and send the email code; creates no user |
+| `POST /api/registration/verify-email` | Registration session | Verify the six-digit email code and return the authenticator QR |
+| `POST /api/registration/resend-code`, `POST /api/registration/cancel` | Registration session | Resend within limits or abandon the pending registration |
+| `POST /api/registration/verify-authenticator` | Registration session | Verify the TOTP code and atomically create the account |
+| `POST /register` | Public | Compatibility form endpoint for starting the staged registration |
+| `POST /login`, `POST /logout` | Public / signed-in | Verify password and, when enabled, TOTP; start/end a Flask-Login session |
 | `POST /api/device-registration-tokens` | Signed-in | Create a hashed, expiring, account-linked QR enrollment token |
 | `GET /enroll/<token>` | One-use token | Show enrollment/download page; reject invalid, used, or expired tokens |
 | `GET /enroll/<token>/agent.py` | One-use token | Download the Windows Python agent bound to the token |
