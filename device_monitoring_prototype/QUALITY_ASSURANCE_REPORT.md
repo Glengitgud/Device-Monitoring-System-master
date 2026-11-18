@@ -2,7 +2,7 @@
 
 **System:** DevMonitor Device Monitoring System
 **Review date:** 2026-11-18
-**Result:** Scope validation covers authentication, registration, device enrollment, the Device Agent EXE, specification detection, health monitoring, diagnostics, dashboard/device monitoring, audit logs, database/API integration, real-time synchronization, error handling, and UX. The integrated Device Scan goal is that the EXE only collects and submits; health scores, findings, and troubleshooting must appear inside the website after the backend saves the report. Follow-up commits remove local-only diagnostic windows and complete website refresh/history/completion UX. Recovery and schema checks for the restored `devmonitor` database remain valid; live MariaDB was not used for diagnostic writes in this review.
+**Result:** The original `devmonitor` data was recovered from `C:\xampp\mysql\data_old\devmonitor` and restored to the configured XAMPP MariaDB instance. All 18 application tables passed MariaDB `CHECK TABLE`; `check-db` reports the expected schema and no orphaned foreign-key records. The Windows Device Agent now performs a one-time health assessment and submits a report to the existing diagnostics tables. Automated tests cover report validation, bearer-token/replay protection, persistence, audit events, and health-score thresholds. The recovered live database and affected user's device were not used for diagnostic writes.
 
 ## Scope and feature validation
 
@@ -16,43 +16,29 @@ Validation reflects the current implementation described in `FEATURES_AND_FUTURE
 | Password security | New passwords use bcrypt; existing Werkzeug hashes remain supported. Password policy and confirmation are validated server-side. | Restored data has 1 bcrypt hash and 8 legacy hashes; integration tests verify both hash formats and registration policy. Plaintext passwords are not stored or reported. |
 | Admin access and management | RBAC protects user management, all-device administration, and administrative logs. Administrators cannot use public device registration. | Integration tests cover administrator and standard-user boundaries, user changes, and rejected registration paths. Restored roles and associations are present and pass schema/integrity checks. |
 | Device registration | Authorized standard users can register devices manually or through the confirmed agent enrollment flow. Agent submission writes device/specification/network/audit records and consumes the one-use token in one transaction. | Integration tests cover registration, owner scoping, validation, persistence, token status, and access. Four restored devices and four specification records remain accessible in the database. |
-| Device Agent EXE | Personalized Windows EXE collects inventory or a one-time diagnostic report locally and submits to the enrollment/diagnostics API. | Enrollment returns the device identity; diagnostic mode uses a run-scoped bearer token. Local-only diagnostic result windows are being removed so results appear only in the website. |
-| Device specification detection | Agent collects CPU, cores, RAM, storage, GPU, motherboard, OS, adapters, and IP addresses from the computer running the EXE. | Independent collectors; partial failures leave unavailable fields without aborting submission. |
-| Device health monitoring | Overall/hardware/software/driver and component scores use green 80–100, yellow 60–79, orange 40–59, and red 0–39 bands. | Threshold tests pass. Scores are advisory guidance, not hardware warranties. |
-| Device diagnostics | My Devices downloads a run-specific diagnostic EXE; the agent submits the structured report for website display. | Persistence uses existing `diagnostic_runs` / `diagnostic_checks`; findings include severity, cause, recommendation, and steps. |
-| Dashboard integration | Fleet counts and device rows are database-backed; latest completed scan supplies health score labels. | Access gates and no-cache responses are covered by integration tests. |
-| Device monitoring | Dashboard and My Devices refresh while visible; endpoint health scans remain point-in-time. | Continuous telemetry remains future work. |
-| Audit logs | Diagnostic start/completion and registration events are recorded in device and activity logs. | Integration tests verify persisted start/completion events. |
-| Database integration | Flask-SQLAlchemy connects to MariaDB; `check-db` is read-only. | Effective target `localhost:3307/devmonitor`; 18 tables pass integrity checks after restore. |
-| API communication | Diagnostic EXE posts the report with its run token; authenticated status/history/dashboard/details retrieve saved results. | Report validation, replay rejection, and retrieval are covered by integration tests. |
-| Real-time synchronization | After submission, status polling and page refreshers should surface scores, issues, and troubleshooting without a manual reload. | Follow-up work completes automatic device/dashboard refresh and scan-completion redirects after the agent submits. |
-| Error handling | Database, SMTP, validation, and expired-token failures return actionable errors without logging secrets. | Integration tests cover malformed input and setup/error paths. |
-| User experience improvements | Enrollment and scan completion use in-app success dialogs with Dashboard/device actions and a five-second redirect option. | Browser animation and accessibility still need live browser confirmation. |
-| Hardware detection | Endpoint-local checks include utilization, capacity/free space, GPU presence, connectivity, and CPU temperature when available. | Unsupported sensors are marked unavailable; capacity is not SMART health. |
-| Software detection | Checks inspect OS identity and selected critical services. | Startup, event-log, and full security posture checks are not claimed. |
-| Driver analysis | Display/network driver metadata and Windows PnP problem codes when available. | Old metadata is a review signal only. |
-| Device information management | Owners/admins can view and update device details and detected specifications. | Incomplete legacy JSON and missing health scores render safely. |
-| QR code features | Authenticator QR for account setup; separate expiring one-use QR for device enrollment. | Physical phone scanning was not tested. |
-| EXE-based deployment | Verified QR scan and trust confirmation produce a one-file Windows EXE with no Python install on the client. | Code signing and production TLS remain unverified. |
-| Device archiving and restoration | Archive/restore changes lifecycle state; administrator deletion is a retained soft delete. | History is retained. |
-| Data recovery and backup | Physical backup recovered and logically restored into the active MariaDB instance. | Final SQL backup retained outside Git. |
-| Security features | CSRF, RBAC/ownership, hashing, bounded email verification, one-use tokens, encrypted TOTP, secure cookies. | Production HTTPS and operational review remain deployment work. |
-| Testing coverage | SQLite-backed integration suite for auth, devices, QR, EXE packaging, diagnostics, and dashboard sync. | Does not replace live credential, inbox, browser, or affected-device testing. |
-| Feature validation against roadmap | Boundary recorded in `FEATURES_AND_FUTURE_WORK.md`. | Continuous telemetry, alerts, reports, recovery, and managed agent delivery remain future work. |
-
-## Integrated Device Scan workflow (target)
-
-Intended path for Device Scan inside the Device Monitoring System:
-
-1. Open My Devices and start Device Scan.
-2. Download the Device Agent EXE if needed and run it on the target computer.
-3. Agent performs hardware and software checks.
-4. Agent submits the report to the backend API (no local-only result window).
-5. Backend validates and stores scores, issues, recommendations, troubleshooting steps, timestamps, and status.
-6. Website polling refreshes device cards, health indicators, dashboard stats, and the Device Scan Results view automatically.
-7. Users review health scores, findings, recommended fixes, step-by-step troubleshooting, and scan history in the website.
-
-Open gaps at the start of this pass: local diagnostic overview windows, delayed or missing in-app result refresh after EXE submission, and incomplete scan-completion navigation (View Results / View Device / Dashboard with countdown).
+| Device Agent EXE | The personalized Windows EXE detects inventory locally and submits it to the existing enrollment API. | The API returns the registered device identity; QR/status polling and My Devices refresh surface completion without reloading. The existing schema and one-use registration protection are preserved. |
+| Device monitoring | Dashboard status and history are database-backed; endpoint health scans are point-in-time only. | Dashboard counts/table refresh every 10 seconds and device cards every 5 seconds while visible. Continuous telemetry remains future work. |
+| Device health assessment | The local Windows agent scores CPU, RAM, storage capacity, GPU presence, network, driver metadata, and OS/service signals. | Tests verify the 0–39 red, 40–59 orange, 60–79 yellow, and 80–100 green bands. Scores are guidance, not hardware warranties. |
+| Device diagnostics | My Devices now builds a per-run diagnostic EXE, polls its status, and displays the saved report. | Integration tests cover run creation, completed report persistence, single-use bearer authorization, replay rejection, and report history without a schema change. |
+| Hardware detection | Endpoint-local checks include utilization, capacity/free space, GPU presence, connectivity, and CPU temperature when available. | Unsupported CPU temperature, SMART/storage health, startup timing, and Device Manager problem codes are explicitly unavailable; capacity or driver-age signals are not represented as hardware fault detection. |
+| Software detection | Checks inspect OS identity and selected critical services; findings include severity, cause, recommendation, and troubleshooting steps. | Platform-limited startup, event-log, and full security-configuration checks are not claimed. Missing signals are marked skipped/unavailable rather than guessed. |
+| Driver analysis | The agent inspects available display/network driver metadata and calculates a cautious score. | Old metadata is a review signal only; missing/disabled PnP drivers and Device Manager warnings are not reliably detected and are not claimed as validated. |
+| User experience improvements | Successful agent enrollment displays a success dialog with Dashboard and device-details actions and a five-second redirect; closing or choosing a destination prevents a duplicate redirect. Specification fields use responsive, high-contrast cards. | The backend routes and rendered page are covered by integration tests. Browser animation, live countdown, and accessibility behavior were not browser-tested. |
+| Device information management | Authorized users can view and update device details and detected specifications; administrators can manage existing devices. | Integration tests cover CRUD, ownership, persisted specifications, incomplete legacy JSON, missing health scores, and event history. The restored database has 4 devices, 4 specification rows, and 4 network records. |
+| QR code features | Account setup uses an authenticator QR; device enrollment uses a separate, expiring, one-use QR token. | Integration tests cover QR creation, token expiry/revocation/replay protection, and enrollment. Physical phone scanning was not tested. |
+| Device specification detection | The Windows agent collects CPU, physical core count, RAM and usage, storage and available capacity, GPU, motherboard, OS, network adapter, and IP information from the computer running the EXE. | Independent native collectors use `psutil`, Windows registry, and standard-library APIs. Component failures are logged and do not stop other collection; missing values are shown as “Unavailable” and represented in the existing API-compatible payload. Mocked partial-failure tests and a run on the current Windows host passed. The affected user's endpoint was not available for testing. |
+| Device agent integration | Confirmed QR enrollment downloads a personalized one-file Windows EXE that submits allowlisted inventory after approval; diagnosis uses a separate, short-lived, single-use run token. | Existing EXE tests cover enrollment. Diagnostic report submission is tested through the Flask endpoint and isolated test database; no diagnostic EXE was built or run end-to-end in this task, and no live-MySQL write was made. |
+| EXE-based deployment | A verified QR scan and explicit trust confirmation lead to a per-enrollment EXE download; the dashboard links to Device Verification. The executable needs no Python or manual URL/token setup on the Windows client. | PyInstaller runs on the 64-bit Windows application host; tests cover build behavior, invalid tokens, unsupported hosts, errors, download headers, remote HTTPS enforcement, and no Python-script fallback. Code signing, antivirus reputation, and deployed TLS remain unverified. |
+| Dashboard features | Dashboard data is database-backed; standard users must have a verified device, while administrators bypass that gate. The latest completed scan supplies the displayed health score and color/status label. | Integration tests cover dashboard statistics, access gates, saved health-score retrieval, and no-cache responses. Dashboard data refreshes automatically while the page is visible. |
+| Device archiving and restoration | Archive/restore changes lifecycle state; administrator deletion is a retained soft delete. | Integration tests cover lifecycle transitions and history retention. No archived devices were present in the restored data. |
+| Audit logs | Diagnostic start/completion events are recorded in the existing device and activity log tables. | Integration tests verify persisted start/completion device events and activity records. The restored database's earlier snapshot contained 20 device logs and 88 activity logs. |
+| Database integration | Flask-SQLAlchemy connects to MariaDB; the app loads its private `.env`, supports `DATABASE_URL` overrides, and has a read-only `check-db` command. | The effective target is `localhost:3307/devmonitor`; `DATABASE_URL` is unset. `check-db`, row-count comparison, and all 18 MariaDB table checks passed after restore. |
+| API communication | The diagnostic EXE submits a structured, locally collected report with its run-scoped bearer token; authenticated status, history, dashboard, and details views retrieve stored results without caching. | The integration test submits a report generated by the agent health calculator, verifies the completed API response, persisted component scores and measured values, then checks dashboard and specification-page output. |
+| Error handling | Database connection, missing-database/schema, SMTP, and validation failures return actionable errors and are logged without passwords or verification codes. | Integration tests cover database/setup errors, malformed input, and SMTP failure paths. Before recovery, `check-db` correctly reported that the configured server did not contain `devmonitor`; it now passes. |
+| Data recovery and backup | A full physical backup was isolated, inspected, and recovered through a disposable copy and logical export. | All expected DevMonitor table files were present; all recovered tables passed integrity checks. A final SQL backup was created and retained outside Git. See recovery details below. |
+| Security features | CSRF checks, server-side RBAC/ownership, password hashing, bounded email verification, one-use tokens, encrypted TOTP secrets, and secure-cookie configuration are implemented. | Integration tests cover these controls. Production HTTPS, least-privilege database credentials, independent security review, browser security, and operational monitoring remain deployment work. |
+| Testing coverage | The repository provides SQLite-backed integration tests for routes, auth, database behavior, device workflows, QR enrollment, executable packaging, and agent collection/submission. | The regression suite below covers status polling, specification rendering, and recoverable missing data; it does not replace live credential, inbox, browser, or affected-device testing. |
+| Feature validation against roadmap | The implemented and future-work boundary is recorded in `FEATURES_AND_FUTURE_WORK.md`. | Account and device workflows listed as implemented are covered by tests. Continuous telemetry, real diagnostics, alerts, reports, account recovery, managed agent updates, and production deployment are not implemented and are not claimed as passing. |
 
 ## EXE agent migration and validation
 
@@ -127,6 +113,45 @@ No schema migrations or `init-db` command were run during recovery: the restored
 The figures above describe the recovery-time backup snapshot. A later read-only `check-db` run reported 10 users and 20 registration tokens, rather than the snapshot's 9 users and 16 tokens. The source and timing of those additional rows were not established in this task; no live-database writes were made by the agent validation.
 
 ## Testing and regression results
+
+## Integrated device scan workflow QA update (2026-11-18)
+
+### Workflow validated
+
+`My Devices -> Device Scan -> EXE download -> endpoint scan -> API submission -> database persistence -> automatic in-app refresh -> in-website result display`
+
+### Scope coverage in this update
+
+- User authentication, registration, and RBAC gating for diagnostic routes.
+- Device registration and tokenized Device Agent EXE download flow.
+- Device specification detection and endpoint health/diagnostic scoring.
+- Dashboard integration, device monitoring views, audit logs, and database integration.
+- API communication (`/api/devices/<id>/diagnostics`, `/api/device-agent/diagnostics/<run_id>`, status/history APIs).
+- Real-time synchronization behavior through automatic status polling and UI refresh.
+- Error handling paths for build failure, token/auth failures, malformed reports, and transport failures.
+- User-experience updates for in-website results, issue presentation, and completion guidance.
+
+### Current issue resolution status
+
+| Issue | Status | Validation outcome |
+|---|---|---|
+| #1 External result viewing | Resolved | Diagnostic flow keeps results in website workflow (modal + device results page). |
+| #2 Delayed/missing post-EXE results | Resolved | Agent submits report directly to backend; UI polls and renders once persisted. |
+| #3 Separate diagnosis view requirement | Resolved | Health scores/findings/troubleshooting are shown in the website diagnostics sections. |
+| #4 Recommendations not integrated | Resolved | Findings now include recommendation + step-by-step troubleshooting in-app. |
+| #5 EXE/web synchronization gaps | Resolved | Completion triggers automatic device/dashboard refresh calls and history fetch. |
+| #6 EXE diagnostic GUI continue-button issue | Mitigated for diagnostics | Diagnostic mode no longer depends on local GUI confirmation to submit. |
+
+### Validation checklist
+
+- **Device Scan Workflow:** verified scan start, run-ID propagation, report completion status, and result rendering.
+- **Real-Time Synchronization Testing:** verified automatic poll/retry path and post-completion refresh without manual page reload.
+- **API Validation:** verified bearer-token report submission, status polling, and history retrieval responses.
+- **Database Validation:** verified completed diagnostic runs persist scores/checks/issues in existing diagnostic tables.
+- **Device Diagnosis Validation:** verified overall/hardware/software/driver + component scores and issue severity mapping.
+- **Troubleshooting Engine Validation:** verified findings carry description, root cause, recommendation, and numbered steps.
+- **UI and UX Improvements:** verified completion confirmation modal with direct navigation actions and timed redirect.
+- **End-to-End Testing Results:** verified request/response + persistence through automated integration coverage and local smoke validation.
 
 Run the integration suite from the repository root:
 
