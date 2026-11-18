@@ -65,6 +65,7 @@ def _validate_issue(issue):
         "severity": 16,
         "description": 1000,
         "root_cause": 1000,
+        "impact": 1000,
         "recommendation": 1000,
     }
     if not isinstance(issue, dict) or set(issue) != set(fields) | {"steps"}:
@@ -225,7 +226,8 @@ def complete_diagnostic_run(run_id, token, report):
         )
     )
     db.session.commit()
-    return db.session.get(DiagnosticRun, run_id)
+    db.session.refresh(run)
+    return run
 
 
 def diagnostic_run_payload(run):
@@ -235,7 +237,7 @@ def diagnostic_run_payload(run):
             "category": check.category,
             "status": check.status,
             "summary": check.result_summary,
-            "details": check.details or {},
+            "details": check.details if isinstance(check.details, dict) else {},
         }
         for check in run.checks
     ]
@@ -248,7 +250,28 @@ def diagnostic_run_payload(run):
     }
     for check in checks:
         if check["name"] == "Overall scores" and isinstance(check["details"], dict):
-            scores = check["details"].get("scores", scores)
+            stored_scores = check["details"].get("scores")
+            if isinstance(stored_scores, dict):
+                stored_components = stored_scores.get("components")
+
+                def valid_score(value):
+                    return value if type(value) is int and 0 <= value <= 100 else None
+
+                scores = {
+                    **scores,
+                    **{
+                        key: valid_score(stored_scores.get(key))
+                        for key in ("overall", "hardware", "software", "drivers")
+                    },
+                    "components": (
+                        {
+                            key: valid_score(value)
+                            for key, value in stored_components.items()
+                        }
+                        if isinstance(stored_components, dict)
+                        else {}
+                    ),
+                }
             break
     issues = [
         check["details"]["issue"]

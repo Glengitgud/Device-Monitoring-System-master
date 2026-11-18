@@ -786,53 +786,104 @@ def collect_health_report(specifications):
                 )
             elif name == "RAM":
                 issue = _health_issue(
-                    "High RAM utilization", score,
+                    "High RAM Usage", score,
                     f"RAM utilization was {value:.0f}% during this sample.",
                     "Open applications and background tasks are using most available memory.",
                     "Review memory use and close unnecessary applications.",
-                    ["Open Task Manager.", "Sort the Processes list by Memory.", "Save work and close applications you do not need.", "Restart the device if high use continues."],
+                    [
+                        "Open Task Manager.",
+                        "Click Processes.",
+                        "Sort by Memory Usage.",
+                        "Close unnecessary applications.",
+                        "Restart device if necessary.",
+                    ],
                 )
             elif name == "Storage capacity":
                 issue = _health_issue(
-                    "Low available storage", score,
+                    "Low Storage Space", score,
                     f"{summary}. The lowest free-space volume has {value:.1f}% free.",
                     "A nearly full volume can prevent updates and normal application work.",
                     "Free space safely or ask an administrator about storage expansion.",
-                    ["Open Settings and select System, then Storage.", "Review temporary files and large items.", "Back up important files before removing them.", "Avoid deleting Windows or application folders manually."],
+                    [
+                        "Open Storage Settings.",
+                        "Identify large files.",
+                        "Remove temporary files.",
+                        "Empty Recycle Bin.",
+                        "Run Disk Cleanup.",
+                    ],
                 )
             elif name == "Network connectivity":
                 stage = value["stage"]
                 network_guidance = {
                     "configuration": (
                         "The executable was built with an invalid DevMonitor address.",
-                        ["Re-download the agent from the signed-in DevMonitor page.", "If the issue continues, ask the administrator to verify PUBLIC_BASE_URL."],
+                        [
+                            "Check Ethernet or Wi-Fi connection.",
+                            "Restart adapter.",
+                            "Flush DNS.",
+                            "Reconnect to network.",
+                            "Re-download the agent from the signed-in DevMonitor page.",
+                        ],
                     ),
                     "dns": (
                         "The device could not translate the configured server name to a network address.",
-                        ["Confirm the device has internet or organization-network access.", "Reconnect Wi-Fi or Ethernet.", "Check VPN and DNS settings with your network administrator.", "Retry after DNS service is restored."],
+                        [
+                            "Check Ethernet or Wi-Fi connection.",
+                            "Restart adapter.",
+                            "Flush DNS.",
+                            "Reconnect to network.",
+                            "Test connectivity.",
+                        ],
                     ),
                     "tcp": (
                         "The server name resolved, but its configured port did not accept a connection.",
-                        ["Confirm the DevMonitor server is running.", "Verify the server address and port with the administrator.", "Check whether a firewall or VPN blocks that port.", "Retry when the service is reachable."],
+                        [
+                            "Check Ethernet or Wi-Fi connection.",
+                            "Restart adapter.",
+                            "Flush DNS.",
+                            "Reconnect to network.",
+                            "Test connectivity.",
+                        ],
                     ),
                     "tls": (
                         "The server was reached, but HTTPS negotiation failed; the configured port, protocol, or certificate may be wrong.",
-                        ["Confirm the address uses the scheme and port supplied by the administrator (HTTPS commonly uses port 443).", "Check that the computer's date and time are correct.", "Open the DevMonitor HTTPS address in a browser and inspect any certificate warning.", "Ask the administrator to verify the listening port and renew or configure the server certificate.", "Do not bypass certificate validation."],
+                        [
+                            "Check Ethernet or Wi-Fi connection.",
+                            "Restart adapter.",
+                            "Flush DNS.",
+                            "Reconnect to network.",
+                            "Test connectivity.",
+                        ],
                     ),
                     "endpoint": (
                         "The network connection succeeded, but the configured DevMonitor API path did not respond correctly.",
-                        ["Open the DevMonitor site in a browser.", "Confirm the application is running at the configured address.", "Ask the administrator to verify the deployed application path and agent download settings.", "Download a fresh agent after the server address is corrected."],
+                        [
+                            "Check Ethernet or Wi-Fi connection.",
+                            "Restart adapter.",
+                            "Flush DNS.",
+                            "Reconnect to network.",
+                            "Test connectivity.",
+                        ],
                     ),
                 }
                 cause, steps = network_guidance.get(
                     stage,
-                    ("The configured DevMonitor server could not be reached.", ["Confirm the network connection and server address.", "Ask the administrator to check the application service and firewall.", "Retry after the connection is restored."]),
+                    (
+                        "The configured DevMonitor server could not be reached.",
+                        [
+                            "Check Ethernet or Wi-Fi connection.",
+                            "Restart adapter.",
+                            "Flush DNS.",
+                            "Reconnect to network.",
+                            "Test connectivity.",
+                        ],
+                    ),
                 )
                 issue = _health_issue(
-                    "DevMonitor connection problem", score,
+                    "Network Connectivity Problems", score,
                     value["message"],
                     cause,
-                    "Follow the steps for the reported connection stage, then download a fresh agent if the server settings changed.",
+                    "Follow the guided network steps, then download a fresh agent if server settings changed.",
                     steps,
                 )
             elif name == "Driver metadata":
@@ -1010,6 +1061,15 @@ def collect_health_report(specifications):
     }
 
 
+def _issue_impact(severity):
+    return {
+        "critical": "Critical impact on device stability or availability.",
+        "attention": "May interrupt normal device operation soon.",
+        "warning": "May reduce performance or reliability if left unaddressed.",
+        "info": "Informational finding with limited immediate impact.",
+    }.get(severity, "Informational finding with limited immediate impact.")
+
+
 def _health_issue(title, score, description, root_cause, recommendation, steps):
     severity = (
         "critical" if score < 40 else "attention" if score < 60
@@ -1020,6 +1080,7 @@ def _health_issue(title, score, description, root_cause, recommendation, steps):
         "severity": severity,
         "description": description,
         "root_cause": root_cause,
+        "impact": _issue_impact(severity),
         "recommendation": recommendation,
         "steps": steps,
     }
