@@ -250,10 +250,24 @@ def _show_log_location(log_path):
         print("Diagnostic details were written to the console.", file=sys.stderr)
 
 
+def _unavailable_specification_fields(specifications):
+    unavailable = []
+    for key, value in specifications.items():
+        if (
+            value is None
+            or value == UNAVAILABLE
+            or value == [UNAVAILABLE]
+            or (key in {"storage_devices", "ip_addresses"} and not value)
+        ):
+            unavailable.append(key)
+    return unavailable
+
+
 def collect_specifications():
     configure_logging()
     if os.name != "nt":
         raise RuntimeError("This agent supports Windows desktop and laptop devices only.")
+    LOGGER.info("Starting local Windows device specification collection.")
 
     storage_devices = _collect_component(
         "storage devices", _collect_storage, []
@@ -293,17 +307,14 @@ def collect_specifications():
     network = _collect_component("network", _collect_network, {})
     specifications.update(network)
 
-    LOGGER.info(
-        "Inventory collection completed; unavailable fields: %s",
-        ", ".join(
-            key
-            for key, value in specifications.items()
-            if value is None
-            or value == UNAVAILABLE
-            or value == [UNAVAILABLE]
+    unavailable = _unavailable_specification_fields(specifications)
+    if unavailable:
+        LOGGER.warning(
+            "Inventory collection completed with unavailable fields: %s",
+            ", ".join(unavailable),
         )
-        or "none",
-    )
+    else:
+        LOGGER.info("Inventory collection completed with all fields available.")
     return specifications
 
 
