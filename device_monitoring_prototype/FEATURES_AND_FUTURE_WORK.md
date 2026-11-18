@@ -73,7 +73,7 @@ technologies.
 - CPU temperature, SMART/storage health, startup duration, Windows event-log analysis, complete security posture, and Device Manager problem codes depend on hardware/Windows access and may be reported unavailable. Driver age metadata is only a review signal.
 
 ### 3. Real-Time Updates
-- Use WebSockets or Server-Sent Events to push live status changes to the dashboard without refreshing the page.
+- Device cards, dashboard stats, and diagnostic status already poll while the page is visible so completed agent submissions appear without a manual reload. WebSockets or Server-Sent Events would still improve push latency for larger fleets.
 
 ### 4. Security Hardening and Deployment
 - Protect against common web vulnerabilities (XSS, CSRF, SQL injection).

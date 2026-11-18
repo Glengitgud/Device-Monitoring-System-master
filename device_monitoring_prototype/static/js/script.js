@@ -1022,6 +1022,17 @@ function renderDiagnosticReport(report) {
     </section>`;
 }
 
+async function refreshAfterDiagnosticScan() {
+    const refreshers = [];
+    if (getCurrentPage() === 'devices') {
+        refreshers.push(refreshDevices().catch(() => null));
+    }
+    if (getCurrentPage() === 'dashboard' || typeof initDashboard === 'function') {
+        refreshers.push(Promise.resolve(initDashboard(false)).catch(() => null));
+    }
+    await Promise.all(refreshers);
+}
+
 async function pollDiagnosticRun(deviceId, runId) {
     const status = document.getElementById('scanRunStatus');
     const retryButton = document.getElementById('scanRetryBtn');
@@ -1052,6 +1063,7 @@ async function pollDiagnosticRun(deviceId, runId) {
             document.getElementById('scanDownloadInstructions').classList.add('d-none');
             document.getElementById('scanResultsBody').innerHTML = renderDiagnosticReport(report);
             document.getElementById('scanResults').classList.remove('d-none');
+            await refreshAfterDiagnosticScan();
             return;
         }
         if (report.status === 'failed') {
@@ -1062,7 +1074,7 @@ async function pollDiagnosticRun(deviceId, runId) {
             return;
         }
         status.textContent =
-            'Waiting for the downloaded agent to run and for you to approve its report...';
+            'Waiting for the Device Agent to submit. Results will appear here automatically...';
     }
     status.textContent =
         'No report was received yet. If you approved submission in the agent, check again.';
