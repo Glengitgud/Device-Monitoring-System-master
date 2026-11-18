@@ -396,7 +396,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             "MYSQL_PASSWORD": "p@ss:/word",
             "MYSQL_HOST": "127.0.0.1",
             "MYSQL_PORT": "3307",
-            "MYSQL_DATABASE": "device_monitor",
+            "MYSQL_DATABASE": "devmonitor",
         }
         with patch.dict(os.environ, settings, clear=True):
             url = make_url(_database_uri())
@@ -404,7 +404,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(url.password, "p@ss:/word")
         self.assertEqual(url.host, "127.0.0.1")
         self.assertEqual(url.port, 3307)
-        self.assertEqual(url.database, "device_monitor")
+        self.assertEqual(url.database, "devmonitor")
 
     def test_database_errors_distinguish_schema_and_connection_problems(self):
         missing_table = OperationalError(
