@@ -19,6 +19,7 @@ from sqlalchemy.exc import OperationalError
 from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
 
+from device_monitoring_prototype.agent_builder import DeviceAgentBuildError
 from device_monitoring_prototype.app import (
     _database_error_message,
     _database_uri,
@@ -193,10 +194,14 @@ class DatabaseIntegrationTest(unittest.TestCase):
             data={"csrf_token": csrf},
         )
         self.assertEqual(verified.status_code, 302)
-        download = self.client.post(
-            f"/enroll/{token}/agent.py",
-            data={"csrf_token": csrf, "trust_device_agent": "yes"},
-        )
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            return_value=b"MZtest-executable-" + token.encode(),
+        ):
+            download = self.client.post(
+                f"/enroll/{token}/agent.exe",
+                data={"csrf_token": csrf, "trust_device_agent": "yes"},
+            )
         self.assertEqual(download.status_code, 200)
         specifications = {
             "cpu_name": "Test CPU",
@@ -609,7 +614,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(verification_page.status_code, 200)
         self.assertIn(b"Verify Account", verification_page.data)
         unverified_download = self.client.post(
-            f"/enroll/{token}/agent.py",
+            f"/enroll/{token}/agent.exe",
             data={"csrf_token": csrf, "trust_device_agent": "yes"},
         )
         self.assertEqual(unverified_download.status_code, 403)
@@ -618,12 +623,20 @@ class DatabaseIntegrationTest(unittest.TestCase):
             data={"csrf_token": csrf},
         )
         self.assertEqual(verified_page.status_code, 302)
-        confirmed_download = self.client.post(
-            f"/enroll/{token}/agent.py",
-            data={"csrf_token": csrf, "trust_device_agent": "yes"},
-        )
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            return_value=b"MZtest-executable-" + token.encode(),
+        ):
+            confirmed_download = self.client.post(
+                f"/enroll/{token}/agent.exe",
+                data={"csrf_token": csrf, "trust_device_agent": "yes"},
+            )
         self.assertEqual(confirmed_download.status_code, 200)
         self.assertIn(token.encode(), confirmed_download.data)
+        self.assertIn(
+            "devmonitor-device-agent.exe",
+            confirmed_download.headers["Content-Disposition"],
+        )
         specifications = {
             "cpu_name": "Verification CPU",
             "cpu_cores": 4,
@@ -1611,7 +1624,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(self.client.get(f"/enroll/{admin_token}").status_code, 403)
         self.assertEqual(
-            self.client.get(f"/enroll/{admin_token}/agent.py").status_code, 403
+            self.client.get(f"/enroll/{admin_token}/agent.exe").status_code, 403
         )
         self.assertEqual(
             self.client.post(
@@ -1812,7 +1825,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b"Verify Account", enrollment_page.data)
         self.assertEqual(
             self.client.post(
-                f"/enroll/{token}/agent.py",
+                f"/enroll/{token}/agent.exe",
                 data={"csrf_token": csrf, "trust_device_agent": "yes"},
             ).status_code,
             403,
@@ -1821,14 +1834,28 @@ class DatabaseIntegrationTest(unittest.TestCase):
             f"/enroll/{token}/verify",
             data={"csrf_token": csrf},
         )
-        download = self.client.post(
-            f"/enroll/{token}/agent.py",
-            data={"csrf_token": csrf, "trust_device_agent": "yes"},
-        )
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            return_value=b"MZtest-executable-" + token.encode(),
+        ) as build_agent:
+            download = self.client.post(
+                f"/enroll/{token}/agent.exe",
+                data={"csrf_token": csrf, "trust_device_agent": "yes"},
+            )
         self.assertEqual(download.status_code, 200)
         self.assertIn(token.encode(), download.data)
-        self.assertNotIn(b"__REGISTRATION_TOKEN__", download.data)
+        self.assertEqual(
+            download.headers["Content-Disposition"],
+            'attachment; filename=devmonitor-device-agent.exe',
+        )
+        self.assertEqual(
+            download.mimetype, "application/vnd.microsoft.portable-executable"
+        )
         self.assertIn("no-store", download.headers["Cache-Control"])
+        self.assertEqual(build_agent.call_args.args[0], token)
+        self.assertTrue(
+            build_agent.call_args.args[1].endswith("/api/device-agent/enroll")
+        )
 
         specifications = {
             "cpu_name": "Example CPU",
@@ -2074,6 +2101,31 @@ class DatabaseIntegrationTest(unittest.TestCase):
             {key for _, key in device_agent.FIELD_LABELS},
             set(expected),
         )
+
+    def test_exe_download_reports_packaging_failure_without_python_fallback(self):
+        csrf = self.register_and_login()
+        qr = self.client.post(
+            "/api/device-registration-tokens",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(qr.status_code, 200)
+        token = qr.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
+        self.client.post(
+            f"/enroll/{token}/verify",
+            data={"csrf_token": csrf},
+        )
+
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            side_effect=DeviceAgentBuildError("packaging failed"),
+        ):
+            response = self.client.post(
+                f"/enroll/{token}/agent.exe",
+                data={"csrf_token": csrf, "trust_device_agent": "yes"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn(b"could not be prepared", response.data.lower())
 
 
 if __name__ == "__main__":
