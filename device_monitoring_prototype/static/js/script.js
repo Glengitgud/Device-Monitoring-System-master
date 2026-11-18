@@ -34,6 +34,8 @@ const deviceAddressRequests = new Map();
 let registrationRedirectTimer = null;
 let registrationRedirectInterval = null;
 let registrationSuccessShown = false;
+let diagnosticRedirectTimer = null;
+let diagnosticRedirectInterval = null;
 
 function csrfToken() {
     return document.querySelector('meta[name="csrf-token"]')?.content || '';
@@ -83,37 +85,16 @@ function showToast(message, type = 'success') {
     instance.show();
 }
 
-function openCompletionModal({
-    title,
-    message,
-    resultsUrl,
-    deviceUrl,
-    defaultRedirect,
-    countdownLabel = 'Redirecting'
-}) {
+function showRegistrationSuccess(device = null) {
     const modalRoot = document.getElementById('deviceRegistrationSuccessModal');
-    if (!modalRoot) return;
+    if (registrationSuccessShown || !modalRoot) return;
+    registrationSuccessShown = true;
     registrationRedirectStarted = false;
-    window.clearTimeout(registrationRedirectTimer);
-    window.clearInterval(registrationRedirectInterval);
-
-    const titleNode = modalRoot.querySelector('#deviceRegistrationSuccessTitle');
-    const messageNode = modalRoot.querySelector('#deviceScanSuccessMessage');
-    const countdown = modalRoot.querySelector('#deviceRegistrationCountdown');
-    const resultsButton = modalRoot.querySelector('#deviceScanResultsButton');
     const detailsButton = modalRoot.querySelector('#deviceRegistrationDetailsButton');
-    const dashboardButton = modalRoot.querySelector('#deviceScanDashboardButton');
-
-    if (titleNode) titleNode.textContent = title;
-    if (messageNode) messageNode.textContent = message;
-    if (resultsButton) {
-        resultsButton.href = resultsUrl;
-        resultsButton.classList.toggle('d-none', !resultsUrl);
+    if (device?.id != null && detailsButton) {
+        detailsButton.href = device.specifications_url
+            || `/devices/${encodeURIComponent(device.id)}/specifications`;
     }
-    if (detailsButton) detailsButton.href = deviceUrl;
-    if (dashboardButton) dashboardButton.href = '/dashboard';
-    if (countdown) countdown.textContent = `${countdownLabel} in 5 seconds...`;
-
     const redirect = destination => {
         window.clearTimeout(registrationRedirectTimer);
         window.clearInterval(registrationRedirectInterval);
@@ -121,68 +102,78 @@ function openCompletionModal({
         registrationRedirectStarted = true;
         window.location.assign(destination);
     };
-
-    resultsButton?.addEventListener('click', event => {
+    modalRoot.querySelector('#deviceScanDashboardButton').addEventListener('click', event => {
         event.preventDefault();
-        redirect(resultsUrl);
+        redirect('/dashboard');
     }, { once: true });
     detailsButton?.addEventListener('click', event => {
         event.preventDefault();
         redirect(detailsButton.href);
-    }, { once: true });
-    dashboardButton?.addEventListener('click', event => {
-        event.preventDefault();
-        redirect('/dashboard');
     }, { once: true });
     modalRoot.addEventListener('hidden.bs.modal', () => {
         window.clearTimeout(registrationRedirectTimer);
         window.clearInterval(registrationRedirectInterval);
         registrationRedirectStarted = true;
     }, { once: true });
-
+    const countdown = modalRoot.querySelector('#deviceRegistrationCountdown');
     let remaining = 5;
-    const scanModal = document.getElementById('scanModal');
-    if (scanModal) {
-        bootstrap.Modal.getOrCreateInstance(scanModal).hide();
-    }
     bootstrap.Modal.getOrCreateInstance(modalRoot).show();
     registrationRedirectInterval = window.setInterval(() => {
         remaining -= 1;
         if (countdown) {
-            countdown.textContent = `${countdownLabel} in ${remaining} seconds...`;
+            countdown.textContent = `Redirecting to Dashboard in ${remaining} seconds...`;
         }
-        if (remaining <= 0) redirect(defaultRedirect);
+        if (remaining <= 0) redirect('/dashboard');
     }, 1000);
 }
 
-function showRegistrationSuccess(device = null) {
-    const modalRoot = document.getElementById('deviceRegistrationSuccessModal');
-    if (registrationSuccessShown || !modalRoot) return;
-    registrationSuccessShown = true;
-    const deviceUrl = device?.specifications_url
-        || (device?.id != null
-            ? `/devices/${encodeURIComponent(device.id)}/specifications`
-            : '/devices');
-    openCompletionModal({
-        title: 'Device Registered Successfully',
-        message: 'The device specifications have been detected and recorded.',
-        resultsUrl: deviceUrl,
-        deviceUrl,
-        defaultRedirect: '/dashboard',
-        countdownLabel: 'Redirecting to Dashboard'
-    });
-}
+function showDiagnosticSuccess(deviceId, runId) {
+    const modalRoot = document.getElementById('deviceDiagnosticSuccessModal');
+    if (!modalRoot) return;
+    const specsUrl = `/devices/${encodeURIComponent(deviceId)}/specifications#health-report`;
+    const deviceUrl = `/devices/${encodeURIComponent(deviceId)}/specifications`;
+    const viewResultsButton = modalRoot.querySelector('#deviceDiagnosticViewResultsButton');
+    const viewDeviceButton = modalRoot.querySelector('#deviceDiagnosticViewDeviceButton');
+    const dashboardButton = modalRoot.querySelector('#deviceDiagnosticDashboardButton');
+    if (viewResultsButton) {
+        viewResultsButton.href = specsUrl;
+        viewResultsButton.dataset.runId = String(runId);
+    }
+    if (viewDeviceButton) viewDeviceButton.href = deviceUrl;
 
-function showScanSuccess(deviceId) {
-    const resultsUrl = `/devices/${encodeURIComponent(deviceId)}/specifications#health-report`;
-    openCompletionModal({
-        title: 'Device Scan Completed Successfully',
-        message: 'The device has been analyzed and the results are now available.',
-        resultsUrl,
-        deviceUrl: `/devices/${encodeURIComponent(deviceId)}/specifications`,
-        defaultRedirect: resultsUrl,
-        countdownLabel: 'Redirecting to results'
-    });
+    const redirect = destination => {
+        window.clearTimeout(diagnosticRedirectTimer);
+        window.clearInterval(diagnosticRedirectInterval);
+        window.location.assign(destination);
+    };
+    viewResultsButton?.addEventListener('click', event => {
+        event.preventDefault();
+        redirect(viewResultsButton.href);
+    }, { once: true });
+    viewDeviceButton?.addEventListener('click', event => {
+        event.preventDefault();
+        redirect(viewDeviceButton.href);
+    }, { once: true });
+    dashboardButton?.addEventListener('click', event => {
+        event.preventDefault();
+        redirect('/dashboard');
+    }, { once: true });
+
+    const countdown = modalRoot.querySelector('#deviceDiagnosticCountdown');
+    let remaining = 5;
+    if (countdown) countdown.textContent = String(remaining);
+    bootstrap.Modal.getOrCreateInstance(modalRoot).show();
+    diagnosticRedirectInterval = window.setInterval(() => {
+        remaining -= 1;
+        if (countdown) countdown.textContent = String(Math.max(remaining, 0));
+        if (remaining <= 0) {
+            redirect(specsUrl);
+        }
+    }, 1000);
+    modalRoot.addEventListener('hidden.bs.modal', () => {
+        window.clearTimeout(diagnosticRedirectTimer);
+        window.clearInterval(diagnosticRedirectInterval);
+    }, { once: true });
 }
 
 function initSidebar() {
@@ -940,7 +931,7 @@ async function scanDevice(deviceId) {
     document.getElementById('scanProgressText').textContent =
         'Preparing a secure diagnostic agent...';
     document.getElementById('scanRunStatus').textContent =
-        'Waiting for the downloaded agent to run and for you to approve its report...';
+        'Waiting for the downloaded agent to run and submit the report...';
     document.getElementById('scanRetryBtn').classList.add('d-none');
     modal.show();
     try {
@@ -1007,28 +998,14 @@ function renderHealthGauge(label, score) {
     </div>`;
 }
 
-function issueImpact(issue) {
-    if (issue.impact) return issue.impact;
-    if (issue.severity === 'critical') {
-        return 'Critical impact on device stability or availability.';
-    }
-    if (issue.severity === 'attention') {
-        return 'May interrupt normal device operation soon.';
-    }
-    if (issue.severity === 'warning') {
-        return 'May reduce performance or reliability if left unaddressed.';
-    }
-    return 'Informational finding with limited immediate impact.';
-}
-
 function renderDiagnosticReport(report) {
     const scores = report.scores || {};
     const components = scores.components || {};
     const gauges = [
-        ['Overall Device Health', scores.overall],
-        ['Hardware Health', scores.hardware],
-        ['Software Health', scores.software],
-        ['Driver Health', scores.drivers],
+        ['Overall health', scores.overall],
+        ['Hardware', scores.hardware],
+        ['Software', scores.software],
+        ['Drivers', scores.drivers],
         ['CPU', components.cpu],
         ['RAM', components.ram],
         ['Storage', components.storage],
@@ -1036,22 +1013,18 @@ function renderDiagnosticReport(report) {
         ['Network', components.network],
         ['Operating system', components.operating_system]
     ];
-    const findings = (report.issues || []).map(issue => `
+    const issues = (report.issues || []).map(issue => `
         <article class="diagnostic-issue diagnostic-issue-${escapeHTML(issue.severity)}">
             <div class="d-flex flex-wrap justify-content-between gap-2">
                 <h6 class="mb-1">${escapeHTML(issue.title)}</h6>
                 <span class="severity-label">${escapeHTML(issue.severity)}</span>
             </div>
             <p class="mb-2">${escapeHTML(issue.description)}</p>
-            <p class="small mb-1"><strong>Root cause:</strong> ${escapeHTML(issue.root_cause)}</p>
-            <p class="small mb-1"><strong>Impact:</strong> ${escapeHTML(issueImpact(issue))}</p>
-            <p class="small mb-0"><strong>Recommended fix:</strong> ${escapeHTML(issue.recommendation)}</p>
-        </article>`).join('');
-    const troubleshooting = (report.issues || []).map(issue => `
-        <article class="diagnostic-issue diagnostic-issue-${escapeHTML(issue.severity)}">
-            <h6 class="mb-2">Issue: ${escapeHTML(issue.title)}</h6>
-            <p class="small text-muted mb-2">Troubleshooting:</p>
-            <ol class="mb-0">${(issue.steps || []).map(step => `<li>${escapeHTML(step)}</li>`).join('')}</ol>
+            <p class="small mb-1"><strong>Possible cause:</strong> ${escapeHTML(issue.root_cause)}</p>
+            <p class="small mb-2"><strong>Suggested action:</strong> ${escapeHTML(issue.recommendation)}</p>
+            <details><summary>Step-by-step troubleshooting</summary>
+                <ol class="mb-0 mt-2">${(issue.steps || []).map(step => `<li>${escapeHTML(step)}</li>`).join('')}</ol>
+            </details>
         </article>`).join('');
     const checks = (report.checks || [])
         .filter(check => check.name !== 'Overall scores')
@@ -1066,31 +1039,17 @@ function renderDiagnosticReport(report) {
     const score = Number.isInteger(scores.overall) ? `${scores.overall}%` : 'Not available';
     return `<section class="diagnostic-report">
         <div class="alert alert-success" role="status">
-            <strong>Device scan results are ready in DevMonitor.</strong>
-            ${escapeHTML(report.summary || '')}
+            <strong>Full analysis complete.</strong> ${escapeHTML(report.summary || '')}
         </div>
-        <h6 class="mb-3">Device Scan Results <span class="text-muted">Overall: ${score}</span></h6>
+        <h6 class="mb-3">Device Health Report <span class="text-muted">Overall: ${score}</span></h6>
         <div class="health-gauge-grid">${gauges.map(([label, value]) => renderHealthGauge(label, value)).join('')}</div>
-        <h6 class="mt-4">Diagnostic Findings</h6>
-        ${findings || '<p class="text-success">No issues requiring attention were identified by the supported checks.</p>'}
-        <h6 class="mt-4">Step-by-Step Troubleshooting</h6>
-        ${troubleshooting || '<p class="text-muted">No guided troubleshooting steps are needed for this scan.</p>'}
+        <h6 class="mt-4">Recommended actions and issues requiring attention</h6>
+        ${issues || '<p class="text-success">No issues requiring attention were identified by the supported checks.</p>'}
         <details class="mt-3"><summary>All diagnostic checks and limitations</summary>
             <ul class="diagnostic-check-list mt-2">${checks}</ul>
         </details>
         ${report.finished_at ? `<p class="small text-muted mt-3 mb-0">Saved ${escapeHTML(new Date(report.finished_at).toLocaleString())}</p>` : ''}
     </section>`;
-}
-
-async function refreshAfterDiagnosticScan() {
-    const refreshers = [];
-    if (getCurrentPage() === 'devices') {
-        refreshers.push(refreshDevices().catch(() => null));
-    }
-    if (getCurrentPage() === 'dashboard' || typeof initDashboard === 'function') {
-        refreshers.push(Promise.resolve(initDashboard(false)).catch(() => null));
-    }
-    await Promise.all(refreshers);
 }
 
 async function pollDiagnosticRun(deviceId, runId) {
@@ -1123,8 +1082,15 @@ async function pollDiagnosticRun(deviceId, runId) {
             document.getElementById('scanDownloadInstructions').classList.add('d-none');
             document.getElementById('scanResultsBody').innerHTML = renderDiagnosticReport(report);
             document.getElementById('scanResults').classList.remove('d-none');
-            await refreshAfterDiagnosticScan();
-            showScanSuccess(deviceId);
+            await Promise.allSettled([
+                refreshDevices(),
+                initDashboard(false),
+                api(`/api/devices/${deviceId}/history`, { cache: 'no-store' }),
+            ]);
+            showToast('Device scan complete. Results are now available in DevMonitor.');
+            const scanModal = bootstrap.Modal.getInstance(document.getElementById('scanModal'));
+            scanModal?.hide();
+            showDiagnosticSuccess(deviceId, runId);
             return;
         }
         if (report.status === 'failed') {
@@ -1135,7 +1101,7 @@ async function pollDiagnosticRun(deviceId, runId) {
             return;
         }
         status.textContent =
-            'Waiting for the Device Agent to submit. Results will appear here automatically...';
+            'Waiting for the downloaded agent to run and submit the report...';
     }
     status.textContent =
         'No report was received yet. If you approved submission in the agent, check again.';

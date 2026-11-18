@@ -234,15 +234,15 @@
                         Preparing a secure diagnostic agent...
                     </p>
                     <p class="text-muted mb-0">
-                        Download and run the EXE on the device being diagnosed. It scans
-                        locally, then submits the report so results appear in this website.
+                        Download and run the EXE on the device being diagnosed. The
+                        agent submits results directly to DevMonitor and this page will
+                        update automatically.
                     </p>
                 </div>
                 <div id="scanDownloadInstructions" class="alert alert-info d-none"
                      role="status" aria-live="polite">
                     <i class="bi bi-download me-2" aria-hidden="true"></i>
-                    Run the downloaded EXE on the target device and approve submission.
-                    Results will appear here automatically—no separate diagnostic window.
+                    Run the downloaded EXE on the device being diagnosed.
                     <span id="scanRunStatus">Waiting for the agent...</span>
                     <button type="button" class="btn btn-sm btn-outline-primary ms-2 d-none"
                             id="scanRetryBtn">Check report again</button>
@@ -261,6 +261,7 @@
 </div>
 
 {% include "_device_scan_success_modal.html" %}
+{% include "_device_diagnostic_success_modal.html" %}
 
 <!-- ======================================================
      DELETE DEVICE CONFIRMATION MODAL

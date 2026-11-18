@@ -1468,6 +1468,10 @@ def create_app(test_config=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Diagnostic-Run-ID"] = str(run.id)
+        response.headers["X-Device-ID"] = str(device.id)
+        response.headers["X-Device-Specifications-URL"] = url_for(
+            "device_specifications", device_id=device.id
+        )
         return response
 
     @app.get("/api/devices/<int:device_id>/diagnostics/<int:run_id>")
