@@ -104,6 +104,19 @@ from device_monitoring_prototype.services import (
     update_user,
 )
 
+
+def diagnostic_sort_key(run):
+    return (run.finished_at or run.started_at, run.id)
+
+
+def latest_completed_diagnostic(device):
+    return max(
+        (run for run in device.diagnostic_runs if run.status == "completed"),
+        key=diagnostic_sort_key,
+        default=None,
+    )
+
+
 login_manager = LoginManager()
 login_manager.login_view = "login"
 login_manager.login_message = "Please sign in to continue."
@@ -387,18 +400,7 @@ def create_app(test_config=None):
 
     def serialize_device(device):
         spec = device.hardware_spec
-        latest_diagnostic = next(
-            (
-                run
-                for run in sorted(
-                    device.diagnostic_runs,
-                    key=lambda item: item.started_at,
-                    reverse=True,
-                )
-                if run.status == "completed"
-            ),
-            None,
-        )
+        latest_diagnostic = latest_completed_diagnostic(device)
         health_check = next(
             (
                 check
@@ -407,8 +409,11 @@ def create_app(test_config=None):
             ),
             None,
         )
+        health_details = health_check.details if health_check else {}
         health_scores = (
-            health_check.details.get("scores", {}) if health_check else {}
+            health_details.get("scores", {})
+            if isinstance(health_details, dict)
+            else {}
         )
         return {
             "id": device.id,
@@ -736,6 +741,12 @@ def create_app(test_config=None):
         device = db.get_or_404(Device, device_id)
         can_access_device(device)
         specification = device.hardware_spec
+
+        def display_names(value):
+            if not isinstance(value, list):
+                return []
+            return [item for item in value if isinstance(item, str) and item.strip()]
+
         fields = [
             (
                 "Device Verification Status",
@@ -753,15 +764,23 @@ def create_app(test_config=None):
         ]
         if specification:
             def format_bytes(value):
-                if value is None:
+                if isinstance(value, bool) or not isinstance(value, int):
                     return None
                 return f"{value:,} bytes ({value / (1024 ** 3):.2f} GiB)"
 
-            storage_devices = [
-                f"{item['name']}: {format_bytes(item['total_bytes'])} total, "
-                f"{format_bytes(item['available_bytes'])} available"
-                for item in (specification.storage_devices or [])
-            ]
+            storage_devices = []
+            if isinstance(specification.storage_devices, list):
+                for item in specification.storage_devices:
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get("name")
+                    total = format_bytes(item.get("total_bytes"))
+                    available = format_bytes(item.get("available_bytes"))
+                    if isinstance(name, str) and (total or available):
+                        storage_devices.append(
+                            f"{name}: {total or 'Not available'} total, "
+                            f"{available or 'Not available'} available"
+                        )
             fields = [
                 ("CPU Name", specification.cpu_model),
                 ("RAM Capacity", format_bytes(specification.memory_bytes)),
@@ -779,28 +798,48 @@ def create_app(test_config=None):
                 ("Operating System Version", specification.operating_system_version),
                 (
                     "Installed Network Adapters",
-                    ", ".join(specification.network_adapters or []),
+                    ", ".join(display_names(specification.network_adapters)),
                 ),
-                ("IP Address", ", ".join(specification.ip_addresses or [])),
+                ("IP Address", ", ".join(display_names(specification.ip_addresses))),
             ] + fields
         registration_history = Log.query.filter_by(device_id=device.id).order_by(
             Log.timestamp.desc(), Log.id.desc()
         ).all()
-        return render_template(
-            "device_specifications.html",
-            active_page="devices",
-            device=device,
-            specification_fields=fields,
-            registration_history=registration_history,
-            diagnostic_history=[
+        try:
+            diagnostic_history = [
                 diagnostic_run_payload(run)
                 for run in sorted(
                     device.diagnostic_runs,
-                    key=lambda item: item.started_at,
+                    key=diagnostic_sort_key,
                     reverse=True,
                 )[:10]
-            ],
-        )
+            ]
+            app.logger.debug(
+                "Device specifications and latest diagnostics retrieved "
+                "(device_id=%s, diagnostic_run_id=%s).",
+                device_id,
+                diagnostic_history[0]["id"] if diagnostic_history else None,
+            )
+            return render_template(
+                "device_specifications.html",
+                active_page="devices",
+                device=device,
+                specification_fields=fields,
+                has_specification=specification is not None,
+                registration_history=registration_history,
+                diagnostic_history=diagnostic_history,
+            )
+        except SQLAlchemyError:
+            db.session.rollback()
+            app.logger.exception(
+                "Could not retrieve detected specifications (device_id=%s).",
+                device_id,
+            )
+            flash(
+                "Device information could not be retrieved. Please try again.",
+                "danger",
+            )
+            return redirect(url_for("devices"))
 
     @app.get("/archived-devices")
     @login_required
@@ -880,6 +919,18 @@ def create_app(test_config=None):
             status=status,
             expires_at=expires_at.isoformat(),
             server_time=datetime.now(timezone.utc).isoformat(),
+            device=(
+                {
+                    "id": registration.device.id,
+                    "name": registration.device.device_name,
+                    "specifications_url": url_for(
+                        "device_specifications",
+                        device_id=registration.device.id,
+                    ),
+                }
+                if registration.used_at and registration.device
+                else None
+            ),
         )
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -1034,6 +1085,13 @@ def create_app(test_config=None):
             run = complete_diagnostic_run(run_id, token, data["report"])
         except DiagnosticValidationError as error:
             return api_error(error, 401 if "token" in str(error).lower() or "authorization" in str(error).lower() else 400)
+        app.logger.info(
+            "Diagnostic report stored (run_id=%s, device_id=%s, checks=%d, issues=%d).",
+            run_id,
+            run.device_id,
+            len(data["report"]["checks"]),
+            len(data["report"]["issues"]),
+        )
         return jsonify(run_id=run.id, status=run.status), 201
 
     @app.get("/api/devices")
@@ -1050,7 +1108,14 @@ def create_app(test_config=None):
                     Device.registered_by_user_id == current_user.id,
                 )
             )
-        return jsonify([serialize_device(device) for device in query.order_by(Device.id.desc()).all()])
+        response = jsonify(
+            [
+                serialize_device(device)
+                for device in query.order_by(Device.id.desc()).all()
+            ]
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/archived-devices")
     @login_required
@@ -1413,17 +1478,29 @@ def create_app(test_config=None):
         run = db.session.get(DiagnosticRun, run_id)
         if run is None or run.device_id != device.id:
             abort(404)
-        return jsonify(diagnostic_run_payload(run))
+        app.logger.debug(
+            "Diagnostic report retrieved (run_id=%s, device_id=%s, status=%s).",
+            run.id,
+            device.id,
+            run.status,
+        )
+        response = jsonify(diagnostic_run_payload(run))
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/devices/<int:device_id>/history")
     @login_required
     def device_history(device_id):
         device = db.get_or_404(Device, device_id)
         can_manage_device(device)
-        return jsonify(
+        response = jsonify(
             diagnostics=[
                 diagnostic_run_payload(run)
-                for run in sorted(device.diagnostic_runs, key=lambda item: item.started_at, reverse=True)
+                for run in sorted(
+                    device.diagnostic_runs,
+                    key=diagnostic_sort_key,
+                    reverse=True,
+                )
             ],
             network=[
                 {
@@ -1447,6 +1524,8 @@ def create_app(test_config=None):
                 )
             ],
         )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/users")
     @admin_required
@@ -1522,12 +1601,20 @@ def create_app(test_config=None):
                 )
             )
         devices = query.order_by(Device.id.desc()).all()
-        return jsonify(
-            devices=[serialize_device(device) for device in devices],
+        serialized_devices = [serialize_device(device) for device in devices]
+        app.logger.debug(
+            "Dashboard device health retrieved (user_id=%s, device_count=%d).",
+            current_user.id,
+            len(serialized_devices),
+        )
+        response = jsonify(
+            devices=serialized_devices,
             total=len(devices),
             online=sum(device.status == "online" for device in devices),
             offline=sum(device.status == "offline" for device in devices),
         )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/device-verification-status")
     @login_required
@@ -1537,7 +1624,29 @@ def create_app(test_config=None):
                 "Device verification is only available to standard users.", 403
             )
         count = verified_device_count(current_user.id)
-        response = jsonify(verified=count > 0, verified_devices=count)
+        latest_device = Device.query.filter_by(
+            owner_user_id=current_user.id,
+            is_verified=True,
+        ).filter(Device.lifecycle_status != "deleted").order_by(
+            Device.id.desc()
+        ).first()
+        response = jsonify(
+            verified=count > 0,
+            verified_devices=count,
+            scan_status="Completed" if latest_device else "Pending",
+            registration_status="Registered" if latest_device else "Pending",
+            latest_device=(
+                {
+                    "id": latest_device.id,
+                    "name": latest_device.device_name,
+                    "specifications_url": url_for(
+                        "device_specifications", device_id=latest_device.id
+                    ),
+                }
+                if latest_device
+                else None
+            ),
+        )
         response.headers["Cache-Control"] = "no-store"
         return response
 

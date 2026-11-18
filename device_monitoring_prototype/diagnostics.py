@@ -278,6 +278,13 @@ def diagnostic_run_payload(run):
         for check in checks
         if check["details"].get("issue")
     ]
+    for check in checks:
+        if check["name"] != "Overall scores":
+            continue
+        stored_issues = check["details"].get("issues")
+        if isinstance(stored_issues, list) and stored_issues:
+            issues = stored_issues
+        break
     return {
         "id": run.id,
         "status": run.status,
@@ -297,13 +304,18 @@ def diagnostic_run_payload(run):
 
 
 def record_health_report(run, report):
-    """Persist score metadata in an existing check row for history serialization."""
+    """Persist scores and issue summaries in an existing check row for history views."""
     run.checks.append(
         DiagnosticCheck(
             check_name="Overall scores",
             category="hardware",
             status="passed",
             result_summary="Overall, hardware, software, and driver health scores.",
-            details={"scores": report["scores"]},
+            details={
+                "scores": report["scores"],
+                "issues": report["issues"],
+                "summary": report["summary"],
+                "scanned_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
     )
