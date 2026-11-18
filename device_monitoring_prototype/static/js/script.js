@@ -15,6 +15,11 @@ let usersLoaded = false;
 let deviceDetailsRequestId = 0;
 let deviceQrCountdownInterval = null;
 let deviceQrStatusInterval = null;
+let deviceRefreshPromise = null;
+let dashboardRefreshPromise = null;
+let observedRegistrationDeviceIds = null;
+let latestVerificationDeviceId = undefined;
+let registrationRedirectStarted = false;
 let deviceSearch = '';
 let deviceStatusFilter = 'all';
 let archivedDeviceSearch = '';
@@ -78,61 +83,46 @@ function showToast(message, type = 'success') {
     instance.show();
 }
 
-function showRegistrationSuccess() {
-    if (registrationSuccessShown) return;
+function showRegistrationSuccess(device = null) {
+    const modalRoot = document.getElementById('deviceRegistrationSuccessModal');
+    if (registrationSuccessShown || !modalRoot) return;
     registrationSuccessShown = true;
-    const existing = document.getElementById('deviceRegistrationSuccessModal');
-    const modalRoot = existing || document.createElement('div');
-    if (!existing) {
-        modalRoot.id = 'deviceRegistrationSuccessModal';
-        modalRoot.className = 'modal fade';
-        modalRoot.tabIndex = -1;
-        modalRoot.setAttribute('aria-labelledby', 'deviceRegistrationSuccessTitle');
-        modalRoot.setAttribute('aria-hidden', 'true');
-        modalRoot.innerHTML = `<div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content registration-success-card text-center p-3">
-                <div class="registration-success-mark" aria-hidden="true">✓</div>
-                <h2 class="h4" id="deviceRegistrationSuccessTitle">Device Registered Successfully</h2>
-                <p class="text-muted">You may now proceed to the Dashboard.</p>
-                <a class="dashboard-shortcut-card" href="/dashboard">
-                    <i class="bi bi-speedometer2" aria-hidden="true"></i>
-                    <span>Open Dashboard</span>
-                </a>
-                <p id="deviceRegistrationCountdown" class="mt-3 mb-2" role="status" aria-live="polite">
-                    Redirecting to Dashboard in 5 seconds...
-                </p>
-                <button class="btn btn-primary" type="button" id="goDashboardNowBtn">
-                    Go to Dashboard Now
-                </button>
-            </div>
-        </div>`;
-        document.body.appendChild(modalRoot);
+    registrationRedirectStarted = false;
+    const detailsButton = modalRoot.querySelector('#deviceRegistrationDetailsButton');
+    if (device?.id != null && detailsButton) {
+        detailsButton.href = device.specifications_url
+            || `/devices/${encodeURIComponent(device.id)}/specifications`;
     }
-    const redirect = () => {
+    const redirect = destination => {
         window.clearTimeout(registrationRedirectTimer);
         window.clearInterval(registrationRedirectInterval);
-        window.location.assign('/dashboard');
+        if (registrationRedirectStarted) return;
+        registrationRedirectStarted = true;
+        window.location.assign(destination);
     };
-    modalRoot.querySelector('#goDashboardNowBtn').addEventListener('click', redirect);
-    modalRoot.querySelector('.dashboard-shortcut-card').addEventListener('click', event => {
+    modalRoot.querySelector('#deviceScanDashboardButton').addEventListener('click', event => {
         event.preventDefault();
-        redirect();
-    });
+        redirect('/dashboard');
+    }, { once: true });
+    detailsButton?.addEventListener('click', event => {
+        event.preventDefault();
+        redirect(detailsButton.href);
+    }, { once: true });
+    modalRoot.addEventListener('hidden.bs.modal', () => {
+        window.clearTimeout(registrationRedirectTimer);
+        window.clearInterval(registrationRedirectInterval);
+        registrationRedirectStarted = true;
+    }, { once: true });
     const countdown = modalRoot.querySelector('#deviceRegistrationCountdown');
     let remaining = 5;
-    const instance = bootstrap.Modal.getOrCreateInstance(modalRoot, {
-        backdrop: 'static',
-        keyboard: false
-    });
-    instance.show();
+    bootstrap.Modal.getOrCreateInstance(modalRoot).show();
     registrationRedirectInterval = window.setInterval(() => {
         remaining -= 1;
         if (countdown) {
             countdown.textContent = `Redirecting to Dashboard in ${remaining} seconds...`;
         }
-        if (remaining <= 0) redirect();
+        if (remaining <= 0) redirect('/dashboard');
     }, 1000);
-    registrationRedirectTimer = window.setTimeout(redirect, 5000);
 }
 
 function initSidebar() {
@@ -193,9 +183,24 @@ function sortRows(rows, key, nameKey, statusKey = 'status') {
 }
 
 async function refreshDevices() {
-    devices = await api('/api/devices');
-    deviceAddresses.clear();
-    renderDevicesCards();
+    if (deviceRefreshPromise) return deviceRefreshPromise;
+    deviceRefreshPromise = api('/api/devices', { cache: 'no-store' }).then(result => {
+        devices = result;
+        const registered = devices.filter(device => device.isVerified);
+        const currentIds = new Set(registered.map(device => device.id));
+        if (observedRegistrationDeviceIds !== null && !registrationSuccessShown) {
+            const newlyRegistered = registered.find(
+                device => !observedRegistrationDeviceIds.has(device.id)
+            );
+            if (newlyRegistered) showRegistrationSuccess(newlyRegistered);
+        }
+        observedRegistrationDeviceIds = currentIds;
+        deviceAddresses.clear();
+        renderDevicesCards();
+    }).finally(() => {
+        deviceRefreshPromise = null;
+    });
+    return deviceRefreshPromise;
 }
 
 function renderDevicesCards() {
@@ -340,6 +345,11 @@ function loadDeviceAddress(device) {
 
 function initDevicesPage() {
     refreshDevices().catch(error => showToast(error.message, 'danger'));
+    window.setInterval(() => {
+        if (!document.hidden) refreshDevices().catch(error => {
+            showToast(`Could not refresh device information: ${error.message}`, 'danger');
+        });
+    }, 5000);
     document.getElementById('deviceSearchInput')?.addEventListener('input', event => {
         deviceSearch = event.target.value.trim().toLowerCase();
         devicePage = 1;
@@ -390,11 +400,27 @@ async function refreshDeviceVerificationStatus() {
     const status = document.getElementById('deviceVerificationMessage');
     try {
         const result = await api('/api/device-verification-status');
+        const latest = result.latest_device;
+        if (latestVerificationDeviceId === undefined) {
+            latestVerificationDeviceId = latest?.id ?? null;
+        } else if (
+            latest?.id != null
+            && latestVerificationDeviceId != null
+            && latest.id !== latestVerificationDeviceId
+            && !registrationSuccessShown
+        ) {
+            showRegistrationSuccess(latest);
+        } else if (latest?.id != null && latestVerificationDeviceId == null) {
+            showRegistrationSuccess(latest);
+        }
+        if (latest?.id != null) latestVerificationDeviceId = latest.id;
         if (!result.verified) return;
 
         document.getElementById('deviceVerificationPending')?.classList.add('d-none');
         document.getElementById('deviceVerificationComplete')?.classList.remove('d-none');
         document.getElementById('deviceVerificationQrPanel')?.classList.remove('d-none');
+        document.querySelectorAll('#deviceRegistrationProgress .list-group-item')
+            .forEach(item => item.classList.add('list-group-item-success'));
         status.textContent =
             `${result.verified_devices} verified device${result.verified_devices === 1 ? '' : 's'} linked to your account.`;
     } catch (error) {
@@ -411,7 +437,9 @@ function initDeviceVerificationPage() {
         startDeviceQrCountdown(qrCard.dataset.expiresAt, qrCard.dataset.serverTime, token);
     }
     refreshDeviceVerificationStatus();
-    window.setInterval(refreshDeviceVerificationStatus, 10000);
+    window.setInterval(() => {
+        if (!document.hidden) refreshDeviceVerificationStatus();
+    }, 4000);
 }
 
 async function openDeviceModal(mode, deviceId) {
@@ -627,6 +655,10 @@ function renderDeviceDetails(device) {
 }
 
 async function generateDeviceRegistrationQr() {
+    registrationSuccessShown = false;
+    registrationRedirectStarted = false;
+    window.clearTimeout(registrationRedirectTimer);
+    window.clearInterval(registrationRedirectInterval);
     const button = document.getElementById('createDeviceQrBtn');
     const qrCard = document.getElementById('deviceQrCard');
     const image = document.getElementById('deviceRegistrationQrImage');
@@ -739,7 +771,7 @@ function startDeviceQrCountdown(expiresAt, serverTime, token) {
             result.status === 'used'
                 ? 'This QR code has been used to register a device.'
                 : `This QR code is ${result.status}. Generate a new one to continue.`;
-        if (result.status === 'used') showRegistrationSuccess();
+        if (result.status === 'used') showRegistrationSuccess(result.device);
     };
 
     updateCountdown();
@@ -847,6 +879,9 @@ async function scanDevice(deviceId) {
     document.getElementById('scanResults').classList.add('d-none');
     document.getElementById('scanProgressText').textContent =
         'Preparing a secure diagnostic agent...';
+    document.getElementById('scanRunStatus').textContent =
+        'Waiting for the downloaded agent to run and for you to approve its report...';
+    document.getElementById('scanRetryBtn').classList.add('d-none');
     modal.show();
     try {
         const response = await fetch(`/api/devices/${deviceId}/diagnostics`, {
@@ -874,6 +909,10 @@ async function scanDevice(deviceId) {
     } catch (error) {
         showToast(error.message, 'danger');
         document.getElementById('scanProgress').classList.add('d-none');
+        document.getElementById('scanDownloadInstructions').classList.add('d-none');
+        document.getElementById('scanResultsBody').innerHTML =
+            `<div class="alert alert-danger" role="alert">${escapeHTML(error.message)}</div>`;
+        document.getElementById('scanResults').classList.remove('d-none');
     }
 }
 
@@ -901,21 +940,35 @@ function renderHealthGauge(label, score) {
         <div class="health-gauge" role="img"
             aria-label="${escapeHTML(label)} health: ${value == null ? 'not assessed' : `${value} percent, ${healthLabel(value)}`}"
             style="--health-color:${color};--health-score:${percentage}">
-            <span>${value == null ? 'N/A' : `${value}%`}</span>
+            <span>${value == null ? 'Not assessed' : `${value}%`}</span>
         </div>
         <div class="health-gauge-label">${escapeHTML(label)}</div>
         <div class="health-gauge-status" style="color:${color}">${healthLabel(value)}</div>
     </div>`;
 }
 
+function issueImpact(issue) {
+    if (issue.impact) return issue.impact;
+    if (issue.severity === 'critical') {
+        return 'Critical impact on device stability or availability.';
+    }
+    if (issue.severity === 'attention') {
+        return 'May interrupt normal device operation soon.';
+    }
+    if (issue.severity === 'warning') {
+        return 'May reduce performance or reliability if left unaddressed.';
+    }
+    return 'Informational finding with limited immediate impact.';
+}
+
 function renderDiagnosticReport(report) {
     const scores = report.scores || {};
     const components = scores.components || {};
     const gauges = [
-        ['Overall health', scores.overall],
-        ['Hardware', scores.hardware],
-        ['Software', scores.software],
-        ['Drivers', scores.drivers],
+        ['Overall Device Health', scores.overall],
+        ['Hardware Health', scores.hardware],
+        ['Software Health', scores.software],
+        ['Driver Health', scores.drivers],
         ['CPU', components.cpu],
         ['RAM', components.ram],
         ['Storage', components.storage],
@@ -923,18 +976,22 @@ function renderDiagnosticReport(report) {
         ['Network', components.network],
         ['Operating system', components.operating_system]
     ];
-    const issues = (report.issues || []).map(issue => `
+    const findings = (report.issues || []).map(issue => `
         <article class="diagnostic-issue diagnostic-issue-${escapeHTML(issue.severity)}">
             <div class="d-flex flex-wrap justify-content-between gap-2">
                 <h6 class="mb-1">${escapeHTML(issue.title)}</h6>
                 <span class="severity-label">${escapeHTML(issue.severity)}</span>
             </div>
             <p class="mb-2">${escapeHTML(issue.description)}</p>
-            <p class="small mb-1"><strong>Possible cause:</strong> ${escapeHTML(issue.root_cause)}</p>
-            <p class="small mb-2"><strong>Suggested action:</strong> ${escapeHTML(issue.recommendation)}</p>
-            <details><summary>Step-by-step troubleshooting</summary>
-                <ol class="mb-0 mt-2">${(issue.steps || []).map(step => `<li>${escapeHTML(step)}</li>`).join('')}</ol>
-            </details>
+            <p class="small mb-1"><strong>Root cause:</strong> ${escapeHTML(issue.root_cause)}</p>
+            <p class="small mb-1"><strong>Impact:</strong> ${escapeHTML(issueImpact(issue))}</p>
+            <p class="small mb-0"><strong>Recommended fix:</strong> ${escapeHTML(issue.recommendation)}</p>
+        </article>`).join('');
+    const troubleshooting = (report.issues || []).map(issue => `
+        <article class="diagnostic-issue diagnostic-issue-${escapeHTML(issue.severity)}">
+            <h6 class="mb-2">Issue: ${escapeHTML(issue.title)}</h6>
+            <p class="small text-muted mb-2">Troubleshooting:</p>
+            <ol class="mb-0">${(issue.steps || []).map(step => `<li>${escapeHTML(step)}</li>`).join('')}</ol>
         </article>`).join('');
     const checks = (report.checks || [])
         .filter(check => check.name !== 'Overall scores')
@@ -949,12 +1006,15 @@ function renderDiagnosticReport(report) {
     const score = Number.isInteger(scores.overall) ? `${scores.overall}%` : 'Not available';
     return `<section class="diagnostic-report">
         <div class="alert alert-success" role="status">
-            <strong>Full analysis complete.</strong> ${escapeHTML(report.summary || '')}
+            <strong>Device scan results are ready in DevMonitor.</strong>
+            ${escapeHTML(report.summary || '')}
         </div>
-        <h6 class="mb-3">Device Health Report <span class="text-muted">Overall: ${score}</span></h6>
+        <h6 class="mb-3">Device Scan Results <span class="text-muted">Overall: ${score}</span></h6>
         <div class="health-gauge-grid">${gauges.map(([label, value]) => renderHealthGauge(label, value)).join('')}</div>
-        <h6 class="mt-4">Recommended actions and issues requiring attention</h6>
-        ${issues || '<p class="text-success">No issues requiring attention were identified by the supported checks.</p>'}
+        <h6 class="mt-4">Diagnostic Findings</h6>
+        ${findings || '<p class="text-success">No issues requiring attention were identified by the supported checks.</p>'}
+        <h6 class="mt-4">Step-by-Step Troubleshooting</h6>
+        ${troubleshooting || '<p class="text-muted">No guided troubleshooting steps are needed for this scan.</p>'}
         <details class="mt-3"><summary>All diagnostic checks and limitations</summary>
             <ul class="diagnostic-check-list mt-2">${checks}</ul>
         </details>
@@ -963,10 +1023,31 @@ function renderDiagnosticReport(report) {
 }
 
 async function pollDiagnosticRun(deviceId, runId) {
-    const status = document.getElementById('scanProgressText');
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+    const status = document.getElementById('scanRunStatus');
+    const retryButton = document.getElementById('scanRetryBtn');
+    retryButton.classList.add('d-none');
+    for (let attempt = 0; attempt < 240; attempt += 1) {
         await new Promise(resolve => window.setTimeout(resolve, 2500));
-        const report = await api(`/api/devices/${deviceId}/diagnostics/${runId}`);
+        let report;
+        try {
+            report = await api(
+                `/api/devices/${deviceId}/diagnostics/${runId}`,
+                { cache: 'no-store' }
+            );
+        } catch (error) {
+            if (error.message === 'Your session has expired.') return;
+            const clientError = error.message.match(/Request failed \((4\d\d)\)/);
+            if (clientError) {
+                document.getElementById('scanDownloadInstructions').classList.add('d-none');
+                document.getElementById('scanResultsBody').innerHTML =
+                    `<div class="alert alert-danger" role="alert">${escapeHTML(error.message)}</div>`;
+                document.getElementById('scanResults').classList.remove('d-none');
+                return;
+            }
+            status.textContent =
+                'The server is temporarily unreachable. Retrying the report check automatically...';
+            continue;
+        }
         if (report.status === 'completed') {
             document.getElementById('scanDownloadInstructions').classList.add('d-none');
             document.getElementById('scanResultsBody').innerHTML = renderDiagnosticReport(report);
@@ -983,7 +1064,10 @@ async function pollDiagnosticRun(deviceId, runId) {
         status.textContent =
             'Waiting for the downloaded agent to run and for you to approve its report...';
     }
-    showToast('This diagnostic run is still waiting for the endpoint agent.', 'warning');
+    status.textContent =
+        'No report was received yet. If you approved submission in the agent, check again.';
+    retryButton.classList.remove('d-none');
+    retryButton.onclick = () => pollDiagnosticRun(deviceId, runId);
 }
 
 async function refreshUsers() {
@@ -1216,9 +1300,11 @@ async function deactivateSelectedUser() {
     }
 }
 
-async function initDashboard() {
-    try {
-        const result = await api('/api/dashboard');
+function initDashboard(notifyOnError = true) {
+    if (dashboardRefreshPromise) return dashboardRefreshPromise;
+    dashboardRefreshPromise = (async () => {
+      try {
+        const result = await api('/api/dashboard', { cache: 'no-store' });
         document.getElementById('totalDevices').textContent = result.total;
         document.getElementById('onlineDevices').textContent = result.online;
         document.getElementById('offlineDevices').textContent = result.offline;
@@ -1230,18 +1316,28 @@ async function initDashboard() {
         document.getElementById('lastUpdate').textContent =
             latestUpdate ? new Date(latestUpdate).toLocaleString() : '--';
         const body = document.getElementById('dashboardDeviceTableBody');
-        body.innerHTML = result.devices.length ? result.devices.map(device => `
-            <tr><td class="fw-semibold">${escapeHTML(device.name)}</td>
+        body.innerHTML = result.devices.length ? result.devices.map(device => {
+            const color = healthColor(device.healthScore);
+            const value = Number.isInteger(device.healthScore)
+                ? `${device.healthScore}% · ${healthLabel(device.healthScore)}`
+                : healthLabel(null);
+            return `<tr><td class="fw-semibold">${escapeHTML(device.name)}</td>
                 <td>${escapeHTML(device.owner)}</td><td>${escapeHTML(device.os)}</td>
                 <td>${escapeHTML(device.cpu)}</td><td>${escapeHTML(device.ram)}</td>
-                <td><a href="/devices/${encodeURIComponent(device.id)}/specifications#health-report">
-                    ${Number.isInteger(device.healthScore) ? `${device.healthScore}%` : 'Not assessed'}
+                <td><a href="/devices/${encodeURIComponent(device.id)}/specifications#health-report"
+                    style="color:${color}">
+                    ${escapeHTML(value)}
                 </a></td>
-                <td>${escapeHTML(device.status)}</td></tr>`).join('') :
+                <td>${escapeHTML(device.status)}</td></tr>`;
+        }).join('') :
             '<tr><td colspan="7" class="text-center text-muted py-4">No registered devices yet.</td></tr>';
-    } catch (error) {
-        showToast(error.message, 'danger');
-    }
+      } catch (error) {
+        if (notifyOnError) showToast(error.message, 'danger');
+      }
+    })().finally(() => {
+        dashboardRefreshPromise = null;
+    });
+    return dashboardRefreshPromise;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1257,7 +1353,12 @@ document.addEventListener('DOMContentLoaded', () => {
             toggle.querySelector('i').className = showPassword ? 'bi bi-eye-slash' : 'bi bi-eye';
         });
     }
-    if (page === 'dashboard') initDashboard();
+    if (page === 'dashboard') {
+        initDashboard();
+        window.setInterval(() => {
+            if (!document.hidden) initDashboard(false);
+        }, 10000);
+    }
     if (page === 'devices') initDevicesPage();
     if (page === 'device-verification') initDeviceVerificationPage();
     if (page === 'archived-devices') initArchivedDevicesPage();
