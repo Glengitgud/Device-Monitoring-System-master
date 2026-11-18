@@ -50,6 +50,19 @@ class DeviceAgentBuilderTest(unittest.TestCase):
                 build_agent_executable("invalid", "https://devmonitor.example/enroll")
         run.assert_not_called()
 
+    def test_requires_a_windows_build_host(self):
+        with patch("device_monitoring_prototype.agent_builder.sys.platform", "linux"):
+            with patch(
+                "device_monitoring_prototype.agent_builder.subprocess.run"
+            ) as run:
+                with self.assertRaisesRegex(
+                    DeviceAgentBuildError, "must be built on a Windows"
+                ):
+                    build_agent_executable(
+                        "a" * 43, "https://devmonitor.example/api/device-agent/enroll"
+                    )
+        run.assert_not_called()
+
     def test_reports_packaging_failure_without_falling_back_to_python(self):
         with patch(
             "device_monitoring_prototype.agent_builder.subprocess.run",

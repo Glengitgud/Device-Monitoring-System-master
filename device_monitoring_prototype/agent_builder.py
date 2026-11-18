@@ -15,6 +15,10 @@ class DeviceAgentBuildError(RuntimeError):
 def build_agent_executable(registration_token, submission_url):
     if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", registration_token):
         raise DeviceAgentBuildError("The device registration token is invalid.")
+    if sys.platform != "win32":
+        raise DeviceAgentBuildError(
+            "The Windows agent must be built on a Windows application host."
+        )
 
     source_path = Path(__file__).with_name("device_agent.py")
     source = source_path.read_text(encoding="utf-8")
