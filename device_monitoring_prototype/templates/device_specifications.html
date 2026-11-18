@@ -43,6 +43,72 @@
     </div>
 </div>
 
+<div class="content-card mb-4" id="health-report">
+    <div class="content-card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <h6 class="mb-0"><i class="bi bi-heart-pulse me-2"></i>Device Health &amp; Diagnosis</h6>
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('devices') }}">
+            Diagnose this device
+        </a>
+    </div>
+    <div class="content-card-body">
+        {% set latest = diagnostic_history|selectattr('status', 'equalto', 'completed')|first %}
+        {% if latest %}
+            {% set scores = latest.scores %}
+            {% set health_values = [
+                ('Overall', scores.overall),
+                ('Hardware', scores.hardware),
+                ('Software', scores.software),
+                ('Drivers', scores.drivers),
+                ('CPU', scores.components.cpu),
+                ('RAM', scores.components.ram),
+                ('Storage', scores.components.storage),
+                ('GPU', scores.components.gpu),
+                ('Network', scores.components.network),
+                ('Operating System', scores.components.operating_system)
+            ] %}
+            <p class="text-muted">{{ latest.summary }}</p>
+            <div class="health-gauge-grid">
+                {% for label, score in health_values %}
+                    {% set color = '#64748b' if score is none else '#16a34a' if score >= 80 else '#eab308' if score >= 60 else '#f97316' if score >= 40 else '#dc2626' %}
+                    <div class="health-gauge-card">
+                        <div class="health-gauge" role="img"
+                             aria-label="{{ label }} health: {{ score if score is not none else 'not assessed' }}{{ '%' if score is not none else '' }}"
+                             style="--health-color:{{ color }};--health-score:{{ score or 0 }}">
+                            <span>{{ score|string + '%' if score is not none else 'N/A' }}</span>
+                        </div>
+                        <div class="health-gauge-label">{{ label }}</div>
+                    </div>
+                {% endfor %}
+            </div>
+            {% if latest.issues %}
+                <h6 class="mt-4">Recommended actions</h6>
+                {% for issue in latest.issues %}
+                    <article class="diagnostic-issue diagnostic-issue-{{ issue.severity }}">
+                        <h6>{{ issue.title }} <span class="severity-label">{{ issue.severity }}</span></h6>
+                        <p>{{ issue.description }}</p>
+                        <p><strong>Possible cause:</strong> {{ issue.root_cause }}</p>
+                        <p><strong>Suggested action:</strong> {{ issue.recommendation }}</p>
+                        <details>
+                            <summary>Step-by-step troubleshooting</summary>
+                            <ol class="mb-0 mt-2">
+                                {% for step in issue.steps %}<li>{{ step }}</li>{% endfor %}
+                            </ol>
+                        </details>
+                    </article>
+                {% endfor %}
+            {% else %}
+                <p class="text-success mt-3 mb-0">No issues requiring attention were identified by the supported checks.</p>
+            {% endif %}
+            <p class="small text-muted mb-0">
+                Saved {{ latest.finished_at or latest.started_at }}. Checks are a one-time
+                endpoint assessment; unavailable sensors and unsupported checks are identified in the report.
+            </p>
+        {% else %}
+            <p class="text-muted mb-0">No completed endpoint diagnosis is available yet. Run Device Scan from My Devices to generate one.</p>
+        {% endif %}
+    </div>
+</div>
+
 <div class="content-card">
     <div class="content-card-header">
         <h6 class="mb-0"><i class="bi bi-clock-history me-2"></i>Device Registration History</h6>

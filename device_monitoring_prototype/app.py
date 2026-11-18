@@ -62,10 +62,18 @@ from device_monitoring_prototype.authentication import (
     verify_login_totp,
     verify_registration_totp,
 )
+from device_monitoring_prototype.diagnostics import (
+    REPORT_LIMIT_BYTES,
+    DiagnosticValidationError,
+    complete_diagnostic_run,
+    create_diagnostic_run,
+    diagnostic_run_payload,
+)
 from device_monitoring_prototype.models import (
     ActivityLog,
     Device,
     DeviceRegistrationToken,
+    DiagnosticRun,
     DeviceSpecification,
     Log,
     NetworkRecord,
@@ -260,7 +268,10 @@ def create_app(test_config=None):
                     error="Verify and register a device before accessing this resource."
                 ), 403
             return redirect(url_for("device_verification"))
-        if request.method == "POST" and request.endpoint != "submit_agent_enrollment":
+        if request.method == "POST" and request.endpoint not in {
+            "submit_agent_enrollment",
+            "submit_agent_diagnostic",
+        }:
             submitted = request.headers.get("X-CSRF-Token")
             if not submitted:
                 submitted = request.form.get("csrf_token")
@@ -376,6 +387,29 @@ def create_app(test_config=None):
 
     def serialize_device(device):
         spec = device.hardware_spec
+        latest_diagnostic = next(
+            (
+                run
+                for run in sorted(
+                    device.diagnostic_runs,
+                    key=lambda item: item.started_at,
+                    reverse=True,
+                )
+                if run.status == "completed"
+            ),
+            None,
+        )
+        health_check = next(
+            (
+                check
+                for check in (latest_diagnostic.checks if latest_diagnostic else [])
+                if check.check_name == "Overall scores"
+            ),
+            None,
+        )
+        health_scores = (
+            health_check.details.get("scores", {}) if health_check else {}
+        )
         return {
             "id": device.id,
             "name": device.device_name,
@@ -395,6 +429,8 @@ def create_app(test_config=None):
                 if spec and spec.storage_bytes
                 else "—"
             ),
+            "healthScore": health_scores.get("overall"),
+            "healthRunId": latest_diagnostic.id if latest_diagnostic else None,
             "status": device.status.capitalize(),
             "isVerified": device.is_verified,
             "lifecycleStatus": device.lifecycle_status,
@@ -756,6 +792,14 @@ def create_app(test_config=None):
             device=device,
             specification_fields=fields,
             registration_history=registration_history,
+            diagnostic_history=[
+                diagnostic_run_payload(run)
+                for run in sorted(
+                    device.diagnostic_runs,
+                    key=lambda item: item.started_at,
+                    reverse=True,
+                )[:10]
+            ],
         )
 
     @app.get("/archived-devices")
@@ -974,6 +1018,23 @@ def create_app(test_config=None):
             owner_user_id=device.owner_user_id,
             registered_at=device.registered_at.isoformat(),
         ), 201
+
+    @app.post("/api/device-agent/diagnostics/<int:run_id>")
+    def submit_agent_diagnostic(run_id):
+        authorization = request.headers.get("Authorization", "")
+        scheme, separator, token = authorization.partition(" ")
+        if not separator or scheme.casefold() != "bearer":
+            return api_error("A valid diagnostic authorization is required.", 401)
+        if request.content_length and request.content_length > REPORT_LIMIT_BYTES + 1024:
+            return api_error("The diagnostic report exceeds the size limit.", 413)
+        data = api_data()
+        if not isinstance(data, dict) or set(data) != {"report"}:
+            return api_error("Submission must contain one diagnostic report.")
+        try:
+            run = complete_diagnostic_run(run_id, token, data["report"])
+        except DiagnosticValidationError as error:
+            return api_error(error, 401 if "token" in str(error).lower() or "authorization" in str(error).lower() else 400)
+        return jsonify(run_id=run.id, status=run.status), 201
 
     @app.get("/api/devices")
     @login_required
@@ -1287,15 +1348,72 @@ def create_app(test_config=None):
     def scan_device(device_id):
         device = db.get_or_404(Device, device_id)
         can_manage_device(device)
-        run = record_diagnostic(device, current_user)
-        return jsonify(
-            id=run.id,
-            status=run.status,
-            result=run.summary,
-            detected_problem=run.detected_problem,
-            recommendation=run.recommendation,
-            scanned_at=run.started_at.isoformat(),
-        ), 201
+        base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
+        parsed_base = urlsplit(base_url)
+        if (
+            parsed_base.scheme not in {"http", "https"}
+            or not parsed_base.netloc
+            or parsed_base.username
+            or parsed_base.password
+            or parsed_base.path not in {"", "/"}
+            or parsed_base.query
+            or parsed_base.fragment
+            or (
+                parsed_base.scheme != "https"
+                and parsed_base.hostname not in {"localhost", "127.0.0.1", "::1"}
+            )
+        ):
+            return api_error(
+                "Set PUBLIC_BASE_URL to a reachable HTTPS origin before downloading a diagnostic agent.",
+                503,
+            )
+        run, token = create_diagnostic_run(device, current_user)
+        submission_url = urljoin(
+            base_url, url_for("submit_agent_diagnostic", run_id=run.id)
+        )
+        dashboard_url = urljoin(base_url, url_for("dashboard"))
+        try:
+            agent_bytes = build_agent_executable(
+                None,
+                submission_url,
+                mode="diagnostic",
+                diagnostic_run_id=run.id,
+                diagnostic_token=token,
+                dashboard_url=dashboard_url,
+            )
+        except DeviceAgentBuildError:
+            run.status = "failed"
+            run.summary = "The endpoint diagnostic agent could not be prepared."
+            run.recommendation = None
+            run.finished_at = datetime.now(timezone.utc)
+            db.session.add(
+                Log(device_id=device.id, event="Endpoint diagnostics agent build failed")
+            )
+            db.session.commit()
+            app.logger.exception("Could not build diagnostic agent (run_id=%s).", run.id)
+            return api_error("The diagnostic agent could not be prepared.", 503)
+        response = send_file(
+            io.BytesIO(agent_bytes),
+            mimetype="application/vnd.microsoft.portable-executable",
+            as_attachment=True,
+            download_name="devmonitor-device-diagnostics.exe",
+            max_age=0,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Diagnostic-Run-ID"] = str(run.id)
+        return response
+
+    @app.get("/api/devices/<int:device_id>/diagnostics/<int:run_id>")
+    @login_required
+    def diagnostic_run_status(device_id, run_id):
+        device = db.get_or_404(Device, device_id)
+        can_manage_device(device)
+        run = db.session.get(DiagnosticRun, run_id)
+        if run is None or run.device_id != device.id:
+            abort(404)
+        return jsonify(diagnostic_run_payload(run))
 
     @app.get("/api/devices/<int:device_id>/history")
     @login_required
@@ -1304,14 +1422,7 @@ def create_app(test_config=None):
         can_manage_device(device)
         return jsonify(
             diagnostics=[
-                {
-                    "id": run.id,
-                    "status": run.status,
-                    "result": run.summary,
-                    "problem": run.detected_problem,
-                    "recommendation": run.recommendation,
-                    "scanned_at": run.started_at.isoformat(),
-                }
+                diagnostic_run_payload(run)
                 for run in sorted(device.diagnostic_runs, key=lambda item: item.started_at, reverse=True)
             ],
             network=[
