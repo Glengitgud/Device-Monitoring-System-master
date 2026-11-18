@@ -75,9 +75,11 @@ with app.app_context():
 
 **Collection limitation:** manual device registration retains the existing best-effort Flask-host snapshot. QR enrollment performs a one-time, user-confirmed Windows inventory submission; it does not remotely execute code, run persistently, or perform real diagnostic checks. Real diagnostics and live monitoring remain future work.
 
-## Database unavailable
+## Database unavailable or recovering a backup
 
-If sign-in or registration fails, run `python -m flask --app device_monitoring_prototype.app check-db` from the repository root. Confirm the MySQL-compatible server is running (for XAMPP, check the XAMPP MySQL module; a stopped Windows `MySQL80` service does not indicate that XAMPP MariaDB is stopped), the `devmonitor` database and application user exist, and `device_monitoring_prototype\.env` contains valid settings. Error 1045 means credentials were rejected; a missing table or column means the existing schema needs its documented migration. Back up existing data before migration, apply only migrations absent from the live schema, then rerun `check-db`. `init-db` creates missing tables and roles, but does not add columns or constraints to existing tables.
+Run `python -m flask --app device_monitoring_prototype.app check-db` from the repository root. Confirm the active server, host, port, and credentials match `device_monitoring_prototype\.env`. XAMPP may use a non-default port such as `3307`; set `MYSQL_PORT` to that port. If `DATABASE_URL` is set, it overrides the separate `MYSQL_*` settings. Keep the target database name `devmonitor`. Error 1045 means credentials were rejected; error 1049 means the connected server does not currently have that database; missing tables or columns indicate schema drift.
+
+If the goal is to recover an existing physical backup, do not initialize an empty database or copy individual `.ibd` files into another data directory. Preserve the original backup, inspect and start a complete copy with the matching MariaDB version, and export the recovered `devmonitor` tables logically before restoring them to the intended MariaDB instance under the same database name. Use `init-db` only after recovery and schema verification; it creates missing tables and roles but does not add columns or constraints to existing tables. Back up existing data before any repair or migration and rerun `check-db` afterward.
 
 ## Files
 
