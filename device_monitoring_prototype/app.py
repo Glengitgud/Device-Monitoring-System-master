@@ -14,6 +14,10 @@ from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 #
 import click
+from device_monitoring_prototype.agent_builder import (
+    DeviceAgentBuildError,
+    build_agent_executable,
+)
 from flask import (
     Flask,
     abort,
@@ -875,7 +879,7 @@ def create_app(test_config=None):
             db.session.commit()
         return redirect(url_for("device_enrollment", token=token))
 
-    @app.route("/enroll/<token>/agent.py", methods=["GET", "POST"])
+    @app.route("/enroll/<token>/agent.exe", methods=["GET", "POST"])
     def download_device_agent(token):
         if current_user.is_authenticated and current_user.is_admin:
             return enrollment_page(
@@ -918,17 +922,24 @@ def create_app(test_config=None):
             or parsed_base.fragment
         ):
             abort(503)
-        agent_path = Path(__file__).resolve().parent / "device_agent.py"
-        agent_source = agent_path.read_text(encoding="utf-8")
         submission_url = f"{base_url}{url_for('submit_agent_enrollment')}"
-        agent_source = agent_source.replace(
-            '"__REGISTRATION_TOKEN__"', json.dumps(token)
-        ).replace('"__SUBMISSION_URL__"', json.dumps(submission_url))
+        try:
+            agent_bytes = build_agent_executable(token, submission_url)
+        except DeviceAgentBuildError:
+            app.logger.exception("Could not build the Device Agent executable.")
+            return enrollment_page(
+                message=(
+                    "The Windows Device Agent could not be prepared. "
+                    "Please retry or contact the system administrator."
+                ),
+                status=503,
+                verified=True,
+            )
         response = send_file(
-            io.BytesIO(agent_source.encode("utf-8")),
-            mimetype="text/x-python",
+            io.BytesIO(agent_bytes),
+            mimetype="application/vnd.microsoft.portable-executable",
             as_attachment=True,
-            download_name="devmonitor-device-agent.py",
+            download_name="devmonitor-device-agent.exe",
             max_age=0,
         )
         response.headers["Cache-Control"] = "no-store"
