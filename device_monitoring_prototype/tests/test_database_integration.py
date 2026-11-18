@@ -1,13 +1,14 @@
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import hmac
 import json
 import smtplib
+import socket
 import struct
 import time
 import xml.etree.ElementTree as ET
@@ -2088,19 +2089,236 @@ class DatabaseIntegrationTest(unittest.TestCase):
             device_agent.collect_specifications.__globals__,
             {"os": SimpleNamespace(name="nt")},
         ):
-            with patch.object(
-                device_agent.subprocess,
-                "run",
-                return_value=SimpleNamespace(stdout=json.dumps(expected)),
-            ) as powershell:
+            with (
+                patch.object(device_agent, "configure_logging", return_value="agent.log"),
+                patch.object(device_agent, "_collect_cpu_name", return_value="Example CPU"),
+                patch.object(device_agent, "_collect_cpu_cores", return_value=4),
+                patch.object(
+                    device_agent,
+                    "_collect_memory",
+                    return_value={
+                        "ram_capacity_bytes": 8 * 1024**3,
+                        "ram_usage_bytes": 3 * 1024**3,
+                    },
+                ),
+                patch.object(
+                    device_agent,
+                    "_collect_storage",
+                    return_value=[
+                        {"name": "C:", "total_bytes": 256, "available_bytes": 128}
+                    ],
+                ),
+                patch.object(
+                    device_agent, "_collect_gpu_information", return_value=["Example GPU"]
+                ),
+                patch.object(
+                    device_agent,
+                    "_collect_motherboard_brand",
+                    return_value="Example Board",
+                ),
+                patch.object(
+                    device_agent,
+                    "_collect_operating_system",
+                    return_value={
+                        "operating_system_name": "Windows 11",
+                        "operating_system_version": "10.0.26100",
+                    },
+                ),
+                patch.object(
+                    device_agent,
+                    "_collect_network",
+                    return_value={
+                        "network_adapters": ["Ethernet"],
+                        "ip_addresses": ["192.0.2.20"],
+                    },
+                ),
+            ):
                 detected = device_agent.collect_specifications()
         self.assertEqual(detected, expected)
-        self.assertIn("Win32_Processor", powershell.call_args.args[0][-1])
-        self.assertNotIn("-ExecutionPolicy", powershell.call_args.args[0])
         self.assertEqual(
             {key for _, key in device_agent.FIELD_LABELS},
             set(expected),
         )
+
+    def test_agent_keeps_available_fields_when_a_hardware_reader_fails(self):
+        memory = {
+            "ram_capacity_bytes": 8 * 1024**3,
+            "ram_usage_bytes": 3 * 1024**3,
+        }
+        with patch.dict(
+            device_agent.collect_specifications.__globals__,
+            {"os": SimpleNamespace(name="nt")},
+        ):
+            with (
+                patch.object(device_agent, "configure_logging", return_value="agent.log"),
+                patch.object(device_agent, "_collect_cpu_name", return_value="Example CPU"),
+                patch.object(device_agent, "_collect_cpu_cores", return_value=4),
+                patch.object(device_agent, "_collect_memory", return_value=memory),
+                patch.object(device_agent, "_collect_storage", side_effect=OSError("denied")),
+                patch.object(
+                    device_agent, "_collect_gpu_information", return_value=["Example GPU"]
+                ),
+                patch.object(
+                    device_agent,
+                    "_collect_motherboard_brand",
+                    return_value="Example Board",
+                ),
+                patch.object(
+                    device_agent,
+                    "_collect_operating_system",
+                    return_value={
+                        "operating_system_name": "Windows 11",
+                        "operating_system_version": "10.0.26100",
+                    },
+                ),
+                patch.object(
+                    device_agent,
+                    "_collect_network",
+                    return_value={
+                        "network_adapters": ["Ethernet"],
+                        "ip_addresses": ["192.0.2.20"],
+                    },
+                ),
+            ):
+                detected = device_agent.collect_specifications()
+
+        self.assertEqual(detected["cpu_name"], "Example CPU")
+        self.assertEqual(detected["ram_capacity_bytes"], memory["ram_capacity_bytes"])
+        self.assertEqual(detected["storage_devices"], [])
+        self.assertEqual(detected["storage_total_bytes"], 0)
+        self.assertEqual(detected["gpu_information"], ["Example GPU"])
+
+    def test_native_windows_readers_collect_cpu_memory_and_os_with_fallbacks(self):
+        memory = SimpleNamespace(total=16, used=7)
+        with (
+            patch.object(device_agent.psutil, "cpu_count", return_value=6),
+            patch.object(device_agent.psutil, "virtual_memory", return_value=memory),
+            patch.object(
+                device_agent,
+                "_read_registry_value",
+                side_effect=OSError("registry unavailable"),
+            ),
+            patch.object(device_agent.platform, "processor", return_value="Fallback CPU"),
+        ):
+            self.assertEqual(device_agent._collect_cpu_cores(), 6)
+            self.assertEqual(device_agent._collect_memory(), {
+                "ram_capacity_bytes": 16,
+                "ram_usage_bytes": 7,
+            })
+            self.assertEqual(device_agent._collect_cpu_name(), "Fallback CPU")
+
+    def test_storage_and_network_collection_continue_with_partial_results(self):
+        partitions = [
+            SimpleNamespace(mountpoint="C:\\"),
+            SimpleNamespace(mountpoint="D:\\"),
+        ]
+        addresses = {
+            "Ethernet": [
+                SimpleNamespace(family=socket.AF_INET, address="192.0.2.20")
+            ],
+            "Loopback": [
+                SimpleNamespace(family=socket.AF_INET, address="127.0.0.1")
+            ],
+        }
+        with (
+            patch.object(device_agent.psutil, "disk_partitions", return_value=partitions),
+            patch.object(
+                device_agent.psutil,
+                "disk_usage",
+                side_effect=[
+                    PermissionError("drive unavailable"),
+                    SimpleNamespace(total=1000, free=400),
+                ],
+            ),
+            patch.object(device_agent.psutil, "net_if_addrs", return_value=addresses),
+        ):
+            storage = device_agent._collect_storage()
+            network = device_agent._collect_network()
+
+        self.assertEqual(
+            storage,
+            [{"name": "D:\\", "total_bytes": 1000, "available_bytes": 400}],
+        )
+        self.assertEqual(network["network_adapters"], ["Ethernet", "Loopback"])
+        self.assertEqual(network["ip_addresses"], ["192.0.2.20"])
+
+    def test_collection_failures_are_logged_and_reported_as_unavailable(self):
+        def fail_gpu_collection():
+            raise RuntimeError("driver unavailable")
+
+        with patch.object(device_agent, "LOGGER") as logger:
+            result = device_agent._collect_component(
+                "GPU information", fail_gpu_collection, ["Unavailable"]
+            )
+
+        self.assertEqual(result, ["Unavailable"])
+        logger.exception.assert_called_once()
+        self.assertEqual(
+            device_agent._unavailable_specification_fields(
+                {
+                    "cpu_name": "Available CPU",
+                    "ram_capacity_bytes": None,
+                    "storage_devices": [],
+                    "gpu_information": ["Unavailable"],
+                    "ip_addresses": [],
+                }
+            ),
+            ["ram_capacity_bytes", "storage_devices", "gpu_information", "ip_addresses"],
+        )
+
+    def test_windows_agent_submits_local_inventory_to_enrollment_api(self):
+        specifications = {
+            "cpu_name": "Endpoint CPU",
+            "cpu_cores": 4,
+            "ram_capacity_bytes": 8 * 1024**3,
+            "ram_usage_bytes": 3 * 1024**3,
+            "storage_devices": [],
+            "storage_total_bytes": 0,
+            "storage_available_bytes": 0,
+            "gpu_information": ["Unavailable"],
+            "motherboard_brand": "Unavailable",
+            "operating_system_name": "Windows 11",
+            "operating_system_version": "10.0.26100",
+            "network_adapters": ["Ethernet"],
+            "ip_addresses": ["192.0.2.20"],
+        }
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"device_id": 25}'
+        request_holder = {}
+
+        def capture_request(request, timeout):
+            request_holder["request"] = request
+            request_holder["timeout"] = timeout
+            return response
+
+        with (
+            patch.object(device_agent, "configure_logging", return_value="agent.log"),
+            patch.object(device_agent, "collect_specifications", return_value=specifications),
+            patch.object(device_agent.platform, "node", return_value="endpoint-host"),
+            patch.object(device_agent, "input", side_effect=["", "Laptop", "yes"], create=True),
+            patch.object(device_agent, "REGISTRATION_TOKEN", "a" * 43),
+            patch.object(
+                device_agent,
+                "SUBMISSION_URL",
+                "https://devmonitor.example/api/device-agent/enroll",
+            ),
+            patch.object(
+                device_agent.urllib.request, "urlopen", side_effect=capture_request
+            ),
+        ):
+            with patch.object(device_agent.sys, "stdout"):
+                result = device_agent.main()
+
+        submitted = json.loads(request_holder["request"].data)
+        self.assertEqual(result, 0)
+        self.assertEqual(submitted["name"], "endpoint-host")
+        self.assertEqual(submitted["specifications"], specifications)
+        self.assertTrue(
+            request_holder["request"].get_header("Authorization").startswith("Bearer ")
+        )
+        self.assertEqual(request_holder["request"].full_url, "https://devmonitor.example/api/device-agent/enroll")
+        self.assertEqual(request_holder["timeout"], 30)
 
     def test_exe_download_reports_packaging_failure_without_python_fallback(self):
         csrf = self.register_and_login()
