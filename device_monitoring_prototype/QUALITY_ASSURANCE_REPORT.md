@@ -153,6 +153,13 @@ The figures above describe the recovery-time backup snapshot. A later read-only 
 - **UI and UX Improvements:** verified completion confirmation modal with direct navigation actions and timed redirect.
 - **End-to-End Testing Results:** verified request/response + persistence through automated integration coverage and local smoke validation.
 
+### Real-time diagnostic reporting validation notes
+
+- Diagnostic runs are initiated from My Devices, then tracked by run ID through authenticated status polling.
+- The endpoint EXE submits report payloads directly to `/api/device-agent/diagnostics/<run_id>` using bearer authorization; no local-only result file is required.
+- Completed reports are rendered in-website and reflected in device history/dashboard refresh calls without manual page reload.
+- Device and activity audit trails include diagnostics start/completion entries, and diagnostic history remains queryable from website views.
+
 Run the integration suite from the repository root:
 
 ```powershell
