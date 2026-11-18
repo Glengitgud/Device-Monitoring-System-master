@@ -742,12 +742,15 @@ def show_health_window(report, title="Device health assessment"):
     import tkinter as tk
     from tkinter.scrolledtext import ScrolledText
 
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as error:
+        raise RuntimeError("A graphical desktop is unavailable.") from error
     root.title(title)
     root.geometry("860x690")
     root.minsize(680, 560)
     root.configure(background="#0d0221")
-    root.option_add("*Font", "Segoe UI 10")
+    root.option_add("*Font", "{Segoe UI} 10")
     tk.Label(
         root,
         text="Device health overview",
