@@ -3,33 +3,6 @@
 {% block title %}Detected Specifications - DevMonitor{% endblock %}
 {% block page_title %}Detected Device Specifications{% endblock %}
 
-{% macro health_label(score) -%}
-{%- if score is none -%}Not assessed
-{%- elif score >= 80 -%}Excellent
-{%- elif score >= 60 -%}Warning
-{%- elif score >= 40 -%}Attention needed
-{%- else -%}Critical
-{%- endif -%}
-{%- endmacro %}
-
-{% macro health_color(score) -%}
-{%- if score is none -%}#64748b
-{%- elif score >= 80 -%}#16a34a
-{%- elif score >= 60 -%}#eab308
-{%- elif score >= 40 -%}#f97316
-{%- else -%}#dc2626
-{%- endif -%}
-{%- endmacro %}
-
-{% macro issue_impact(issue) -%}
-{%- if issue.impact -%}{{ issue.impact }}
-{%- elif issue.severity == 'critical' -%}Critical impact on device stability or availability.
-{%- elif issue.severity == 'attention' -%}May interrupt normal device operation soon.
-{%- elif issue.severity == 'warning' -%}May reduce performance or reliability if left unaddressed.
-{%- else -%}Informational finding with limited immediate impact.
-{%- endif -%}
-{%- endmacro %}
-
 {% block content %}
 <div class="content-card mb-4">
     <div class="content-card-header d-flex justify-content-between align-items-center">
@@ -49,7 +22,6 @@
                 after the Device Agent completes registration.
             </div>
         {% endif %}
-        <h6 class="mb-3">Detected Device Information</h6>
         {% if specification_fields %}
             <div class="specification-grid">
                 {% for label, value in specification_fields %}
@@ -75,9 +47,9 @@
 
 <div class="content-card mb-4" id="health-report">
     <div class="content-card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-        <h6 class="mb-0"><i class="bi bi-heart-pulse me-2"></i>Device Scan Results</h6>
+        <h6 class="mb-0"><i class="bi bi-heart-pulse me-2"></i>Device Health &amp; Diagnosis (Device Scan Results)</h6>
         <a class="btn btn-sm btn-outline-primary" href="{{ url_for('devices') }}">
-            Run Device Scan
+            Diagnose this device
         </a>
     </div>
     <div class="content-card-body">
@@ -85,10 +57,10 @@
         {% if latest %}
             {% set scores = latest.scores %}
             {% set health_values = [
-                ('Overall Device Health', scores.overall),
-                ('Hardware Health', scores.hardware),
-                ('Software Health', scores.software),
-                ('Driver Health', scores.drivers),
+                ('Overall', scores.overall),
+                ('Hardware', scores.hardware),
+                ('Software', scores.software),
+                ('Drivers', scores.drivers),
                 ('CPU', scores.components.get('cpu')),
                 ('RAM', scores.components.get('ram')),
                 ('Storage', scores.components.get('storage')),
@@ -99,54 +71,51 @@
             <p class="text-muted">{{ latest.summary }}</p>
             <div class="health-gauge-grid">
                 {% for label, score in health_values %}
-                    {% set color = health_color(score) %}
+                    {% set color = '#64748b' if score is none else '#16a34a' if score >= 80 else '#eab308' if score >= 60 else '#f97316' if score >= 40 else '#dc2626' %}
+                    {% set health_label = 'Not assessed' if score is none else 'Excellent' if score >= 80 else 'Warning' if score >= 60 else 'Attention needed' if score >= 40 else 'Critical' %}
                     <div class="health-gauge-card">
                         <div class="health-gauge" role="img"
-                             aria-label="{{ label }}: {{ score if score is not none else 'not assessed' }}{{ '%' if score is not none else '' }}"
+                             aria-label="{{ label }} health: {{ score if score is not none else 'not assessed' }}{{ '%' if score is not none else '' }}"
                              style="--health-color:{{ color }};--health-score:{{ score or 0 }}">
-                            <span>{{ score|string + '%' if score is not none else 'N/A' }}</span>
+                            <span>{{ score|string + '%' if score is not none else 'Not assessed' }}</span>
                         </div>
                         <div class="health-gauge-label">{{ label }}</div>
                         <div class="health-gauge-status" style="color:{{ color }}">
-                            {{ health_label(score) }}
+                            {{ health_label }}
                         </div>
                     </div>
                 {% endfor %}
             </div>
-
-            <h6 class="mt-4" id="diagnostic-findings">Diagnostic Findings</h6>
             {% if latest.issues %}
+                <h6 class="mt-4">Diagnostic Findings</h6>
                 {% for issue in latest.issues %}
                     <article class="diagnostic-issue diagnostic-issue-{{ issue.severity }}">
-                        <div class="d-flex flex-wrap justify-content-between gap-2">
-                            <h6 class="mb-1">{{ issue.title }}</h6>
-                            <span class="severity-label">{{ issue.severity }}</span>
-                        </div>
-                        <p class="mb-2">{{ issue.description }}</p>
-                        <p class="small mb-1"><strong>Root cause:</strong> {{ issue.root_cause }}</p>
-                        <p class="small mb-1"><strong>Impact:</strong> {{ issue_impact(issue) }}</p>
-                        <p class="small mb-2"><strong>Recommended fix:</strong> {{ issue.recommendation }}</p>
+                        <h6>{{ issue.title }} <span class="severity-label">{{ issue.severity }}</span></h6>
+                        <p><strong>Description:</strong> {{ issue.description }}</p>
+                        <p><strong>Root cause:</strong> {{ issue.root_cause }}</p>
+                        <p><strong>Impact:</strong>
+                            {% if issue.severity == 'critical' %}
+                                Immediate service disruption or high failure risk.
+                            {% elif issue.severity == 'attention' %}
+                                Elevated risk that should be handled soon.
+                            {% elif issue.severity == 'warning' %}
+                                Performance or reliability may degrade over time.
+                            {% else %}
+                                Informational finding with low immediate risk.
+                            {% endif %}
+                        </p>
+                        <p><strong>Recommended fix:</strong> {{ issue.recommendation }}</p>
+                        <details>
+                            <summary>Step-by-Step Troubleshooting</summary>
+                            <ol class="mb-0 mt-2">
+                                {% for step in issue.steps %}<li>{{ step }}</li>{% endfor %}
+                            </ol>
+                        </details>
                     </article>
                 {% endfor %}
             {% else %}
-                <p class="text-success">No issues requiring attention were identified by the supported checks.</p>
+                <p class="text-success mt-3 mb-0">No issues requiring attention were identified by the supported checks.</p>
             {% endif %}
-
-            <h6 class="mt-4" id="troubleshooting">Step-by-Step Troubleshooting</h6>
-            {% if latest.issues %}
-                {% for issue in latest.issues %}
-                    <article class="diagnostic-issue diagnostic-issue-{{ issue.severity }}">
-                        <h6 class="mb-2">Issue: {{ issue.title }}</h6>
-                        <p class="small text-muted mb-2">Troubleshooting:</p>
-                        <ol class="mb-0">
-                            {% for step in issue.steps %}<li>{{ step }}</li>{% endfor %}
-                        </ol>
-                    </article>
-                {% endfor %}
-            {% else %}
-                <p class="text-muted mb-0">No guided troubleshooting steps are needed for this scan.</p>
-            {% endif %}
-
             {% if latest.checks %}
                 <h6 class="mt-4">Collected measurements and checks</h6>
                 <div class="diagnostic-check-list">
@@ -170,7 +139,7 @@
                     {% endfor %}
                 </div>
             {% endif %}
-            <p class="small text-muted mb-0 mt-3">
+            <p class="small text-muted mb-0">
                 Saved {{ latest.finished_at or latest.started_at }}. Checks are a one-time
                 endpoint assessment; unavailable sensors and unsupported checks are identified in the report.
             </p>
@@ -187,48 +156,40 @@
     <div class="content-card-body">
         {% if diagnostic_history %}
             <div class="table-responsive">
-                <table class="table table-hover align-middle diagnostic-history-table">
+                <table class="table table-hover align-middle">
                     <thead>
                         <tr>
-                            <th>Scan</th>
+                            <th>Run</th>
                             <th>Status</th>
-                            <th>Health</th>
-                            <th>Findings</th>
-                            <th>Recommendation</th>
+                            <th>Overall Health</th>
+                            <th>Issues Found</th>
+                            <th>Summary</th>
                             <th>Completed</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for run in diagnostic_history %}
-                        <tr>
-                            <td>#{{ run.id }}</td>
-                            <td>{{ run.status }}</td>
-                            <td>
-                                {% if run.scores.overall is not none %}
-                                    <span style="color:{{ health_color(run.scores.overall) }}">
-                                        {{ run.scores.overall }}% · {{ health_label(run.scores.overall) }}
-                                    </span>
-                                {% else %}
-                                    Not assessed
-                                {% endif %}
-                            </td>
-                            <td>{{ run.issues|length }}</td>
-                            <td>{{ run.recommendation or '—' }}</td>
-                            <td>{{ run.finished_at or run.started_at }}</td>
-                        </tr>
+                            <tr>
+                                <td>#{{ run.id }}</td>
+                                <td>{{ run.status|capitalize }}</td>
+                                <td>{{ run.scores.overall ~ '%' if run.scores.overall is not none else 'Not assessed' }}</td>
+                                <td>{{ run.issues|length }}</td>
+                                <td>{{ run.summary }}</td>
+                                <td>{{ run.finished_at or run.started_at }}</td>
+                            </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
         {% else %}
-            <p class="text-muted mb-0">No previous scans are available yet.</p>
+            <p class="text-muted mb-0">No diagnostic scan history is available yet.</p>
         {% endif %}
     </div>
 </div>
 
 <div class="content-card">
     <div class="content-card-header">
-        <h6 class="mb-0"><i class="bi bi-journal-text me-2"></i>Device Registration History</h6>
+        <h6 class="mb-0"><i class="bi bi-clock-history me-2"></i>Device Registration History</h6>
     </div>
     <div class="content-card-body">
         {% if registration_history %}
