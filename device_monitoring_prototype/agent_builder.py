@@ -12,9 +12,26 @@ class DeviceAgentBuildError(RuntimeError):
     """Raised when a personalized Windows agent cannot be produced."""
 
 
-def build_agent_executable(registration_token, submission_url):
-    if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", registration_token):
+def build_agent_executable(
+    registration_token,
+    submission_url,
+    *,
+    mode="registration",
+    diagnostic_run_id="",
+    diagnostic_token="",
+    dashboard_url="",
+):
+    if mode not in {"registration", "diagnostic"}:
+        raise DeviceAgentBuildError("The Device Agent mode is invalid.")
+    if mode == "registration" and not re.fullmatch(
+        r"[A-Za-z0-9_-]{40,64}", registration_token or ""
+    ):
         raise DeviceAgentBuildError("The device registration token is invalid.")
+    if mode == "diagnostic" and (
+        not str(diagnostic_run_id).isdigit()
+        or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", diagnostic_token or "")
+    ):
+        raise DeviceAgentBuildError("The diagnostic authorization is invalid.")
     if sys.platform != "win32":
         raise DeviceAgentBuildError(
             "The Windows agent must be built on a Windows application host."
@@ -27,10 +44,16 @@ def build_agent_executable(registration_token, submission_url):
         raise DeviceAgentBuildError(
             "The Windows agent source could not be read."
         ) from error
-    source = source.replace(
-        '"__REGISTRATION_TOKEN__"', json.dumps(registration_token)
-    ).replace('"__SUBMISSION_URL__"', json.dumps(submission_url))
-    if "__REGISTRATION_TOKEN__" in source or "__SUBMISSION_URL__" in source:
+    replacements = {
+        "__REGISTRATION_TOKEN__": registration_token or "",
+        "__SUBMISSION_URL__": submission_url,
+        "__DIAGNOSTIC_RUN_ID__": str(diagnostic_run_id or ""),
+        "__DIAGNOSTIC_TOKEN__": diagnostic_token or "",
+        "__DASHBOARD_URL__": dashboard_url or "",
+    }
+    for placeholder, value in replacements.items():
+        source = source.replace(f'"{placeholder}"', json.dumps(value))
+    if any(placeholder in source for placeholder in replacements):
         raise DeviceAgentBuildError("The agent source has unresolved settings.")
 
     try:
