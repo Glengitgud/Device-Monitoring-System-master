@@ -183,6 +183,23 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(response.location, "/device-verification")
         return token
 
+    def test_device_health_color_bands_match_the_requested_thresholds(self):
+        bands = {
+            0: "#dc2626",
+            39: "#dc2626",
+            40: "#f97316",
+            59: "#f97316",
+            60: "#eab308",
+            79: "#eab308",
+            80: "#16a34a",
+            100: "#16a34a",
+        }
+        for score, expected_color in bands.items():
+            with self.subTest(score=score):
+                color, _ = device_agent._health_band(score)
+                self.assertEqual(color, expected_color)
+        self.assertEqual(device_agent._health_band(None)[1], "Not assessed")
+
     def complete_qr_enrollment(self, csrf, name="Verified test device"):
         qr = self.client.post(
             "/api/device-registration-tokens",
@@ -1341,15 +1358,73 @@ class DatabaseIntegrationTest(unittest.TestCase):
             )
             db.session.commit()
 
-        response = self.client.post(
-            f"/api/devices/{device_id}/diagnostics",
-            headers={"X-CSRF-Token": token},
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            return_value=b"MZ-test-agent",
+        ) as build_agent:
+            response = self.client.post(
+                f"/api/devices/{device_id}/diagnostics",
+                headers={"X-CSRF-Token": token},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.mimetype, "application/vnd.microsoft.portable-executable"
         )
-        self.assertEqual(response.status_code, 201)
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+        self.assertEqual(build_agent.call_args.kwargs["mode"], "diagnostic")
         history = self.client.get(f"/api/devices/{device_id}/history")
         self.assertEqual(len(history.json["diagnostics"]), 1)
         self.assertEqual(len(history.json["network"]), 1)
         self.assertEqual(len(history.json["logs"]), 2)
+        run = history.json["diagnostics"][0]
+        self.assertEqual(run["status"], "running")
+        self.assertIsNone(run["scores"]["overall"])
+        run_id = int(response.headers["X-Diagnostic-Run-ID"])
+        report = {
+            "scores": {
+                "overall": 80,
+                "hardware": 80,
+                "software": 80,
+                "drivers": 80,
+                "components": {
+                    "cpu": 80,
+                    "ram": 80,
+                    "storage": 80,
+                    "gpu": 80,
+                    "network": 80,
+                    "operating_system": 80,
+                },
+            },
+            "checks": [
+                {
+                    "name": "Network connectivity",
+                    "category": "hardware",
+                    "status": "passed",
+                    "summary": "The configured host responded.",
+                    "details": {"score": 80},
+                }
+            ],
+            "issues": [],
+            "summary": "Endpoint diagnostics completed.",
+        }
+        diagnostic_token = build_agent.call_args.kwargs["diagnostic_token"]
+        report_response = self.client.post(
+            f"/api/device-agent/diagnostics/{run_id}",
+            headers={"Authorization": f"Bearer {diagnostic_token}"},
+            json={"report": report},
+        )
+        self.assertEqual(report_response.status_code, 201, report_response.json)
+        retry_response = self.client.post(
+            f"/api/device-agent/diagnostics/{run_id}",
+            headers={"Authorization": f"Bearer {diagnostic_token}"},
+            json={"report": report},
+        )
+        self.assertEqual(retry_response.status_code, 400)
+        history = self.client.get(f"/api/devices/{device_id}/history")
+        self.assertEqual(history.json["diagnostics"][0]["status"], "completed")
+        self.assertEqual(history.json["diagnostics"][0]["scores"]["overall"], 80)
+        self.assertEqual(len(history.json["diagnostics"][0]["checks"]), 2)
+        self.assertEqual(len(history.json["logs"]), 3)
         details = self.client.get(f"/api/devices/{device_id}")
         self.assertEqual(details.status_code, 200, details.get_data(as_text=True))
         self.assertEqual(details.json["view_mode"], "user")
@@ -1374,7 +1449,16 @@ class DatabaseIntegrationTest(unittest.TestCase):
             device = db.session.get(Device, device_id)
             self.assertEqual(DiagnosticRun.query.count(), 1)
             self.assertEqual(NetworkRecord.query.count(), 2)
-            self.assertEqual(Log.query.count(), 3)
+            self.assertEqual(
+                Log.query.filter(Log.device_id == device_id).count(), 3
+            )
+            self.assertEqual(
+                {entry.event for entry in device.logs} & {
+                    "Endpoint diagnostics started",
+                    "Endpoint diagnostics completed",
+                },
+                {"Endpoint diagnostics started", "Endpoint diagnostics completed"},
+            )
             self.assertEqual(len(device.network_interfaces), 1)
             self.assertEqual(len(device.metric_samples), 1)
             self.assertEqual(len(device.diagnostic_runs), 1)
@@ -2295,6 +2379,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
         with (
             patch.object(device_agent, "configure_logging", return_value="agent.log"),
             patch.object(device_agent, "collect_specifications", return_value=specifications),
+            patch.object(device_agent, "show_health_window"),
+            patch.object(device_agent, "show_registration_success"),
             patch.object(device_agent.platform, "node", return_value="endpoint-host"),
             patch.object(device_agent, "input", side_effect=["", "Laptop", "yes"], create=True),
             patch.object(device_agent, "REGISTRATION_TOKEN", "a" * 43),
