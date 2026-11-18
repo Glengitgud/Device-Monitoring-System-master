@@ -658,8 +658,8 @@ function startDeviceQrCountdown(expiresAt, serverTime, token) {
             remaining.textContent = `${Math.max(0, Math.ceil((expiration - (Date.now() - serverClockOffset)) / 1000))}s`;
             document.getElementById('deviceQrStatus').textContent =
                 result.status === 'verified'
-                    ? 'Account verified. Confirm the Device Agent download on the scanned device.'
-                    : 'Download confirmed. Run the Device Agent and approve device registration.';
+                    ? 'Account verified. Confirm the Windows EXE download on the scanned device.'
+                    : 'Download confirmed. Run the Device Agent EXE and approve device registration.';
             return;
         }
 

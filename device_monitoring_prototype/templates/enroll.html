@@ -19,10 +19,10 @@
             {% if not message or verified %}
                 {% if verified %}
                     <div class="alert alert-success" role="status">
-                        Account verification succeeded. Continue with the Device Agent download.
+                        Account verification succeeded. Continue with the Windows EXE download.
                     </div>
                     <p class="fw-semibold">
-                        Do you trust this application and want to download the Device Agent?
+                        Do you trust this application and want to download the standalone Device Agent?
                     </p>
                     <form method="post"
                           action="{{ url_for('download_device_agent', token=request.view_args.token) }}">
@@ -31,16 +31,16 @@
                             <input class="form-check-input" id="trustDeviceAgent"
                                    name="trust_device_agent" type="checkbox" value="yes" required>
                             <label class="form-check-label" for="trustDeviceAgent">
-                                I trust this application and authorize this download.
+                                I trust this application and authorize this token-bound EXE download.
                             </label>
                         </div>
                         <button class="btn btn-primary login-btn" type="submit">
-                            Download Device Agent
+                            Download Device Agent (.exe)
                         </button>
                     </form>
                 {% else %}
                     <p>Scan confirmed the one-time registration link. Verify the account
-                       before requesting the Windows Device Agent.</p>
+                       before requesting the standalone Windows EXE agent.</p>
                     <form method="post"
                           action="{{ url_for('verify_device_enrollment', token=request.view_args.token) }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -53,8 +53,9 @@
                 <p>Sign in and generate a new QR code to register a device.</p>
             {% endif %}
             <p class="small mt-3">
-                The Windows agent displays the detected specifications and waits for
-                your approval before submitting anything. The one-use registration link
+                The standalone Windows EXE requires no Python installation or manual
+                configuration. It displays detected specifications and waits for your
+                approval before submitting anything. The one-use registration link
                 expires after 30 minutes.
             </p>
         </section>

@@ -12,6 +12,13 @@
         Account verified. {{ verified_device_count }} registered device{{ '' if verified_device_count == 1 else 's' }} linked to your account.
     {% endif %}
 </div>
+{% if not current_user.is_admin %}
+<div class="mb-3">
+    <a class="btn btn-outline-primary" href="{{ url_for('device_verification') }}">
+        <i class="bi bi-pc-display me-1"></i>Register a device
+    </a>
+</div>
+{% endif %}
 <!-- ======================================================
      DASHBOARD PAGE
      Shows summary cards, device overview table,

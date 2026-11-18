@@ -45,8 +45,9 @@
 </div>
 <p class="small">
     Scan with the device you want to verify. Confirm the account, then download
-    and run the Windows agent, review its detected specifications, and approve
-    registration. QR codes expire after 30 minutes and can be used once.
+    and run the standalone Windows EXE, review its detected specifications, and
+    approve registration. No Python installation is required. QR codes expire
+    after 30 minutes and can be used once.
 </p>
 <button type="button" class="btn btn-primary" id="createDeviceQrBtn">
     <i class="bi bi-qr-code me-1"></i>{{ 'Regenerate Verification QR' if registration_qr else 'Generate Verification QR' }}
