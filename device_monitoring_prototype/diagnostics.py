@@ -65,7 +65,6 @@ def _validate_issue(issue):
         "severity": 16,
         "description": 1000,
         "root_cause": 1000,
-        "impact": 1000,
         "recommendation": 1000,
     }
     if not isinstance(issue, dict) or set(issue) != set(fields) | {"steps"}:
@@ -278,13 +277,6 @@ def diagnostic_run_payload(run):
         for check in checks
         if check["details"].get("issue")
     ]
-    for check in checks:
-        if check["name"] != "Overall scores":
-            continue
-        stored_issues = check["details"].get("issues")
-        if isinstance(stored_issues, list) and stored_issues:
-            issues = stored_issues
-        break
     return {
         "id": run.id,
         "status": run.status,
@@ -304,7 +296,8 @@ def diagnostic_run_payload(run):
 
 
 def record_health_report(run, report):
-    """Persist scores and issue summaries in an existing check row for history views."""
+    """Persist score metadata in an existing check row for history serialization."""
+    finished_at = run.finished_at or datetime.now(timezone.utc)
     run.checks.append(
         DiagnosticCheck(
             check_name="Overall scores",
@@ -313,9 +306,8 @@ def record_health_report(run, report):
             result_summary="Overall, hardware, software, and driver health scores.",
             details={
                 "scores": report["scores"],
-                "issues": report["issues"],
-                "summary": report["summary"],
-                "scanned_at": datetime.now(timezone.utc).isoformat(),
+                "scan_timestamp": finished_at.isoformat(),
+                "device_status": getattr(run.device, "status", None),
             },
         )
     )
