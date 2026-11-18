@@ -786,104 +786,53 @@ def collect_health_report(specifications):
                 )
             elif name == "RAM":
                 issue = _health_issue(
-                    "High RAM Usage", score,
+                    "High RAM utilization", score,
                     f"RAM utilization was {value:.0f}% during this sample.",
                     "Open applications and background tasks are using most available memory.",
                     "Review memory use and close unnecessary applications.",
-                    [
-                        "Open Task Manager.",
-                        "Click Processes.",
-                        "Sort by Memory Usage.",
-                        "Close unnecessary applications.",
-                        "Restart device if necessary.",
-                    ],
+                    ["Open Task Manager.", "Sort the Processes list by Memory.", "Save work and close applications you do not need.", "Restart the device if high use continues."],
                 )
             elif name == "Storage capacity":
                 issue = _health_issue(
-                    "Low Storage Space", score,
+                    "Low available storage", score,
                     f"{summary}. The lowest free-space volume has {value:.1f}% free.",
                     "A nearly full volume can prevent updates and normal application work.",
                     "Free space safely or ask an administrator about storage expansion.",
-                    [
-                        "Open Storage Settings.",
-                        "Identify large files.",
-                        "Remove temporary files.",
-                        "Empty Recycle Bin.",
-                        "Run Disk Cleanup.",
-                    ],
+                    ["Open Settings and select System, then Storage.", "Review temporary files and large items.", "Back up important files before removing them.", "Avoid deleting Windows or application folders manually."],
                 )
             elif name == "Network connectivity":
                 stage = value["stage"]
                 network_guidance = {
                     "configuration": (
                         "The executable was built with an invalid DevMonitor address.",
-                        [
-                            "Check Ethernet or Wi-Fi connection.",
-                            "Restart adapter.",
-                            "Flush DNS.",
-                            "Reconnect to network.",
-                            "Re-download the agent from the signed-in DevMonitor page.",
-                        ],
+                        ["Re-download the agent from the signed-in DevMonitor page.", "If the issue continues, ask the administrator to verify PUBLIC_BASE_URL."],
                     ),
                     "dns": (
                         "The device could not translate the configured server name to a network address.",
-                        [
-                            "Check Ethernet or Wi-Fi connection.",
-                            "Restart adapter.",
-                            "Flush DNS.",
-                            "Reconnect to network.",
-                            "Test connectivity.",
-                        ],
+                        ["Confirm the device has internet or organization-network access.", "Reconnect Wi-Fi or Ethernet.", "Check VPN and DNS settings with your network administrator.", "Retry after DNS service is restored."],
                     ),
                     "tcp": (
                         "The server name resolved, but its configured port did not accept a connection.",
-                        [
-                            "Check Ethernet or Wi-Fi connection.",
-                            "Restart adapter.",
-                            "Flush DNS.",
-                            "Reconnect to network.",
-                            "Test connectivity.",
-                        ],
+                        ["Confirm the DevMonitor server is running.", "Verify the server address and port with the administrator.", "Check whether a firewall or VPN blocks that port.", "Retry when the service is reachable."],
                     ),
                     "tls": (
                         "The server was reached, but HTTPS negotiation failed; the configured port, protocol, or certificate may be wrong.",
-                        [
-                            "Check Ethernet or Wi-Fi connection.",
-                            "Restart adapter.",
-                            "Flush DNS.",
-                            "Reconnect to network.",
-                            "Test connectivity.",
-                        ],
+                        ["Confirm the address uses the scheme and port supplied by the administrator (HTTPS commonly uses port 443).", "Check that the computer's date and time are correct.", "Open the DevMonitor HTTPS address in a browser and inspect any certificate warning.", "Ask the administrator to verify the listening port and renew or configure the server certificate.", "Do not bypass certificate validation."],
                     ),
                     "endpoint": (
                         "The network connection succeeded, but the configured DevMonitor API path did not respond correctly.",
-                        [
-                            "Check Ethernet or Wi-Fi connection.",
-                            "Restart adapter.",
-                            "Flush DNS.",
-                            "Reconnect to network.",
-                            "Test connectivity.",
-                        ],
+                        ["Open the DevMonitor site in a browser.", "Confirm the application is running at the configured address.", "Ask the administrator to verify the deployed application path and agent download settings.", "Download a fresh agent after the server address is corrected."],
                     ),
                 }
                 cause, steps = network_guidance.get(
                     stage,
-                    (
-                        "The configured DevMonitor server could not be reached.",
-                        [
-                            "Check Ethernet or Wi-Fi connection.",
-                            "Restart adapter.",
-                            "Flush DNS.",
-                            "Reconnect to network.",
-                            "Test connectivity.",
-                        ],
-                    ),
+                    ("The configured DevMonitor server could not be reached.", ["Confirm the network connection and server address.", "Ask the administrator to check the application service and firewall.", "Retry after the connection is restored."]),
                 )
                 issue = _health_issue(
-                    "Network Connectivity Problems", score,
+                    "DevMonitor connection problem", score,
                     value["message"],
                     cause,
-                    "Follow the guided network steps, then download a fresh agent if server settings changed.",
+                    "Follow the steps for the reported connection stage, then download a fresh agent if the server settings changed.",
                     steps,
                 )
             elif name == "Driver metadata":
@@ -1061,15 +1010,6 @@ def collect_health_report(specifications):
     }
 
 
-def _issue_impact(severity):
-    return {
-        "critical": "Critical impact on device stability or availability.",
-        "attention": "May interrupt normal device operation soon.",
-        "warning": "May reduce performance or reliability if left unaddressed.",
-        "info": "Informational finding with limited immediate impact.",
-    }.get(severity, "Informational finding with limited immediate impact.")
-
-
 def _health_issue(title, score, description, root_cause, recommendation, steps):
     severity = (
         "critical" if score < 40 else "attention" if score < 60
@@ -1080,10 +1020,124 @@ def _health_issue(title, score, description, root_cause, recommendation, steps):
         "severity": severity,
         "description": description,
         "root_cause": root_cause,
-        "impact": _issue_impact(severity),
         "recommendation": recommendation,
         "steps": steps,
     }
+
+
+def show_health_window(report, title="Device health assessment"):
+    """Display accessible circular scores and actionable local findings."""
+    import tkinter as tk
+    from tkinter.scrolledtext import ScrolledText
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as error:
+        raise RuntimeError("A graphical desktop is unavailable.") from error
+    root.title(title)
+    root.geometry("860x690")
+    root.minsize(680, 560)
+    root.configure(background="#0d0221")
+    root.option_add("*Font", "{Segoe UI} 10")
+    tk.Label(
+        root,
+        text="Device health overview",
+        font=("Segoe UI", 19, "bold"),
+        foreground="#f8fafc",
+        background="#0d0221",
+    ).pack(anchor="w", padx=24, pady=(22, 2))
+    tk.Label(
+        root,
+        text=(
+            f"Overall {report['scores']['overall'] if report['scores']['overall'] is not None else 'N/A'}%  ·  "
+            f"Hardware {report['scores']['hardware'] if report['scores']['hardware'] is not None else 'N/A'}%  ·  "
+            f"Software {report['scores']['software'] if report['scores']['software'] is not None else 'N/A'}%  ·  "
+            f"Drivers {report['scores']['drivers'] if report['scores']['drivers'] is not None else 'N/A'}%  "
+            "— one-time checks on this computer; guidance, not continuous monitoring."
+        ),
+        foreground="#cbd5e1",
+        background="#0d0221",
+        wraplength=800,
+        justify="left",
+    ).pack(anchor="w", padx=24, pady=(0, 14))
+
+    gauges = _health_gauges(report["scores"])
+    gauge_frame = tk.Frame(root, background="#0d0221")
+    gauge_frame.pack(fill="x", padx=16)
+    for index, (label, score) in enumerate(gauges):
+        card = tk.Frame(
+            gauge_frame,
+            background="#120636",
+            highlightbackground="#334155",
+            highlightthickness=1,
+        )
+        card.grid(row=index // 4, column=index % 4, padx=6, pady=6, sticky="nsew")
+        gauge_frame.grid_columnconfigure(index % 4, weight=1)
+        canvas = tk.Canvas(card, width=112, height=112, background="#120636", highlightthickness=0)
+        canvas.pack(padx=8, pady=(10, 0))
+        canvas.create_oval(12, 12, 100, 100, outline="#334155", width=9)
+        color, state = _health_band(score)
+        if score is not None:
+            canvas.create_arc(
+                12, 12, 100, 100, start=90, extent=-score * 3.6,
+                style="arc", outline=color, width=9,
+            )
+            score_text = f"{score}%"
+        else:
+            score_text = "N/A"
+        canvas.create_text(56, 49, text=score_text, fill="#f8fafc", font=("Segoe UI", 17, "bold"))
+        tk.Label(
+            card,
+            text=label,
+            foreground="#f8fafc",
+            background="#120636",
+            wraplength=135,
+        ).pack(padx=5, pady=(3, 0))
+        tk.Label(
+            card,
+            text=state,
+            foreground=color,
+            background="#120636",
+            font=("Segoe UI", 9, "bold"),
+        ).pack(padx=5, pady=(0, 10))
+
+    actions = ScrolledText(
+        root, height=13, wrap="word", background="#120636",
+        foreground="#e2e8f0", insertbackground="#ffffff",
+        relief="flat", padx=12, pady=10,
+    )
+    actions.pack(fill="both", expand=True, padx=24, pady=12)
+    if report["issues"]:
+        for issue in report["issues"]:
+            actions.insert(
+                "end",
+                f"{issue['severity'].upper()} — {issue['title']}\n"
+                f"{issue['description']}\nCause: {issue['root_cause']}\n"
+                f"Suggested action: {issue['recommendation']}\n"
+                + "\n".join(f"  {step}. {instruction}" for step, instruction in enumerate(issue["steps"], 1))
+                + "\n\n",
+            )
+    else:
+        actions.insert("end", "No issues requiring attention were identified by the supported checks.\n\n")
+    skipped = [
+        check["name"] for check in report["checks"] if check["status"] == "skipped"
+    ]
+    if skipped:
+        actions.insert("end", "Not assessed: " + ", ".join(skipped) + "\n")
+    actions.configure(state="disabled")
+    tk.Button(
+        root,
+        text="Continue",
+        command=root.destroy,
+        background="#3458a8",
+        foreground="#ffffff",
+        activebackground="#26408b",
+        activeforeground="#ffffff",
+        relief="flat",
+        padx=24,
+        pady=9,
+    ).pack(anchor="e", padx=24, pady=(0, 18))
+    root.mainloop()
 
 
 def show_registration_success():
@@ -1219,6 +1273,7 @@ def display_value(key, value):
 
 def main():
     log_path = configure_logging()
+    diagnostic_mode = DIAGNOSTIC_RUN_ID not in {"__DIAGNOSTIC_RUN_ID__", ""}
     try:
         specifications = collect_specifications()
     except RuntimeError as error:
@@ -1227,35 +1282,30 @@ def main():
         _show_log_location(log_path)
         return 1
 
-    diagnostic_mode = DIAGNOSTIC_RUN_ID not in {"__DIAGNOSTIC_RUN_ID__", ""}
+    report = collect_health_report(specifications)
+    if not diagnostic_mode:
+        try:
+            show_health_window(report)
+        except (ImportError, OSError, RuntimeError) as error:
+            LOGGER.exception("The graphical health overview could not be displayed.")
+            print(f"Health overview window unavailable: {error}", file=sys.stderr)
+
+    print("\nDetected device specifications (review before submission):")
+    for label, key in FIELD_LABELS:
+        value = specifications.get(key)
+        if (
+            key in {"storage_total_bytes", "storage_available_bytes"}
+            and not specifications["storage_devices"]
+        ):
+            value = UNAVAILABLE
+        print(f"  {label}: {display_value(key, value)}")
+    _show_log_location(log_path)
+
     if diagnostic_mode:
-        print("\nRunning hardware and software scan for DevMonitor...")
-        report = collect_health_report(specifications)
-        print(
-            "Scan complete. Health scores, findings, and troubleshooting will appear "
-            "in the Device Monitoring System after submission."
-        )
-        print("No separate diagnostic result window is used.")
-        _show_log_location(log_path)
-        if input(
-            "Submit this diagnostic report to DevMonitor? Type yes to confirm: "
-        ).strip().casefold() != "yes":
-            print("Submission cancelled; no diagnostic report was saved.")
-            return 0
+        print("\nSubmitting endpoint diagnostic report to DevMonitor...")
         payload = {"report": report}
         authorization_token = DIAGNOSTIC_TOKEN
     else:
-        print("\nDetected device specifications (review before submission):")
-        for label, key in FIELD_LABELS:
-            value = specifications.get(key)
-            if (
-                key in {"storage_total_bytes", "storage_available_bytes"}
-                and not specifications["storage_devices"]
-            ):
-                value = UNAVAILABLE
-            print(f"  {label}: {display_value(key, value)}")
-        _show_log_location(log_path)
-
         name = input(f"\nDevice name for DevMonitor [{platform.node()}]: ").strip()
         name = name or platform.node()
         if not name or len(name) > 120:
@@ -1313,11 +1363,6 @@ def main():
     if diagnostic_mode:
         LOGGER.info("Diagnostic report submitted (run_id=%s).", result["run_id"])
         print(f"Diagnostic report submitted (Run ID: {result['run_id']}).")
-        print(
-            "Return to DevMonitor to view health scores, issues, and troubleshooting."
-        )
-        if DASHBOARD_URL and DASHBOARD_URL not in {"__DASHBOARD_URL__", ""}:
-            print(f"DevMonitor: {DASHBOARD_URL}")
     else:
         LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
         print(f"Device Registered Successfully (Device ID: {result['device_id']}).")
