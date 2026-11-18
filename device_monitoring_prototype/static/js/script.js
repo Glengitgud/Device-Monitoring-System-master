@@ -135,6 +135,7 @@ function showDiagnosticSuccess(deviceId, runId) {
     const viewResultsButton = modalRoot.querySelector('#deviceDiagnosticViewResultsButton');
     const viewDeviceButton = modalRoot.querySelector('#deviceDiagnosticViewDeviceButton');
     const dashboardButton = modalRoot.querySelector('#deviceDiagnosticDashboardButton');
+    const closeButton = modalRoot.querySelector('#deviceDiagnosticCloseButton');
     if (viewResultsButton) {
         viewResultsButton.href = specsUrl;
         viewResultsButton.dataset.runId = String(runId);
@@ -157,6 +158,10 @@ function showDiagnosticSuccess(deviceId, runId) {
     dashboardButton?.addEventListener('click', event => {
         event.preventDefault();
         redirect('/dashboard');
+    }, { once: true });
+    closeButton?.addEventListener('click', () => {
+        window.clearTimeout(diagnosticRedirectTimer);
+        window.clearInterval(diagnosticRedirectInterval);
     }, { once: true });
 
     const countdown = modalRoot.querySelector('#deviceDiagnosticCountdown');
