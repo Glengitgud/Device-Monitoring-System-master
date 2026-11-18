@@ -825,6 +825,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertIn(b"Verification CPU", specification_page.data)
         self.assertIn(b"Device Health &amp; Diagnosis", specification_page.data)
+        self.assertIn(b"Device Scan History", specification_page.data)
         self.assertIn(b"Not assessed", specification_page.data)
 
         self.assertEqual(
@@ -2560,6 +2561,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         with (
             patch.object(device_agent, "configure_logging", return_value="agent.log"),
             patch.object(device_agent, "collect_specifications", return_value=specifications),
+            patch.object(device_agent, "show_health_window"),
             patch.object(device_agent, "show_registration_success"),
             patch.object(device_agent.platform, "node", return_value="endpoint-host"),
             patch.object(device_agent, "input", side_effect=["", "Laptop", "yes"], create=True),
