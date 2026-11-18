@@ -26,6 +26,9 @@ let archivedDevicePage = 1;
 const isAdministrator = document.body.dataset.isAdmin === 'true';
 const deviceAddresses = new Map();
 const deviceAddressRequests = new Map();
+let registrationRedirectTimer = null;
+let registrationRedirectInterval = null;
+let registrationSuccessShown = false;
 
 function csrfToken() {
     return document.querySelector('meta[name="csrf-token"]')?.content || '';
@@ -73,6 +76,63 @@ function showToast(message, type = 'success') {
     const instance = new bootstrap.Toast(toast, { delay: 3500 });
     toast.addEventListener('hidden.bs.toast', () => toast.remove());
     instance.show();
+}
+
+function showRegistrationSuccess() {
+    if (registrationSuccessShown) return;
+    registrationSuccessShown = true;
+    const existing = document.getElementById('deviceRegistrationSuccessModal');
+    const modalRoot = existing || document.createElement('div');
+    if (!existing) {
+        modalRoot.id = 'deviceRegistrationSuccessModal';
+        modalRoot.className = 'modal fade';
+        modalRoot.tabIndex = -1;
+        modalRoot.setAttribute('aria-labelledby', 'deviceRegistrationSuccessTitle');
+        modalRoot.setAttribute('aria-hidden', 'true');
+        modalRoot.innerHTML = `<div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content registration-success-card text-center p-3">
+                <div class="registration-success-mark" aria-hidden="true">✓</div>
+                <h2 class="h4" id="deviceRegistrationSuccessTitle">Device Registered Successfully</h2>
+                <p class="text-muted">You may now proceed to the Dashboard.</p>
+                <a class="dashboard-shortcut-card" href="/dashboard">
+                    <i class="bi bi-speedometer2" aria-hidden="true"></i>
+                    <span>Open Dashboard</span>
+                </a>
+                <p id="deviceRegistrationCountdown" class="mt-3 mb-2" role="status" aria-live="polite">
+                    Redirecting to Dashboard in 5 seconds...
+                </p>
+                <button class="btn btn-primary" type="button" id="goDashboardNowBtn">
+                    Go to Dashboard Now
+                </button>
+            </div>
+        </div>`;
+        document.body.appendChild(modalRoot);
+    }
+    const redirect = () => {
+        window.clearTimeout(registrationRedirectTimer);
+        window.clearInterval(registrationRedirectInterval);
+        window.location.assign('/dashboard');
+    };
+    modalRoot.querySelector('#goDashboardNowBtn').addEventListener('click', redirect);
+    modalRoot.querySelector('.dashboard-shortcut-card').addEventListener('click', event => {
+        event.preventDefault();
+        redirect();
+    });
+    const countdown = modalRoot.querySelector('#deviceRegistrationCountdown');
+    let remaining = 5;
+    const instance = bootstrap.Modal.getOrCreateInstance(modalRoot, {
+        backdrop: 'static',
+        keyboard: false
+    });
+    instance.show();
+    registrationRedirectInterval = window.setInterval(() => {
+        remaining -= 1;
+        if (countdown) {
+            countdown.textContent = `Redirecting to Dashboard in ${remaining} seconds...`;
+        }
+        if (remaining <= 0) redirect();
+    }, 1000);
+    registrationRedirectTimer = window.setTimeout(redirect, 5000);
 }
 
 function initSidebar() {
@@ -194,8 +254,8 @@ function renderDevicesCards() {
                     onclick="openDeviceModal('view', ${device.id})"><i class="bi bi-eye"></i></button>
                 <button class="btn btn-sm btn-outline-primary" title="Edit" aria-label="Edit device"
                     onclick="openDeviceModal('edit', ${device.id})"><i class="bi bi-pencil"></i></button>
-                <button class="btn btn-sm btn-outline-success" title="Record diagnostic entry"
-                    aria-label="Record diagnostic entry"
+                <button class="btn btn-sm btn-outline-success" title="Diagnose device"
+                    aria-label="Diagnose device"
                     onclick="scanDevice(${device.id})"><i class="bi bi-search"></i></button>
                 <button class="btn btn-sm btn-outline-danger" title="Archive" aria-label="Archive device"
                     onclick="confirmDeleteDevice(${device.id})"><i class="bi bi-archive"></i></button>
@@ -679,6 +739,7 @@ function startDeviceQrCountdown(expiresAt, serverTime, token) {
             result.status === 'used'
                 ? 'This QR code has been used to register a device.'
                 : `This QR code is ${result.status}. Generate a new one to continue.`;
+        if (result.status === 'used') showRegistrationSuccess();
     };
 
     updateCountdown();
@@ -782,21 +843,147 @@ async function softDeleteDevice(deviceId) {
 async function scanDevice(deviceId) {
     const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('scanModal'));
     document.getElementById('scanProgress').classList.remove('d-none');
+    document.getElementById('scanDownloadInstructions').classList.add('d-none');
     document.getElementById('scanResults').classList.add('d-none');
+    document.getElementById('scanProgressText').textContent =
+        'Preparing a secure diagnostic agent...';
     modal.show();
     try {
-        const result = await api(`/api/devices/${deviceId}/diagnostics`, { method: 'POST' });
+        const response = await fetch(`/api/devices/${deviceId}/diagnostics`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'X-CSRF-Token': csrfToken() }
+        });
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error || `Request failed (${response.status}).`);
+        }
+        const runId = response.headers.get('X-Diagnostic-Run-ID');
+        if (!runId) throw new Error('The server did not identify this diagnostic run.');
+        const download = document.createElement('a');
+        const objectUrl = URL.createObjectURL(await response.blob());
+        download.href = objectUrl;
+        download.download = 'devmonitor-device-diagnostics.exe';
+        document.body.appendChild(download);
+        download.click();
+        download.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
         document.getElementById('scanProgress').classList.add('d-none');
-        document.getElementById('scanResultsBody').innerHTML = `
-            <tr><th>Result</th><td>${escapeHTML(result.result)}</td></tr>
-            <tr><th>Detected Problem</th><td>${escapeHTML(result.detected_problem || 'Not assessed')}</td></tr>
-            <tr><th>Recommendation</th><td>${escapeHTML(result.recommendation)}</td></tr>
-            <tr><th>Recorded</th><td>${escapeHTML(new Date(result.scanned_at).toLocaleString())}</td></tr>`;
-        document.getElementById('scanResults').classList.remove('d-none');
+        document.getElementById('scanDownloadInstructions').classList.remove('d-none');
+        await pollDiagnosticRun(deviceId, runId);
     } catch (error) {
-        modal.hide();
         showToast(error.message, 'danger');
+        document.getElementById('scanProgress').classList.add('d-none');
     }
+}
+
+function healthColor(score) {
+    if (score == null) return '#64748b';
+    if (score >= 80) return '#16a34a';
+    if (score >= 60) return '#eab308';
+    if (score >= 40) return '#f97316';
+    return '#dc2626';
+}
+
+function healthLabel(score) {
+    if (score == null) return 'Not assessed';
+    if (score >= 80) return 'Excellent';
+    if (score >= 60) return 'Warning';
+    if (score >= 40) return 'Attention needed';
+    return 'Critical';
+}
+
+function renderHealthGauge(label, score) {
+    const value = Number.isInteger(score) ? score : null;
+    const color = healthColor(value);
+    const percentage = value == null ? 0 : value;
+    return `<div class="health-gauge-card">
+        <div class="health-gauge" role="img"
+            aria-label="${escapeHTML(label)} health: ${value == null ? 'not assessed' : `${value} percent, ${healthLabel(value)}`}"
+            style="--health-color:${color};--health-score:${percentage}">
+            <span>${value == null ? 'N/A' : `${value}%`}</span>
+        </div>
+        <div class="health-gauge-label">${escapeHTML(label)}</div>
+        <div class="health-gauge-status" style="color:${color}">${healthLabel(value)}</div>
+    </div>`;
+}
+
+function renderDiagnosticReport(report) {
+    const scores = report.scores || {};
+    const components = scores.components || {};
+    const gauges = [
+        ['Overall health', scores.overall],
+        ['Hardware', scores.hardware],
+        ['Software', scores.software],
+        ['Drivers', scores.drivers],
+        ['CPU', components.cpu],
+        ['RAM', components.ram],
+        ['Storage', components.storage],
+        ['GPU', components.gpu],
+        ['Network', components.network],
+        ['Operating system', components.operating_system]
+    ];
+    const issues = (report.issues || []).map(issue => `
+        <article class="diagnostic-issue diagnostic-issue-${escapeHTML(issue.severity)}">
+            <div class="d-flex flex-wrap justify-content-between gap-2">
+                <h6 class="mb-1">${escapeHTML(issue.title)}</h6>
+                <span class="severity-label">${escapeHTML(issue.severity)}</span>
+            </div>
+            <p class="mb-2">${escapeHTML(issue.description)}</p>
+            <p class="small mb-1"><strong>Possible cause:</strong> ${escapeHTML(issue.root_cause)}</p>
+            <p class="small mb-2"><strong>Suggested action:</strong> ${escapeHTML(issue.recommendation)}</p>
+            <details><summary>Step-by-step troubleshooting</summary>
+                <ol class="mb-0 mt-2">${(issue.steps || []).map(step => `<li>${escapeHTML(step)}</li>`).join('')}</ol>
+            </details>
+        </article>`).join('');
+    const checks = (report.checks || [])
+        .filter(check => check.name !== 'Overall scores')
+        .map(check => `<li class="diagnostic-check">
+            <strong>${escapeHTML(check.name)}</strong>
+            <span class="badge text-bg-${check.status === 'passed' ? 'success' : check.status === 'skipped' ? 'secondary' : 'warning'}">
+                ${escapeHTML(check.status)}
+            </span>
+            <div>${escapeHTML(check.summary)}</div>
+            ${check.details?.limitations ? `<small>${escapeHTML(check.details.limitations)}</small>` : ''}
+        </li>`).join('');
+    const score = Number.isInteger(scores.overall) ? `${scores.overall}%` : 'Not available';
+    return `<section class="diagnostic-report">
+        <div class="alert alert-success" role="status">
+            <strong>Full analysis complete.</strong> ${escapeHTML(report.summary || '')}
+        </div>
+        <h6 class="mb-3">Device Health Report <span class="text-muted">Overall: ${score}</span></h6>
+        <div class="health-gauge-grid">${gauges.map(([label, value]) => renderHealthGauge(label, value)).join('')}</div>
+        <h6 class="mt-4">Recommended actions and issues requiring attention</h6>
+        ${issues || '<p class="text-success">No issues requiring attention were identified by the supported checks.</p>'}
+        <details class="mt-3"><summary>All diagnostic checks and limitations</summary>
+            <ul class="diagnostic-check-list mt-2">${checks}</ul>
+        </details>
+        ${report.finished_at ? `<p class="small text-muted mt-3 mb-0">Saved ${escapeHTML(new Date(report.finished_at).toLocaleString())}</p>` : ''}
+    </section>`;
+}
+
+async function pollDiagnosticRun(deviceId, runId) {
+    const status = document.getElementById('scanProgressText');
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise(resolve => window.setTimeout(resolve, 2500));
+        const report = await api(`/api/devices/${deviceId}/diagnostics/${runId}`);
+        if (report.status === 'completed') {
+            document.getElementById('scanDownloadInstructions').classList.add('d-none');
+            document.getElementById('scanResultsBody').innerHTML = renderDiagnosticReport(report);
+            document.getElementById('scanResults').classList.remove('d-none');
+            return;
+        }
+        if (report.status === 'failed') {
+            document.getElementById('scanDownloadInstructions').classList.add('d-none');
+            document.getElementById('scanResultsBody').innerHTML =
+                `<div class="alert alert-danger" role="alert">${escapeHTML(report.summary || 'The diagnostic run failed.')}</div>`;
+            document.getElementById('scanResults').classList.remove('d-none');
+            return;
+        }
+        status.textContent =
+            'Waiting for the downloaded agent to run and for you to approve its report...';
+    }
+    showToast('This diagnostic run is still waiting for the endpoint agent.', 'warning');
 }
 
 async function refreshUsers() {
@@ -1047,8 +1234,11 @@ async function initDashboard() {
             <tr><td class="fw-semibold">${escapeHTML(device.name)}</td>
                 <td>${escapeHTML(device.owner)}</td><td>${escapeHTML(device.os)}</td>
                 <td>${escapeHTML(device.cpu)}</td><td>${escapeHTML(device.ram)}</td>
+                <td><a href="/devices/${encodeURIComponent(device.id)}/specifications#health-report">
+                    ${Number.isInteger(device.healthScore) ? `${device.healthScore}%` : 'Not assessed'}
+                </a></td>
                 <td>${escapeHTML(device.status)}</td></tr>`).join('') :
-            '<tr><td colspan="6" class="text-center text-muted py-4">No registered devices yet.</td></tr>';
+            '<tr><td colspan="7" class="text-center text-muted py-4">No registered devices yet.</td></tr>';
     } catch (error) {
         showToast(error.message, 'danger');
     }
