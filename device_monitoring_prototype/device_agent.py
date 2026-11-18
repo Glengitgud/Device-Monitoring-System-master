@@ -1,6 +1,8 @@
 """Windows inventory agent template; server injects one-time enrollment credentials."""
 
 import ipaddress
+import ctypes
+import ctypes.wintypes
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -8,6 +10,7 @@ import os
 from pathlib import Path
 import platform
 import socket
+import ssl
 import sys
 import tempfile
 from datetime import datetime
@@ -395,15 +398,202 @@ def _collect_windows_services():
 
 
 def _check_submission_connectivity():
-    parsed = urlsplit(SUBMISSION_URL)
-    if parsed.scheme not in {"https", "http"} or not parsed.hostname:
-        return False
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    """Find whether a connection failure is DNS, TCP, TLS, or a bad endpoint path."""
     try:
-        with socket.create_connection((parsed.hostname, port), timeout=3):
-            return True
-    except OSError:
-        return False
+        parsed = urlsplit(SUBMISSION_URL)
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            return {"ok": False, "stage": "configuration", "message": "The agent URL is invalid."}
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as error:
+        return {"ok": False, "stage": "configuration", "message": str(error)}
+
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except OSError as error:
+        LOGGER.warning("DevMonitor host name resolution failed: %s", error)
+        return {
+            "ok": False,
+            "stage": "dns",
+            "message": f"Could not resolve {parsed.hostname}: {error}",
+        }
+    if not addresses:
+        return {
+            "ok": False,
+            "stage": "dns",
+            "message": f"No network address was returned for {parsed.hostname}.",
+        }
+
+    try:
+        connection = socket.create_connection((parsed.hostname, port), timeout=4)
+    except OSError as error:
+        LOGGER.warning("DevMonitor TCP connection failed (%s:%s): %s", parsed.hostname, port, error)
+        return {
+            "ok": False,
+            "stage": "tcp",
+            "message": f"Could not connect to {parsed.hostname}:{port}: {error}",
+        }
+
+    try:
+        if parsed.scheme == "https":
+            try:
+                connection = ssl.create_default_context().wrap_socket(
+                    connection, server_hostname=parsed.hostname
+                )
+            except (ssl.SSLError, OSError) as error:
+                LOGGER.warning("DevMonitor TLS validation failed: %s", error)
+                return {
+                    "ok": False,
+                    "stage": "tls",
+                    "message": (
+                        f"HTTPS negotiation failed for {parsed.hostname}:{port}: {error}. "
+                        "The port, protocol, or server certificate may not match."
+                    ),
+                }
+    finally:
+        connection.close()
+
+    try:
+        request = urllib.request.Request(
+            SUBMISSION_URL, method="GET", headers={"User-Agent": "DevMonitor-Diagnostics"}
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status = response.status
+    except urllib.error.HTTPError as error:
+        status = error.code
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        LOGGER.warning("DevMonitor endpoint request failed: %s", error)
+        return {
+            "ok": False,
+            "stage": "endpoint",
+            "message": f"The server could not be reached at the configured path: {error}",
+        }
+    if status == 404 or status >= 500:
+        return {
+            "ok": False,
+            "stage": "endpoint",
+            "message": (
+                f"The server returned HTTP {status} for the configured endpoint. "
+                "The path may be incorrect or the application service may have failed."
+            ),
+        }
+    return {"ok": True, "stage": "complete", "message": f"Server responded (HTTP {status})."}
+
+
+def _collect_windows_device_problems():
+    """Return Plug-and-Play problem codes reported by Windows for present devices."""
+    if os.name != "nt":
+        return None
+
+    class DeviceInfoData(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.wintypes.DWORD),
+            ("ClassGuid", ctypes.c_byte * 16),
+            ("DevInst", ctypes.wintypes.DWORD),
+            ("Reserved", ctypes.c_size_t),
+        ]
+
+    setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
+    cfgmgr = ctypes.WinDLL("CfgMgr32", use_last_error=True)
+    setupapi.SetupDiGetClassDevsW.restype = ctypes.c_void_p
+    setupapi.SetupDiGetClassDevsW.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.wintypes.DWORD
+    ]
+    setupapi.SetupDiEnumDeviceInfo.argtypes = [
+        ctypes.c_void_p, ctypes.wintypes.DWORD, ctypes.POINTER(DeviceInfoData)
+    ]
+    setupapi.SetupDiEnumDeviceInfo.restype = ctypes.wintypes.BOOL
+    setupapi.SetupDiDestroyDeviceInfoList.argtypes = [ctypes.c_void_p]
+    cfgmgr.CM_Get_DevNode_Status.argtypes = [
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.DWORD,
+    ]
+    cfgmgr.CM_Get_DevNode_Status.restype = ctypes.wintypes.ULONG
+    setupapi.SetupDiGetDeviceRegistryPropertyW.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(DeviceInfoData), ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.wintypes.DWORD), ctypes.c_void_p,
+        ctypes.wintypes.DWORD, ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    setupapi.SetupDiGetDeviceRegistryPropertyW.restype = ctypes.wintypes.BOOL
+
+    info_set = setupapi.SetupDiGetClassDevsW(None, None, None, 0x2 | 0x4)
+    if info_set == ctypes.c_void_p(-1).value:
+        raise OSError(ctypes.get_last_error(), "Could not enumerate Windows devices.")
+    problems = []
+    try:
+        index = 0
+        while index < 4096:
+            data = DeviceInfoData()
+            data.cbSize = ctypes.sizeof(DeviceInfoData)
+            if not setupapi.SetupDiEnumDeviceInfo(info_set, index, ctypes.byref(data)):
+                error = ctypes.get_last_error()
+                if error == 259:
+                    break
+                raise OSError(error, "Could not read Windows device status.")
+            index += 1
+            status = ctypes.wintypes.DWORD()
+            problem = ctypes.wintypes.DWORD()
+            result = cfgmgr.CM_Get_DevNode_Status(
+                ctypes.byref(status), ctypes.byref(problem), data.DevInst, 0
+            )
+            if result != 0 or problem.value == 0:
+                continue
+            required_size = ctypes.wintypes.DWORD()
+            device_name = "Unknown device"
+            for property_id in (0xC, 0):
+                setupapi.SetupDiGetDeviceRegistryPropertyW(
+                    info_set, ctypes.byref(data), property_id, None, None, 0,
+                    ctypes.byref(required_size),
+                )
+                if required_size.value == 0:
+                    continue
+                buffer = ctypes.create_unicode_buffer(
+                    max(1, (required_size.value + ctypes.sizeof(ctypes.c_wchar) - 1)
+                        // ctypes.sizeof(ctypes.c_wchar))
+                )
+                if setupapi.SetupDiGetDeviceRegistryPropertyW(
+                    info_set, ctypes.byref(data), property_id, None,
+                    ctypes.cast(buffer, ctypes.c_void_p), ctypes.sizeof(buffer),
+                    ctypes.byref(required_size),
+                ):
+                    device_name = buffer.value.strip() or device_name
+                    break
+            problems.append({"name": device_name[:160], "code": int(problem.value)})
+            if len(problems) >= 100:
+                break
+    finally:
+        setupapi.SetupDiDestroyDeviceInfoList(info_set)
+    return problems
+
+
+def _device_problem_description(code):
+    descriptions = {
+        1: "device is not configured correctly",
+        10: "device could not start",
+        12: "device has a resource conflict",
+        22: "device is disabled",
+        28: "device driver is missing",
+        31: "Windows could not load the required driver",
+        43: "Windows stopped the device after reporting a problem",
+        45: "device is not currently connected",
+        48: "driver is blocked",
+        52: "Windows could not verify the driver signature",
+    }
+    return descriptions.get(code, f"Windows reported device problem code {code}")
+
+
+def _health_gauges(scores):
+    components = scores.get("components", {})
+    return (
+        ("CPU", components.get("cpu")),
+        ("RAM", components.get("ram")),
+        ("Storage", components.get("storage")),
+        ("GPU", components.get("gpu")),
+        ("Network", components.get("network")),
+        ("Drivers", scores.get("drivers")),
+        ("Operating system", components.get("operating_system")),
+    )
 
 
 def _assessment_check(
@@ -469,10 +659,18 @@ def collect_health_report(specifications):
         if storage_free_percent
         else None
     )
+    storage_summary = "No accessible storage volumes were measured."
+    if storage_devices and storage_free_percent:
+        storage_summary = "Accessible volume space: " + "; ".join(
+            f"{item.get('name', 'Volume')}: "
+            f"{item['available_bytes'] / item['total_bytes'] * 100:.1f}% free"
+            for item in storage_devices
+            if item.get("total_bytes", 0) > 0
+        )
 
     gpu_values = specifications.get("gpu_information") or []
     gpu_available = bool(gpu_values and gpu_values != [UNAVAILABLE])
-    network_connected = _check_submission_connectivity()
+    network_result = _check_submission_connectivity()
 
     try:
         temperature = _collect_cpu_temperature()
@@ -487,6 +685,12 @@ def collect_health_report(specifications):
         drivers = []
 
     try:
+        device_problems = _collect_windows_device_problems()
+    except (OSError, ImportError, AttributeError, ctypes.ArgumentError):
+        LOGGER.exception("Windows Plug-and-Play problem status is unavailable.")
+        device_problems = None
+
+    try:
         services = _collect_windows_services()
     except (psutil.Error, OSError):
         LOGGER.exception("Windows service status is unavailable.")
@@ -495,6 +699,7 @@ def collect_health_report(specifications):
     cpu_score = _score_from_usage(cpu_usage) if cpu_usage is not None else None
     ram_score = _score_from_usage(ram_usage) if ram_usage is not None else None
     gpu_score = 100 if gpu_available else None
+    network_connected = network_result["ok"]
     network_score = 100 if network_connected else (40 if specifications.get("ip_addresses") else 20)
     driver_dates = []
     for driver in drivers:
@@ -512,11 +717,18 @@ def collect_health_report(specifications):
         (datetime.now().date() - driver_date).days > 365 * 5
         for driver_date in driver_dates
     )
-    driver_score = (
-        max(30, 100 - round(old_driver_count / max(1, len(driver_dates)) * 60))
-        if drivers
-        else None
-    )
+    driver_score = None
+    if drivers or device_problems is not None:
+        metadata_score = (
+            100 - round(old_driver_count / max(1, len(driver_dates)) * 60)
+            if drivers and driver_dates
+            else 100 if drivers else None
+        )
+        problem_score = max(0, 100 - 30 * len(device_problems or [])) if device_problems is not None else None
+        available_scores = [
+            score for score in (metadata_score, problem_score) if score is not None
+        ]
+        driver_score = min(available_scores) if available_scores else None
     os_detected = all(
         specifications.get(key) not in (None, "", UNAVAILABLE)
         for key in ("operating_system_name", "operating_system_version")
@@ -555,9 +767,9 @@ def collect_health_report(specifications):
     metrics = (
         ("CPU", "hardware", cpu_score, "CPU utilization", cpu_usage, "%"),
         ("RAM", "hardware", ram_score, "RAM utilization", ram_usage, "%"),
-        ("Storage capacity", "hardware", storage_score, "Lowest available volume space", min(storage_free_percent) if storage_free_percent else None, "% free"),
+        ("Storage capacity", "hardware", storage_score, storage_summary, min(storage_free_percent) if storage_free_percent else None, "% free"),
         ("GPU availability", "hardware", gpu_score, "GPU detected" if gpu_available else "GPU availability could not be confirmed", len(gpu_values) if gpu_available else None, "device(s)"),
-        ("Network connectivity", "hardware", network_score, "Application host reachable" if network_connected else "Application host not reachable", network_connected, None),
+        ("Network connectivity", "hardware", network_score, network_result["message"], network_result, None),
         ("Operating system", "software", os_score, "OS identity and critical service status assessed" if os_detected else "Operating system information is incomplete", specifications.get("operating_system_name"), None),
         ("Driver metadata", "driver", driver_score, f"{len(drivers)} display/network driver record(s) inspected" if drivers else "Driver metadata unavailable", len(drivers), "record(s)"),
     )
@@ -583,18 +795,45 @@ def collect_health_report(specifications):
             elif name == "Storage capacity":
                 issue = _health_issue(
                     "Low available storage", score,
-                    f"The fullest accessible volume has {value:.1f}% free.",
+                    f"{summary}. The lowest free-space volume has {value:.1f}% free.",
                     "A nearly full volume can prevent updates and normal application work.",
                     "Free space safely or ask an administrator about storage expansion.",
                     ["Open Settings and select System, then Storage.", "Review temporary files and large items.", "Back up important files before removing them.", "Avoid deleting Windows or application folders manually."],
                 )
             elif name == "Network connectivity":
+                stage = value["stage"]
+                network_guidance = {
+                    "configuration": (
+                        "The executable was built with an invalid DevMonitor address.",
+                        ["Re-download the agent from the signed-in DevMonitor page.", "If the issue continues, ask the administrator to verify PUBLIC_BASE_URL."],
+                    ),
+                    "dns": (
+                        "The device could not translate the configured server name to a network address.",
+                        ["Confirm the device has internet or organization-network access.", "Reconnect Wi-Fi or Ethernet.", "Check VPN and DNS settings with your network administrator.", "Retry after DNS service is restored."],
+                    ),
+                    "tcp": (
+                        "The server name resolved, but its configured port did not accept a connection.",
+                        ["Confirm the DevMonitor server is running.", "Verify the server address and port with the administrator.", "Check whether a firewall or VPN blocks that port.", "Retry when the service is reachable."],
+                    ),
+                    "tls": (
+                        "The server was reached, but HTTPS negotiation failed; the configured port, protocol, or certificate may be wrong.",
+                        ["Confirm the address uses the scheme and port supplied by the administrator (HTTPS commonly uses port 443).", "Check that the computer's date and time are correct.", "Open the DevMonitor HTTPS address in a browser and inspect any certificate warning.", "Ask the administrator to verify the listening port and renew or configure the server certificate.", "Do not bypass certificate validation."],
+                    ),
+                    "endpoint": (
+                        "The network connection succeeded, but the configured DevMonitor API path did not respond correctly.",
+                        ["Open the DevMonitor site in a browser.", "Confirm the application is running at the configured address.", "Ask the administrator to verify the deployed application path and agent download settings.", "Download a fresh agent after the server address is corrected."],
+                    ),
+                }
+                cause, steps = network_guidance.get(
+                    stage,
+                    ("The configured DevMonitor server could not be reached.", ["Confirm the network connection and server address.", "Ask the administrator to check the application service and firewall.", "Retry after the connection is restored."]),
+                )
                 issue = _health_issue(
-                    "DevMonitor connection unavailable", score,
-                    "The agent could not establish a connection to the configured DevMonitor host.",
-                    "The device may be offline, blocked by a firewall, or unable to resolve the host.",
-                    "Check the network and retry; ask support if the service remains unavailable.",
-                    ["Confirm Wi-Fi or Ethernet is connected.", "Open the DevMonitor site in a browser.", "Check whether a VPN or firewall is blocking access.", "Retry after connectivity returns."],
+                    "DevMonitor connection problem", score,
+                    value["message"],
+                    cause,
+                    "Follow the steps for the reported connection stage, then download a fresh agent if the server settings changed.",
+                    steps,
                 )
             elif name == "Driver metadata":
                 issue = _health_issue(
@@ -669,9 +908,57 @@ def collect_health_report(specifications):
             )
         )
 
+    if device_problems:
+        first_problem = device_problems[0]
+        summary = "; ".join(
+            f"{item['name']} (Code {item['code']}: {_device_problem_description(item['code'])})"
+            for item in device_problems[:8]
+        )[:800]
+        device_problem_issue = _health_issue(
+            "Windows reports a device or connection problem",
+            driver_score if driver_score is not None else 40,
+            f"Windows reported problems for {len(device_problems)} present device(s): {summary}.",
+            "A Plug-and-Play problem code can indicate a disabled device, missing or incompatible driver, resource conflict, or a hardware/connection problem. The code does not prove which cause applies.",
+            "Inspect the named device and its Windows problem code before replacing hardware or changing drivers.",
+            [
+                "Open Device Manager (press Windows+X, then choose Device Manager).",
+                f"Locate {first_problem['name']} and open Properties.",
+                f"Compare the Device status message with problem code {first_problem['code']}.",
+                "For an external device, safely disconnect and reconnect its cable, power, or USB port, then select Action > Scan for hardware changes.",
+                "If the issue remains, install a compatible driver from Windows Update or the device manufacturer's support page; contact an administrator for managed devices.",
+            ],
+        )
+        checks.append(
+            _assessment_check(
+                "Connected device status",
+                "driver",
+                driver_score,
+                f"{len(device_problems)} present device(s) report Plug-and-Play problems: {summary}",
+                value=device_problems[:20],
+                source="Windows SetupAPI and Configuration Manager",
+                issue=device_problem_issue,
+            )
+        )
+    else:
+        checks.append(
+            _assessment_check(
+                "Connected device status",
+                "driver",
+                100 if device_problems == [] else None,
+                "No Plug-and-Play problems were reported for present devices."
+                if device_problems == []
+                else "Windows device problem codes could not be inspected.",
+                value=[] if device_problems == [] else None,
+                source="Windows SetupAPI and Configuration Manager",
+                limitations=(
+                    None if device_problems == []
+                    else "Only problem codes exposed for currently enumerated devices can be assessed; this cannot prove every physical connection is secure."
+                ),
+            )
+        )
+
     for name, category, summary, limitation in (
         ("Startup performance", "software", "Startup duration was not measured.", "Reliable boot-duration history requires Windows event-log access and is not included in this one-time scan."),
-        ("Device Manager warnings", "driver", "Plug-and-Play problem codes were not inspected.", "Driver metadata is not a substitute for Windows Device Manager problem codes."),
         ("Common system errors", "software", "Windows event logs were not inspected.", "The agent does not read or upload Windows event-log contents."),
         ("Security configuration", "software", "Security configuration was not fully assessed.", "Service status alone cannot confirm antivirus, firewall, or update policy is correctly configured."),
     ):
@@ -706,9 +993,10 @@ def collect_health_report(specifications):
         },
     }
     LOGGER.info(
-        "Health assessment completed with %d findings and %d checks.",
+        "Health assessment completed with %d findings and %d checks; scores=%s.",
         len(issues),
         len(checks),
+        scores,
     )
     return {
         "scores": scores,
@@ -735,130 +1023,6 @@ def _health_issue(title, score, description, root_cause, recommendation, steps):
         "recommendation": recommendation,
         "steps": steps,
     }
-
-
-def show_health_window(report, title="Device health assessment"):
-    """Display accessible circular scores and actionable local findings."""
-    import tkinter as tk
-    from tkinter.scrolledtext import ScrolledText
-
-    try:
-        root = tk.Tk()
-    except tk.TclError as error:
-        raise RuntimeError("A graphical desktop is unavailable.") from error
-    root.title(title)
-    root.geometry("860x690")
-    root.minsize(680, 560)
-    root.configure(background="#0d0221")
-    root.option_add("*Font", "{Segoe UI} 10")
-    tk.Label(
-        root,
-        text="Device health overview",
-        font=("Segoe UI", 19, "bold"),
-        foreground="#f8fafc",
-        background="#0d0221",
-    ).pack(anchor="w", padx=24, pady=(22, 2))
-    tk.Label(
-        root,
-        text=(
-            f"Overall {report['scores']['overall'] if report['scores']['overall'] is not None else 'N/A'}%  ·  "
-            f"Hardware {report['scores']['hardware'] if report['scores']['hardware'] is not None else 'N/A'}%  ·  "
-            f"Software {report['scores']['software'] if report['scores']['software'] is not None else 'N/A'}%  ·  "
-            f"Drivers {report['scores']['drivers'] if report['scores']['drivers'] is not None else 'N/A'}%  "
-            "— one-time checks on this computer; guidance, not continuous monitoring."
-        ),
-        foreground="#cbd5e1",
-        background="#0d0221",
-        wraplength=800,
-        justify="left",
-    ).pack(anchor="w", padx=24, pady=(0, 14))
-
-    score_values = report["scores"]["components"]
-    gauges = (
-        ("CPU", score_values["cpu"]),
-        ("RAM", score_values["ram"]),
-        ("Storage", score_values["storage"]),
-        ("GPU", score_values["gpu"]),
-        ("Network", score_values["network"]),
-        ("Drivers", score_values["drivers"]),
-        ("Operating system", score_values["operating_system"]),
-    )
-    gauge_frame = tk.Frame(root, background="#0d0221")
-    gauge_frame.pack(fill="x", padx=16)
-    for index, (label, score) in enumerate(gauges):
-        card = tk.Frame(
-            gauge_frame,
-            background="#120636",
-            highlightbackground="#334155",
-            highlightthickness=1,
-        )
-        card.grid(row=index // 4, column=index % 4, padx=6, pady=6, sticky="nsew")
-        gauge_frame.grid_columnconfigure(index % 4, weight=1)
-        canvas = tk.Canvas(card, width=112, height=112, background="#120636", highlightthickness=0)
-        canvas.pack(padx=8, pady=(10, 0))
-        canvas.create_oval(12, 12, 100, 100, outline="#334155", width=9)
-        color, state = _health_band(score)
-        if score is not None:
-            canvas.create_arc(
-                12, 12, 100, 100, start=90, extent=-score * 3.6,
-                style="arc", outline=color, width=9,
-            )
-            score_text = f"{score}%"
-        else:
-            score_text = "N/A"
-        canvas.create_text(56, 49, text=score_text, fill="#f8fafc", font=("Segoe UI", 17, "bold"))
-        tk.Label(
-            card,
-            text=label,
-            foreground="#f8fafc",
-            background="#120636",
-            wraplength=135,
-        ).pack(padx=5, pady=(3, 0))
-        tk.Label(
-            card,
-            text=state,
-            foreground=color,
-            background="#120636",
-            font=("Segoe UI", 9, "bold"),
-        ).pack(padx=5, pady=(0, 10))
-
-    actions = ScrolledText(
-        root, height=13, wrap="word", background="#120636",
-        foreground="#e2e8f0", insertbackground="#ffffff",
-        relief="flat", padx=12, pady=10,
-    )
-    actions.pack(fill="both", expand=True, padx=24, pady=12)
-    if report["issues"]:
-        for issue in report["issues"]:
-            actions.insert(
-                "end",
-                f"{issue['severity'].upper()} — {issue['title']}\n"
-                f"{issue['description']}\nCause: {issue['root_cause']}\n"
-                f"Suggested action: {issue['recommendation']}\n"
-                + "\n".join(f"  {step}. {instruction}" for step, instruction in enumerate(issue["steps"], 1))
-                + "\n\n",
-            )
-    else:
-        actions.insert("end", "No issues requiring attention were identified by the supported checks.\n\n")
-    skipped = [
-        check["name"] for check in report["checks"] if check["status"] == "skipped"
-    ]
-    if skipped:
-        actions.insert("end", "Not assessed: " + ", ".join(skipped) + "\n")
-    actions.configure(state="disabled")
-    tk.Button(
-        root,
-        text="Continue",
-        command=root.destroy,
-        background="#3458a8",
-        foreground="#ffffff",
-        activebackground="#26408b",
-        activeforeground="#ffffff",
-        relief="flat",
-        padx=24,
-        pady=9,
-    ).pack(anchor="e", padx=24, pady=(0, 18))
-    root.mainloop()
 
 
 def show_registration_success():
@@ -1002,33 +1166,35 @@ def main():
         _show_log_location(log_path)
         return 1
 
-    report = collect_health_report(specifications)
-    try:
-        show_health_window(report)
-    except (ImportError, OSError, RuntimeError) as error:
-        LOGGER.exception("The graphical health overview could not be displayed.")
-        print(f"Health overview window unavailable: {error}", file=sys.stderr)
-
-    print("\nDetected device specifications (review before submission):")
-    for label, key in FIELD_LABELS:
-        value = specifications.get(key)
-        if (
-            key in {"storage_total_bytes", "storage_available_bytes"}
-            and not specifications["storage_devices"]
-        ):
-            value = UNAVAILABLE
-        print(f"  {label}: {display_value(key, value)}")
-    _show_log_location(log_path)
-
     diagnostic_mode = DIAGNOSTIC_RUN_ID not in {"__DIAGNOSTIC_RUN_ID__", ""}
     if diagnostic_mode:
-        print("\nThe diagnostic report will contain local health measurements and check results.")
-        if input("Submit this diagnostic report? Type yes to confirm: ").strip().casefold() != "yes":
+        print("\nRunning hardware and software scan for DevMonitor...")
+        report = collect_health_report(specifications)
+        print(
+            "Scan complete. Health scores, findings, and troubleshooting will appear "
+            "in the Device Monitoring System after submission."
+        )
+        print("No separate diagnostic result window is used.")
+        _show_log_location(log_path)
+        if input(
+            "Submit this diagnostic report to DevMonitor? Type yes to confirm: "
+        ).strip().casefold() != "yes":
             print("Submission cancelled; no diagnostic report was saved.")
             return 0
         payload = {"report": report}
         authorization_token = DIAGNOSTIC_TOKEN
     else:
+        print("\nDetected device specifications (review before submission):")
+        for label, key in FIELD_LABELS:
+            value = specifications.get(key)
+            if (
+                key in {"storage_total_bytes", "storage_available_bytes"}
+                and not specifications["storage_devices"]
+            ):
+                value = UNAVAILABLE
+            print(f"  {label}: {display_value(key, value)}")
+        _show_log_location(log_path)
+
         name = input(f"\nDevice name for DevMonitor [{platform.node()}]: ").strip()
         name = name or platform.node()
         if not name or len(name) > 120:
@@ -1086,6 +1252,11 @@ def main():
     if diagnostic_mode:
         LOGGER.info("Diagnostic report submitted (run_id=%s).", result["run_id"])
         print(f"Diagnostic report submitted (Run ID: {result['run_id']}).")
+        print(
+            "Return to DevMonitor to view health scores, issues, and troubleshooting."
+        )
+        if DASHBOARD_URL and DASHBOARD_URL not in {"__DASHBOARD_URL__", ""}:
+            print(f"DevMonitor: {DASHBOARD_URL}")
     else:
         LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
         print(f"Device Registered Successfully (Device ID: {result['device_id']}).")

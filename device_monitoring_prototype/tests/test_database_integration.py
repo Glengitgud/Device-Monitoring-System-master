@@ -200,6 +200,76 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 self.assertEqual(color, expected_color)
         self.assertEqual(device_agent._health_band(None)[1], "Not assessed")
 
+    def test_device_health_gauges_use_top_level_driver_score(self):
+        scores = {
+            "drivers": 70,
+            "components": {
+                "cpu": 95,
+                "ram": 90,
+                "storage": 50,
+                "gpu": 100,
+                "network": 80,
+                "operating_system": 90,
+            },
+        }
+        gauges = dict(device_agent._health_gauges(scores))
+        self.assertEqual(gauges["Drivers"], 70)
+        self.assertEqual(gauges["Storage"], 50)
+
+    def test_diagnostics_identify_low_storage_network_and_pnp_problems(self):
+        specifications = {
+            "storage_devices": [
+                {"name": "C:\\", "total_bytes": 1000, "available_bytes": 30}
+            ],
+            "gpu_information": ["Test GPU"],
+            "ip_addresses": ["192.0.2.10"],
+            "operating_system_name": "Windows",
+            "operating_system_version": "Test",
+        }
+        with (
+            patch.object(device_agent.psutil, "cpu_percent", return_value=10),
+            patch.object(device_agent.psutil, "virtual_memory", return_value=SimpleNamespace(percent=20)),
+            patch.object(device_agent, "_check_submission_connectivity", return_value={
+                "ok": False,
+                "stage": "dns",
+                "message": "Could not resolve monitor.example.",
+            }),
+            patch.object(device_agent, "_collect_cpu_temperature", return_value=None),
+            patch.object(device_agent, "_collect_driver_information", return_value=[]),
+            patch.object(device_agent, "_collect_windows_device_problems", return_value=[
+                {"name": "USB Network Adapter", "code": 43}
+            ]),
+            patch.object(device_agent, "_collect_windows_services", return_value={
+                "RpcSs": "running",
+                "EventLog": "running",
+            }),
+        ):
+            report = device_agent.collect_health_report(specifications)
+
+        issues = {issue["title"]: issue for issue in report["issues"]}
+        self.assertIn("Low available storage", issues)
+        self.assertIn("C:\\", issues["Low available storage"]["description"])
+        self.assertIn("DevMonitor connection problem", issues)
+        self.assertIn("DNS settings", " ".join(
+            issues["DevMonitor connection problem"]["steps"]
+        ))
+        self.assertIn("Windows reports a device or connection problem", issues)
+        self.assertTrue(issues["Windows reports a device or connection problem"]["steps"])
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertIn("C:\\", checks["Storage capacity"]["summary"])
+
+    def test_connection_diagnostics_separate_invalid_configuration_from_dns(self):
+        with patch.object(device_agent, "SUBMISSION_URL", "ftp://monitor.example/enroll"):
+            invalid = device_agent._check_submission_connectivity()
+        self.assertEqual(invalid["stage"], "configuration")
+        with (
+            patch.object(device_agent, "SUBMISSION_URL", "https://monitor.example/enroll"),
+            patch.object(device_agent.socket, "getaddrinfo", side_effect=OSError("DNS unavailable")),
+        ):
+            dns_failure = device_agent._check_submission_connectivity()
+        self.assertEqual(dns_failure["stage"], "dns")
+        self.assertIn("DNS unavailable", dns_failure["message"])
+
     def complete_qr_enrollment(self, csrf, name="Verified test device"):
         qr = self.client.post(
             "/api/device-registration-tokens",
@@ -686,17 +756,76 @@ class DatabaseIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(enrolled.status_code, 201)
+        token_status = self.client.get(
+            f"/api/device-registration-tokens/{token}/status"
+        )
+        self.assertEqual(token_status.status_code, 200)
+        self.assertEqual(token_status.json["status"], "used")
+        self.assertEqual(token_status.json["device"]["id"], enrolled.json["device_id"])
+        self.assertEqual(
+            token_status.json["device"]["specifications_url"],
+            f"/devices/{enrolled.json['device_id']}/specifications",
+        )
+        self.assertEqual(token_status.headers["Cache-Control"], "no-store")
         self.assertEqual(self.client.get("/dashboard").status_code, 200)
-        self.assertEqual(self.client.get("/api/dashboard").status_code, 200)
+        dashboard_data = self.client.get("/api/dashboard")
+        self.assertEqual(dashboard_data.status_code, 200)
+        self.assertEqual(dashboard_data.json["total"], 1)
+        self.assertEqual(dashboard_data.json["devices"][0]["cpu"], "Verification CPU")
+        self.assertEqual(dashboard_data.json["devices"][0]["ram"], "8 GB")
+        listed_devices = self.client.get("/api/devices")
+        self.assertEqual(listed_devices.status_code, 200)
+        self.assertEqual(listed_devices.json[0]["id"], enrolled.json["device_id"])
+        self.assertEqual(listed_devices.headers["Cache-Control"], "no-store")
         self.assertEqual(
             self.client.get("/api/device-verification-status").json,
-            {"verified": True, "verified_devices": 1},
+            {
+                "verified": True,
+                "verified_devices": 1,
+                "scan_status": "Completed",
+                "registration_status": "Registered",
+                "latest_device": {
+                    "id": enrolled.json["device_id"],
+                    "name": "Verified workstation",
+                    "specifications_url": (
+                        f"/devices/{enrolled.json['device_id']}/specifications"
+                    ),
+                },
+            },
         )
         with self.app.app_context():
             device = db.session.get(Device, enrolled.json["device_id"])
             self.assertTrue(device.is_verified)
             self.assertEqual(device.owner_user_id, enrolled.json["owner_user_id"])
             self.assertEqual(device.hardware_spec.cpu_model, "Verification CPU")
+            device.hardware_spec.storage_devices = [
+                None,
+                {"name": "C:"},
+                {"name": "D:", "total_bytes": "not-a-number"},
+            ]
+            device.hardware_spec.network_adapters = None
+            device.hardware_spec.ip_addresses = [None, "192.0.2.45"]
+            db.session.add(
+                DiagnosticRun(
+                    device=device,
+                    initiated_by=device.owner,
+                    status="completed",
+                    summary="Legacy diagnostic without health scores.",
+                    recommendation="No health score data was stored.",
+                )
+            )
+            db.session.commit()
+        specification_page = self.client.get(
+            f"/devices/{enrolled.json['device_id']}/specifications"
+        )
+        self.assertEqual(
+            specification_page.status_code,
+            200,
+            specification_page.get_data(as_text=True),
+        )
+        self.assertIn(b"Verification CPU", specification_page.data)
+        self.assertIn(b"Device Health &amp; Diagnosis", specification_page.data)
+        self.assertIn(b"Not assessed", specification_page.data)
 
         self.assertEqual(
             self.app.test_cli_runner().invoke(args=["init-db"]).exit_code,
@@ -1380,33 +1509,41 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(run["status"], "running")
         self.assertIsNone(run["scores"]["overall"])
         run_id = int(response.headers["X-Diagnostic-Run-ID"])
-        report = {
-            "scores": {
-                "overall": 80,
-                "hardware": 80,
-                "software": 80,
-                "drivers": 80,
-                "components": {
-                    "cpu": 80,
-                    "ram": 80,
-                    "storage": 80,
-                    "gpu": 80,
-                    "network": 80,
-                    "operating_system": 80,
-                },
-            },
-            "checks": [
-                {
-                    "name": "Network connectivity",
-                    "category": "hardware",
-                    "status": "passed",
-                    "summary": "The configured host responded.",
-                    "details": {"score": 80},
-                }
+        specifications = {
+            "storage_devices": [
+                {"name": "C:\\", "total_bytes": 1000, "available_bytes": 300}
             ],
-            "issues": [],
-            "summary": "Endpoint diagnostics completed.",
+            "gpu_information": ["Test GPU"],
+            "ip_addresses": ["192.0.2.10"],
+            "operating_system_name": "Windows 11",
+            "operating_system_version": "Test build",
         }
+        with (
+            patch.object(device_agent.psutil, "cpu_percent", return_value=25),
+            patch.object(
+                device_agent.psutil,
+                "virtual_memory",
+                return_value=SimpleNamespace(percent=25),
+            ),
+            patch.object(
+                device_agent,
+                "_check_submission_connectivity",
+                return_value={
+                    "ok": True,
+                    "stage": "endpoint",
+                    "message": "Connected to DevMonitor from 192.0.2.10.",
+                },
+            ),
+            patch.object(device_agent, "_collect_cpu_temperature", return_value=None),
+            patch.object(device_agent, "_collect_driver_information", return_value=[]),
+            patch.object(device_agent, "_collect_windows_device_problems", return_value=[]),
+            patch.object(
+                device_agent,
+                "_collect_windows_services",
+                return_value={"RpcSs": "running", "EventLog": "running"},
+            ),
+        ):
+            report = device_agent.collect_health_report(specifications)
         diagnostic_token = build_agent.call_args.kwargs["diagnostic_token"]
         report_response = self.client.post(
             f"/api/device-agent/diagnostics/{run_id}",
@@ -1414,6 +1551,47 @@ class DatabaseIntegrationTest(unittest.TestCase):
             json={"report": report},
         )
         self.assertEqual(report_response.status_code, 201, report_response.json)
+        self.assertEqual(report_response.json["status"], "completed")
+        status_response = self.client.get(
+            f"/api/devices/{device_id}/diagnostics/{run_id}"
+        )
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.json["status"], "completed")
+        self.assertEqual(status_response.json["scores"]["overall"], 100)
+        self.assertEqual(status_response.json["scores"]["components"]["cpu"], 100)
+        network_check = next(
+            check for check in status_response.json["checks"]
+            if check["name"] == "Network connectivity"
+        )
+        self.assertIn("192.0.2.10", network_check["summary"])
+        self.assertEqual(network_check["details"]["value"]["ok"], True)
+        self.assertEqual(status_response.headers["Cache-Control"], "no-store")
+        with self.app.app_context():
+            saved_run = db.session.get(DiagnosticRun, run_id)
+            overlapping_run = DiagnosticRun(
+                device=saved_run.device,
+                initiated_by=saved_run.initiated_by,
+                status="completed",
+                summary="An overlapping older run without health scores.",
+                started_at=saved_run.started_at + timedelta(seconds=1),
+                finished_at=saved_run.finished_at - timedelta(seconds=1),
+            )
+            db.session.add(overlapping_run)
+            db.session.commit()
+        dashboard = self.client.get("/api/dashboard")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertEqual(dashboard.headers["Cache-Control"], "no-store")
+        dashboard_device = next(
+            item for item in dashboard.json["devices"] if item["id"] == device_id
+        )
+        self.assertEqual(dashboard_device["healthScore"], 100)
+        specifications_page = self.client.get(
+            f"/devices/{device_id}/specifications"
+        )
+        self.assertEqual(specifications_page.status_code, 200)
+        self.assertIn(b"100%", specifications_page.data)
+        self.assertIn(b"Excellent", specifications_page.data)
+        self.assertIn(b"192.0.2.10", specifications_page.data)
         retry_response = self.client.post(
             f"/api/device-agent/diagnostics/{run_id}",
             headers={"Authorization": f"Bearer {diagnostic_token}"},
@@ -1421,9 +1599,12 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(retry_response.status_code, 400)
         history = self.client.get(f"/api/devices/{device_id}/history")
-        self.assertEqual(history.json["diagnostics"][0]["status"], "completed")
-        self.assertEqual(history.json["diagnostics"][0]["scores"]["overall"], 80)
-        self.assertEqual(len(history.json["diagnostics"][0]["checks"]), 2)
+        saved_report = next(
+            item for item in history.json["diagnostics"] if item["id"] == run_id
+        )
+        self.assertEqual(saved_report["status"], "completed")
+        self.assertEqual(saved_report["scores"]["overall"], 100)
+        self.assertEqual(len(saved_report["checks"]), len(report["checks"]) + 1)
         self.assertEqual(len(history.json["logs"]), 3)
         details = self.client.get(f"/api/devices/{device_id}")
         self.assertEqual(details.status_code, 200, details.get_data(as_text=True))
@@ -1447,7 +1628,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(details.json["specification"]["cpu_cores"], 4)
         with self.app.app_context():
             device = db.session.get(Device, device_id)
-            self.assertEqual(DiagnosticRun.query.count(), 1)
+            self.assertEqual(DiagnosticRun.query.count(), 2)
             self.assertEqual(NetworkRecord.query.count(), 2)
             self.assertEqual(
                 Log.query.filter(Log.device_id == device_id).count(), 3
@@ -1461,7 +1642,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(len(device.network_interfaces), 1)
             self.assertEqual(len(device.metric_samples), 1)
-            self.assertEqual(len(device.diagnostic_runs), 1)
+            self.assertEqual(len(device.diagnostic_runs), 2)
 
     def test_sample_data_command_creates_linked_records(self):
         result = self.app.test_cli_runner().invoke(
@@ -2379,7 +2560,6 @@ class DatabaseIntegrationTest(unittest.TestCase):
         with (
             patch.object(device_agent, "configure_logging", return_value="agent.log"),
             patch.object(device_agent, "collect_specifications", return_value=specifications),
-            patch.object(device_agent, "show_health_window"),
             patch.object(device_agent, "show_registration_success"),
             patch.object(device_agent.platform, "node", return_value="endpoint-host"),
             patch.object(device_agent, "input", side_effect=["", "Laptop", "yes"], create=True),

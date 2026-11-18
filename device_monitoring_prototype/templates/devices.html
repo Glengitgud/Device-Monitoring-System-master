@@ -5,8 +5,8 @@
 
 {% block content %}
 <div class="alert alert-info" role="note">
-    Hardware and network details are collected from the computer running Flask.
-    Collecting details from remote endpoints requires an installed device agent.
+    Device specifications are collected by the Device Agent on the computer being
+    registered. New scans and device details appear here automatically.
 </div>
 
 <!-- ---- Action Bar: Search, Sort, Add ---- -->
@@ -234,15 +234,18 @@
                         Preparing a secure diagnostic agent...
                     </p>
                     <p class="text-muted mb-0">
-                        Download and run the EXE on the device being diagnosed. It will
-                        show results locally and ask before submitting a report.
+                        Download and run the EXE on the device being diagnosed. It scans
+                        locally, then submits the report so results appear in this website.
                     </p>
                 </div>
                 <div id="scanDownloadInstructions" class="alert alert-info d-none"
                      role="status" aria-live="polite">
                     <i class="bi bi-download me-2" aria-hidden="true"></i>
-                    Run the downloaded EXE on this device. Keep this window open;
-                    the report will appear here after you approve submission in the agent.
+                    Run the downloaded EXE on the target device and approve submission.
+                    Results will appear here automatically—no separate diagnostic window.
+                    <span id="scanRunStatus">Waiting for the agent...</span>
+                    <button type="button" class="btn btn-sm btn-outline-primary ms-2 d-none"
+                            id="scanRetryBtn">Check report again</button>
                 </div>
                 <div id="scanResults" class="d-none">
                     <div id="scanResultsBody" aria-live="polite"></div>
@@ -256,6 +259,8 @@
         </div>
     </div>
 </div>
+
+{% include "_device_scan_success_modal.html" %}
 
 <!-- ======================================================
      DELETE DEVICE CONFIRMATION MODAL
