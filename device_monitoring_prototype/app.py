@@ -7,7 +7,6 @@ import uuid
 import base64
 import hashlib
 import io
-import json
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -920,6 +919,11 @@ def create_app(test_config=None):
             or parsed_base.path not in {"", "/"}
             or parsed_base.query
             or parsed_base.fragment
+        ):
+            abort(503)
+        if (
+            parsed_base.scheme != "https"
+            and parsed_base.hostname not in {"localhost", "127.0.0.1", "::1"}
         ):
             abort(503)
         submission_url = f"{base_url}{url_for('submit_agent_enrollment')}"

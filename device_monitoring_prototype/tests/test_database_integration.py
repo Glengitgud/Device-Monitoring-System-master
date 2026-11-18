@@ -2127,6 +2127,31 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn(b"could not be prepared", response.data.lower())
 
+    def test_exe_download_requires_https_for_remote_enrollment(self):
+        csrf = self.register_and_login()
+        qr = self.client.post(
+            "/api/device-registration-tokens",
+            headers={"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(qr.status_code, 200)
+        token = qr.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
+        self.client.post(
+            f"/enroll/{token}/verify",
+            data={"csrf_token": csrf},
+        )
+        self.app.config["PUBLIC_BASE_URL"] = "http://devmonitor.example"
+
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable"
+        ) as build_agent:
+            response = self.client.post(
+                f"/enroll/{token}/agent.exe",
+                data={"csrf_token": csrf, "trust_device_agent": "yes"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        build_agent.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
