@@ -63,6 +63,15 @@ class DeviceAgentBuilderTest(unittest.TestCase):
                     )
         run.assert_not_called()
 
+    def test_reports_missing_agent_source_as_a_build_error(self):
+        with patch.object(Path, "read_text", side_effect=OSError("missing source")):
+            with self.assertRaisesRegex(
+                DeviceAgentBuildError, "source could not be read"
+            ):
+                build_agent_executable(
+                    "a" * 43, "https://devmonitor.example/api/device-agent/enroll"
+                )
+
     def test_reports_packaging_failure_without_falling_back_to_python(self):
         with patch(
             "device_monitoring_prototype.agent_builder.subprocess.run",
