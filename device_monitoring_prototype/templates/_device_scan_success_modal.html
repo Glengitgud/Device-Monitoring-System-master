@@ -1,0 +1,39 @@
+<div class="modal fade" id="deviceRegistrationSuccessModal" tabindex="-1"
+     aria-labelledby="deviceRegistrationSuccessTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content device-scan-success">
+            <div class="modal-body text-center p-4 p-md-5">
+                <div class="device-scan-success-icon" aria-hidden="true">
+                    <i class="bi bi-check-lg"></i>
+                </div>
+                <h2 class="h4 mt-3" id="deviceRegistrationSuccessTitle">
+                    Device Scan Completed Successfully
+                </h2>
+                <p class="text-muted" id="deviceScanSuccessMessage">
+                    The device has been analyzed and the results are now available.
+                </p>
+                <p class="fw-semibold" role="status" aria-live="polite"
+                   id="deviceRegistrationCountdown">
+                    Redirecting to results in 5 seconds...
+                </p>
+                <div class="d-flex flex-wrap justify-content-center gap-2 mt-4">
+                    <a class="btn btn-primary" id="deviceScanResultsButton" href="#">
+                        <i class="bi bi-clipboard2-pulse me-1"></i>View Results
+                    </a>
+                    <a class="btn btn-outline-primary" id="deviceRegistrationDetailsButton"
+                       href="{{ url_for('devices') }}">
+                        <i class="bi bi-pc-display me-1"></i>View Device
+                    </a>
+                    <a class="btn btn-outline-primary" id="deviceScanDashboardButton"
+                       href="{{ url_for('dashboard') }}">
+                        <i class="bi bi-speedometer2 me-1"></i>Dashboard
+                    </a>
+                    <button class="btn btn-outline-secondary" type="button"
+                            data-bs-dismiss="modal" id="deviceScanCloseButton">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

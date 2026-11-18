@@ -83,16 +83,37 @@ function showToast(message, type = 'success') {
     instance.show();
 }
 
-function showRegistrationSuccess(device = null) {
+function openCompletionModal({
+    title,
+    message,
+    resultsUrl,
+    deviceUrl,
+    defaultRedirect,
+    countdownLabel = 'Redirecting'
+}) {
     const modalRoot = document.getElementById('deviceRegistrationSuccessModal');
-    if (registrationSuccessShown || !modalRoot) return;
-    registrationSuccessShown = true;
+    if (!modalRoot) return;
     registrationRedirectStarted = false;
+    window.clearTimeout(registrationRedirectTimer);
+    window.clearInterval(registrationRedirectInterval);
+
+    const titleNode = modalRoot.querySelector('#deviceRegistrationSuccessTitle');
+    const messageNode = modalRoot.querySelector('#deviceScanSuccessMessage');
+    const countdown = modalRoot.querySelector('#deviceRegistrationCountdown');
+    const resultsButton = modalRoot.querySelector('#deviceScanResultsButton');
     const detailsButton = modalRoot.querySelector('#deviceRegistrationDetailsButton');
-    if (device?.id != null && detailsButton) {
-        detailsButton.href = device.specifications_url
-            || `/devices/${encodeURIComponent(device.id)}/specifications`;
+    const dashboardButton = modalRoot.querySelector('#deviceScanDashboardButton');
+
+    if (titleNode) titleNode.textContent = title;
+    if (messageNode) messageNode.textContent = message;
+    if (resultsButton) {
+        resultsButton.href = resultsUrl;
+        resultsButton.classList.toggle('d-none', !resultsUrl);
     }
+    if (detailsButton) detailsButton.href = deviceUrl;
+    if (dashboardButton) dashboardButton.href = '/dashboard';
+    if (countdown) countdown.textContent = `${countdownLabel} in 5 seconds...`;
+
     const redirect = destination => {
         window.clearTimeout(registrationRedirectTimer);
         window.clearInterval(registrationRedirectInterval);
@@ -100,29 +121,68 @@ function showRegistrationSuccess(device = null) {
         registrationRedirectStarted = true;
         window.location.assign(destination);
     };
-    modalRoot.querySelector('#deviceScanDashboardButton').addEventListener('click', event => {
+
+    resultsButton?.addEventListener('click', event => {
         event.preventDefault();
-        redirect('/dashboard');
+        redirect(resultsUrl);
     }, { once: true });
     detailsButton?.addEventListener('click', event => {
         event.preventDefault();
         redirect(detailsButton.href);
+    }, { once: true });
+    dashboardButton?.addEventListener('click', event => {
+        event.preventDefault();
+        redirect('/dashboard');
     }, { once: true });
     modalRoot.addEventListener('hidden.bs.modal', () => {
         window.clearTimeout(registrationRedirectTimer);
         window.clearInterval(registrationRedirectInterval);
         registrationRedirectStarted = true;
     }, { once: true });
-    const countdown = modalRoot.querySelector('#deviceRegistrationCountdown');
+
     let remaining = 5;
+    const scanModal = document.getElementById('scanModal');
+    if (scanModal) {
+        bootstrap.Modal.getOrCreateInstance(scanModal).hide();
+    }
     bootstrap.Modal.getOrCreateInstance(modalRoot).show();
     registrationRedirectInterval = window.setInterval(() => {
         remaining -= 1;
         if (countdown) {
-            countdown.textContent = `Redirecting to Dashboard in ${remaining} seconds...`;
+            countdown.textContent = `${countdownLabel} in ${remaining} seconds...`;
         }
-        if (remaining <= 0) redirect('/dashboard');
+        if (remaining <= 0) redirect(defaultRedirect);
     }, 1000);
+}
+
+function showRegistrationSuccess(device = null) {
+    const modalRoot = document.getElementById('deviceRegistrationSuccessModal');
+    if (registrationSuccessShown || !modalRoot) return;
+    registrationSuccessShown = true;
+    const deviceUrl = device?.specifications_url
+        || (device?.id != null
+            ? `/devices/${encodeURIComponent(device.id)}/specifications`
+            : '/devices');
+    openCompletionModal({
+        title: 'Device Registered Successfully',
+        message: 'The device specifications have been detected and recorded.',
+        resultsUrl: deviceUrl,
+        deviceUrl,
+        defaultRedirect: '/dashboard',
+        countdownLabel: 'Redirecting to Dashboard'
+    });
+}
+
+function showScanSuccess(deviceId) {
+    const resultsUrl = `/devices/${encodeURIComponent(deviceId)}/specifications#health-report`;
+    openCompletionModal({
+        title: 'Device Scan Completed Successfully',
+        message: 'The device has been analyzed and the results are now available.',
+        resultsUrl,
+        deviceUrl: `/devices/${encodeURIComponent(deviceId)}/specifications`,
+        defaultRedirect: resultsUrl,
+        countdownLabel: 'Redirecting to results'
+    });
 }
 
 function initSidebar() {
@@ -1064,6 +1124,7 @@ async function pollDiagnosticRun(deviceId, runId) {
             document.getElementById('scanResultsBody').innerHTML = renderDiagnosticReport(report);
             document.getElementById('scanResults').classList.remove('d-none');
             await refreshAfterDiagnosticScan();
+            showScanSuccess(deviceId);
             return;
         }
         if (report.status === 'failed') {
