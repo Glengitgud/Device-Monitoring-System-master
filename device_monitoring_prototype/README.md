@@ -81,6 +81,18 @@ Run `python -m flask --app device_monitoring_prototype.app check-db` from the re
 
 If the goal is to recover an existing physical backup, do not initialize an empty database or copy individual `.ibd` files into another data directory. Preserve the original backup, inspect and start a complete copy with the matching MariaDB version, and export the recovered `devmonitor` tables logically before restoring them to the intended MariaDB instance under the same database name. Use `init-db` only after recovery and schema verification; it creates missing tables and roles but does not add columns or constraints to existing tables. Back up existing data before any repair or migration and rerun `check-db` afterward.
 
+## Logical backup and restore
+
+For a verified database, create a logical backup from **Command Prompt**. The restore command imports the dump's original `devmonitor` database and table definitions; do not pass a different database name.
+
+```bat
+C:\xampp\mysql\bin\mysqldump.exe --host=localhost --port=3307 --user=YOUR_DB_USER --password --single-transaction --routines --triggers --databases devmonitor > devmonitor-backup.sql
+C:\xampp\mysql\bin\mysql.exe --host=localhost --port=3307 --user=YOUR_DB_USER --password < devmonitor-backup.sql
+python -m flask --app device_monitoring_prototype.app check-db
+```
+
+Replace the example port with XAMPP's configured port. Both tools prompt for the password; do not put it in the command, a script, or the backup. Protect the SQL file because it contains password hashes and encrypted authenticator data. Keep a separate copy of the source backup until the restored database has passed `check-db` and application tests.
+
 ## Files
 
 - `app.py` — Flask application, authentication, views, JSON CRUD endpoints, and CLI commands.
