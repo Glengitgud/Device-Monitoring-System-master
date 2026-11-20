@@ -7,8 +7,9 @@ import uuid
 import base64
 import hashlib
 import io
+import json
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 #
@@ -37,6 +38,7 @@ from flask_login import (
     logout_user,
 )
 from dotenv import load_dotenv
+from openpyxl import Workbook
 import qrcode
 from qrcode.image.svg import SvgPathImage
 from sqlalchemy import (
@@ -74,6 +76,7 @@ from device_monitoring_prototype.diagnostics import (
 from device_monitoring_prototype.models import (
     ActivityLog,
     Device,
+    DeviceMetric,
     DeviceRegistrationToken,
     DiagnosticRun,
     DeviceSpecification,
@@ -285,7 +288,7 @@ def create_app(test_config=None):
             return redirect(url_for("device_verification"))
         if request.method == "POST" and request.endpoint not in {
             "submit_agent_enrollment",
-            "submit_agent_diagnostic",
+            "submit_agent_scan",
         }:
             submitted = request.headers.get("X-CSRF-Token")
             if not submitted:
@@ -399,6 +402,35 @@ def create_app(test_config=None):
             and device.registered_by_user_id != current_user.id
         ):
             abort(404)
+
+    def refresh_stale_device_statuses():
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=5)
+        stale_devices = []
+        for device in Device.query.filter_by(
+            status="online", lifecycle_status="active"
+        ).all():
+            last_seen = device.last_seen_at or device.updated_at or device.registered_at
+            if last_seen is None:
+                continue
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            if last_seen <= cutoff:
+                device.status = "offline"
+                stale_devices.append(device)
+                db.session.add(
+                    Log(device_id=device.id, event="Device status changed to offline")
+                )
+                db.session.add(
+                    ActivityLog(
+                        event_type="device.status_offline",
+                        entity_type="device",
+                        entity_id=device.id,
+                        details={"reason": "No successful scan or check-in within five minutes."},
+                    )
+                )
+        if stale_devices:
+            db.session.commit()
 
     def serialize_device(device):
         spec = device.hardware_spec
@@ -867,6 +899,7 @@ def create_app(test_config=None):
                 device.updated_at.isoformat() if device.updated_at else None,
             ),
             ("Device Status", device.status),
+            ("MAC Address", device.mac_address),
         ]
         if specification:
             def format_bytes(value):
@@ -1029,6 +1062,7 @@ def create_app(test_config=None):
                 {
                     "id": registration.device.id,
                     "name": registration.device.device_name,
+                    "mac_address": registration.mac_address,
                     "specifications_url": url_for(
                         "device_specifications",
                         device_id=registration.device.id,
@@ -1176,23 +1210,35 @@ def create_app(test_config=None):
             registered_at=device.registered_at.isoformat(),
         ), 201
 
+    @app.post("/api/device-agent/scans/<int:run_id>")
     @app.post("/api/device-agent/diagnostics/<int:run_id>")
-    def submit_agent_diagnostic(run_id):
+    def submit_agent_scan(run_id):
         authorization = request.headers.get("Authorization", "")
         scheme, separator, token = authorization.partition(" ")
         if not separator or scheme.casefold() != "bearer":
             return api_error("A valid diagnostic authorization is required.", 401)
-        if request.content_length and request.content_length > REPORT_LIMIT_BYTES + 1024:
-            return api_error("The diagnostic report exceeds the size limit.", 413)
+        if request.content_length and request.content_length > REPORT_LIMIT_BYTES + 16_384:
+            return api_error("The device scan exceeds the size limit.", 413)
         data = api_data()
-        if not isinstance(data, dict) or set(data) != {"report"}:
-            return api_error("Submission must contain one diagnostic report.")
+        is_scan = request.path.startswith("/api/device-agent/scans/")
+        expected_keys = {"report", "specifications"} if is_scan else {"report"}
+        if (
+            not isinstance(data, dict)
+            or set(data) not in ({"report"}, {"report", "specifications"})
+            or (is_scan and set(data) != expected_keys)
+        ):
+            return api_error("Submission must contain a health report and device inventory.")
         try:
-            run = complete_diagnostic_run(run_id, token, data["report"])
+            run = complete_diagnostic_run(
+                run_id,
+                token,
+                data["report"],
+                data.get("specifications"),
+            )
         except DiagnosticValidationError as error:
             return api_error(error, 401 if "token" in str(error).lower() or "authorization" in str(error).lower() else 400)
         app.logger.info(
-            "Diagnostic report stored (run_id=%s, device_id=%s, checks=%d, issues=%d).",
+            "Device scan stored (run_id=%s, device_id=%s, checks=%d, issues=%d).",
             run_id,
             run.device_id,
             len(data["report"]["checks"]),
@@ -1203,6 +1249,7 @@ def create_app(test_config=None):
     @app.get("/api/devices")
     @login_required
     def list_devices():
+        refresh_stale_device_statuses()
         query = Device.query.filter(
             Device.lifecycle_status == "active",
             Device.status != "retired",
@@ -1268,6 +1315,7 @@ def create_app(test_config=None):
     @app.get("/api/devices/<int:device_id>")
     @login_required
     def device_details(device_id):
+        refresh_stale_device_statuses()
         device = db.get_or_404(Device, device_id)
         can_access_device(device)
         diagnostic_ids = [run.id for run in device.diagnostic_runs]
@@ -1286,6 +1334,7 @@ def create_app(test_config=None):
             hostname=device.hostname,
             device_type=device.device_type,
             serial_number=device.serial_number,
+            mac_address=device.mac_address,
             manufacturer=device.manufacturer,
             model=device.model,
             operating_system=device.operating_system,
@@ -1330,6 +1379,7 @@ def create_app(test_config=None):
                 "operating_system_version": device.hardware_spec.operating_system_version,
                 "network_adapters": device.hardware_spec.network_adapters or [],
                 "ip_addresses": device.hardware_spec.ip_addresses or [],
+                "mac_address": device.mac_address,
                 "collected_at": (
                     device.hardware_spec.collected_at.isoformat()
                     if device.hardware_spec.collected_at else None
@@ -1474,6 +1524,7 @@ def create_app(test_config=None):
             view_mode="user",
             device_name=device.device_name,
             device_type=device.device_type,
+            mac_address=device.mac_address,
             operating_system=device.operating_system,
             status=device.status,
             ip_address=latest_network.get("ip_address"),
@@ -1514,6 +1565,7 @@ def create_app(test_config=None):
             return api_error(error)
         return "", 204
 
+    @app.post("/api/devices/<int:device_id>/scan")
     @app.post("/api/devices/<int:device_id>/diagnostics")
     @login_required
     def scan_device(device_id):
@@ -1535,44 +1587,45 @@ def create_app(test_config=None):
             )
         ):
             return api_error(
-                "Set PUBLIC_BASE_URL to a reachable HTTPS origin before downloading a diagnostic agent.",
+                "Set PUBLIC_BASE_URL to a reachable HTTPS origin before downloading the Device Scanner.",
                 503,
             )
         run, token = create_diagnostic_run(device, current_user)
         submission_url = urljoin(
-            base_url, url_for("submit_agent_diagnostic", run_id=run.id)
+            base_url, url_for("submit_agent_scan", run_id=run.id)
         )
         dashboard_url = urljoin(base_url, url_for("dashboard"))
         try:
             agent_bytes = build_agent_executable(
                 None,
                 submission_url,
-                mode="diagnostic",
-                diagnostic_run_id=run.id,
-                diagnostic_token=token,
+                mode="scanner",
+                scan_run_id=run.id,
+                scan_token=token,
                 dashboard_url=dashboard_url,
             )
         except DeviceAgentBuildError:
             run.status = "failed"
-            run.summary = "The endpoint diagnostic agent could not be prepared."
+            run.summary = "The Device Scanner could not be prepared."
             run.recommendation = None
             run.finished_at = datetime.now(timezone.utc)
             db.session.add(
-                Log(device_id=device.id, event="Endpoint diagnostics agent build failed")
+                Log(device_id=device.id, event="Device Scanner build failed")
             )
             db.session.commit()
-            app.logger.exception("Could not build diagnostic agent (run_id=%s).", run.id)
-            return api_error("The diagnostic agent could not be prepared.", 503)
+            app.logger.exception("Could not build Device Scanner (run_id=%s).", run.id)
+            return api_error("The Device Scanner could not be prepared.", 503)
         response = send_file(
             io.BytesIO(agent_bytes),
             mimetype="application/vnd.microsoft.portable-executable",
             as_attachment=True,
-            download_name="devmonitor-device-diagnostics.exe",
+            download_name="devmonitor-device-scanner.exe",
             max_age=0,
         )
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Scan-Run-ID"] = str(run.id)
         response.headers["X-Diagnostic-Run-ID"] = str(run.id)
         response.headers["X-Device-ID"] = str(device.id)
         response.headers["X-Device-Specifications-URL"] = url_for(
@@ -1580,6 +1633,7 @@ def create_app(test_config=None):
         )
         return response
 
+    @app.get("/api/devices/<int:device_id>/scans/<int:run_id>")
     @app.get("/api/devices/<int:device_id>/diagnostics/<int:run_id>")
     @login_required
     def diagnostic_run_status(device_id, run_id):
@@ -1589,7 +1643,7 @@ def create_app(test_config=None):
         if run is None or run.device_id != device.id:
             abort(404)
         app.logger.debug(
-            "Diagnostic report retrieved (run_id=%s, device_id=%s, status=%s).",
+            "Device scan status retrieved (run_id=%s, device_id=%s, status=%s).",
             run.id,
             device.id,
             run.status,
@@ -1694,6 +1748,7 @@ def create_app(test_config=None):
     @app.get("/api/dashboard")
     @login_required
     def dashboard_data():
+        refresh_stale_device_statuses()
         if not current_user.is_admin and not verified_device_count(current_user.id):
             return api_error(
                 "Verify a device with the QR registration workflow to access the dashboard.",
@@ -2243,6 +2298,249 @@ def create_app(test_config=None):
         if kind == "all":
             results = results[offset:offset + limit]
         return jsonify(results)
+
+    @app.post("/api/admin/export")
+    @admin_required
+    def export_admin_database():
+        data = api_data()
+        if not isinstance(data, dict) or set(data) != {
+            "username", "password", "datasets"
+        }:
+            return api_error("Enter administrator credentials and select export data.")
+        username = data["username"]
+        password = data["password"]
+        datasets = data["datasets"]
+        allowed_datasets = {
+            "users",
+            "devices",
+            "device_information",
+            "audit_logs",
+            "monitoring_data",
+        }
+        if (
+            not isinstance(username, str)
+            or not username.strip()
+            or len(username) > 64
+            or not isinstance(password, str)
+            or not password
+            or len(password) > 256
+            or not isinstance(datasets, list)
+            or not datasets
+            or len(datasets) > len(allowed_datasets)
+            or any(not isinstance(item, str) for item in datasets)
+            or len(set(datasets)) != len(datasets)
+            or not set(datasets).issubset(allowed_datasets)
+        ):
+            return api_error("The export request contains invalid values.")
+
+        administrator = User.query.filter(
+            func.lower(User.username) == username.strip().lower()
+        ).one_or_none()
+        if (
+            administrator is None
+            or administrator.id != current_user.id
+            or not administrator.is_active
+            or not administrator.is_admin
+            or not verify_password(password, administrator.password_hash)
+        ):
+            db.session.add(
+                ActivityLog(
+                    actor_user_id=current_user.id,
+                    event_type="admin.database_export_denied",
+                    entity_type="database_export",
+                    details={"reason": "credential_verification_failed"},
+                )
+            )
+            db.session.commit()
+            return api_error("Administrator credential verification failed.", 403)
+
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type="admin.database_export_started",
+                entity_type="database_export",
+                details={"datasets": sorted(datasets)},
+            )
+        )
+        db.session.commit()
+
+        def excel_cell(value):
+            if isinstance(value, datetime):
+                return value.isoformat()
+            if isinstance(value, (dict, list, tuple)):
+                value = json.dumps(value, ensure_ascii=False, default=str)
+            if isinstance(value, str):
+                value = "".join(
+                    character
+                    for character in value
+                    if character in "\t\n\r" or ord(character) >= 32
+                )[:32767]
+                if value.startswith(("=", "+", "-", "@")):
+                    value = "'" + value
+            return value
+
+        try:
+            workbook = Workbook(write_only=True)
+            row_counts = {}
+
+            def add_sheet(title, headers, rows):
+                sheet = workbook.create_sheet(title=title)
+                sheet.append(headers)
+                count = 0
+                for row in rows:
+                    sheet.append([excel_cell(value) for value in row])
+                    count += 1
+                row_counts[title] = count
+
+            if "users" in datasets:
+                add_sheet(
+                    "Users",
+                    ["ID", "Username", "Full Name", "Email", "Role", "Status",
+                     "Created At", "Last Login At"],
+                    (
+                        (
+                            user.id,
+                            user.username,
+                            user.full_name,
+                            user.email,
+                            ", ".join(sorted(role.name for role in user.roles)),
+                            user.status,
+                            user.created_at,
+                            user.last_login_at,
+                        )
+                        for user in User.query.order_by(User.id).yield_per(500)
+                    ),
+                )
+            if "devices" in datasets:
+                add_sheet(
+                    "Devices",
+                    ["ID", "Asset Tag", "Name", "Type", "MAC Address", "Status",
+                     "Owner", "Registered At", "Last Seen At"],
+                    (
+                        (
+                            device.id,
+                            device.asset_tag,
+                            device.device_name,
+                            device.device_type,
+                            device.mac_address,
+                            device.status,
+                            device.owner.username,
+                            device.registered_at,
+                            device.last_seen_at,
+                        )
+                        for device in Device.query.order_by(Device.id).yield_per(500)
+                    ),
+                )
+            if "device_information" in datasets:
+                add_sheet(
+                    "Device Information",
+                    ["Device ID", "CPU", "CPU Cores", "RAM Bytes", "RAM Used Bytes",
+                     "Storage Bytes", "Storage Available Bytes", "GPU",
+                     "Motherboard", "Operating System", "OS Version",
+                     "Network Adapters", "IP Addresses"],
+                    (
+                        (
+                            device.id,
+                            device.hardware_spec.cpu_model if device.hardware_spec else None,
+                            device.hardware_spec.cpu_cores if device.hardware_spec else None,
+                            device.hardware_spec.memory_bytes if device.hardware_spec else None,
+                            device.hardware_spec.ram_usage_bytes if device.hardware_spec else None,
+                            device.hardware_spec.storage_bytes if device.hardware_spec else None,
+                            device.hardware_spec.storage_available_bytes if device.hardware_spec else None,
+                            device.hardware_spec.gpu_model if device.hardware_spec else None,
+                            device.hardware_spec.motherboard_brand if device.hardware_spec else None,
+                            device.operating_system,
+                            device.operating_system_version,
+                            device.hardware_spec.network_adapters if device.hardware_spec else None,
+                            device.hardware_spec.ip_addresses if device.hardware_spec else None,
+                        )
+                        for device in Device.query.order_by(Device.id).yield_per(500)
+                    ),
+                )
+            if "audit_logs" in datasets:
+                add_sheet(
+                    "Audit Logs",
+                    ["ID", "Event", "Actor", "Entity Type", "Entity ID", "Details",
+                     "Occurred At"],
+                    (
+                        (
+                            entry.id,
+                            entry.event_type,
+                            entry.actor.username if entry.actor else "System",
+                            entry.entity_type,
+                            entry.entity_id,
+                            entry.details,
+                            entry.occurred_at,
+                        )
+                        for entry in ActivityLog.query.order_by(
+                            ActivityLog.occurred_at, ActivityLog.id
+                        ).yield_per(500)
+                    ),
+                )
+            if "monitoring_data" in datasets:
+                add_sheet(
+                    "Monitoring Data",
+                    ["Metric ID", "Device ID", "Device", "CPU Percent",
+                     "Memory Percent", "Storage Percent", "Memory Used Bytes",
+                     "Storage Used Bytes", "Network RX Bytes", "Network TX Bytes",
+                     "Collected At"],
+                    (
+                        (
+                            metric.id,
+                            metric.device_id,
+                            metric.device.device_name,
+                            metric.cpu_percent,
+                            metric.memory_percent,
+                            metric.storage_percent,
+                            metric.memory_used_bytes,
+                            metric.storage_used_bytes,
+                            metric.network_rx_bytes,
+                            metric.network_tx_bytes,
+                            metric.collected_at,
+                        )
+                        for metric in DeviceMetric.query.order_by(
+                            DeviceMetric.id
+                        ).yield_per(500)
+                    ),
+                )
+            output = io.BytesIO()
+            workbook.save(output)
+            output.seek(0)
+        except (SQLAlchemyError, OSError, TypeError, ValueError):
+            db.session.rollback()
+            db.session.add(
+                ActivityLog(
+                    actor_user_id=current_user.id,
+                    event_type="admin.database_export_failed",
+                    entity_type="database_export",
+                    details={"datasets": sorted(datasets)},
+                )
+            )
+            db.session.commit()
+            app.logger.exception(
+                "Database export failed (actor_user_id=%s).", current_user.id
+            )
+            return api_error("The database export could not be generated.", 503)
+
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type="admin.database_exported",
+                entity_type="database_export",
+                details={"datasets": sorted(datasets), "row_counts": row_counts},
+            )
+        )
+        db.session.commit()
+        response = send_file(
+            output,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"devmonitor-export-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.xlsx",
+            max_age=0,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     return app
 

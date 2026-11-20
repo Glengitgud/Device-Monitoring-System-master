@@ -20,6 +20,60 @@
     </div>
 </div>
 
+<section class="content-card mb-4" aria-labelledby="databaseExportTitle">
+    <div class="content-card-header">
+        <h2 class="h6 mb-0" id="databaseExportTitle">
+            <i class="bi bi-file-earmark-spreadsheet me-2"></i>Export Database to Excel
+        </h2>
+    </div>
+    <div class="content-card-body">
+        <p class="text-muted">
+            Confirm your administrator username and password before exporting selected records.
+        </p>
+        <form id="adminExportForm" novalidate>
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label class="form-label" for="exportUsername">Administrator Username</label>
+                    <input class="form-control" id="exportUsername" name="username"
+                           autocomplete="username" maxlength="64" required>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label" for="exportPassword">Administrator Password</label>
+                    <input class="form-control" id="exportPassword" name="password"
+                           type="password" autocomplete="current-password" required>
+                </div>
+                <fieldset class="col-12">
+                    <legend class="form-label">Data to include</legend>
+                    <div class="d-flex flex-wrap gap-3">
+                        {% for value, label in [
+                            ('users', 'Users'),
+                            ('devices', 'Devices'),
+                            ('device_information', 'Device Information'),
+                            ('audit_logs', 'Audit Logs'),
+                            ('monitoring_data', 'Monitoring Data')
+                        ] %}
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox"
+                                   name="datasets" id="export-{{ value }}"
+                                   value="{{ value }}" checked>
+                            <label class="form-check-label" for="export-{{ value }}">
+                                {{ label }}
+                            </label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </fieldset>
+                <div class="col-12 d-flex align-items-center gap-3">
+                    <button class="btn btn-primary" id="adminExportButton" type="submit">
+                        <i class="bi bi-download me-1"></i>Verify and Export
+                    </button>
+                    <span id="adminExportStatus" role="status" aria-live="polite"></span>
+                </div>
+            </div>
+        </form>
+    </div>
+</section>
+
 <div class="accordion admin-data-accordion mb-4" id="adminDataAccordion">
     <div class="accordion-item">
         <h2 class="accordion-header" id="usersHeading">

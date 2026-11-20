@@ -43,6 +43,7 @@ SPECIFICATION_KEYS = {
     "network_adapters",
     "ip_addresses",
 }
+OPTIONAL_SPECIFICATION_KEYS = {"mac_address"}
 EMAIL_PATTERN = re.compile(
     r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
     r"(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
@@ -351,13 +352,24 @@ def _inventory_bytes(specifications, key, *, nullable=False, maximum=2**63 - 1):
 
 
 def validate_detected_specifications(specifications):
-    if not isinstance(specifications, dict) or set(specifications) != SPECIFICATION_KEYS:
+    if (
+        not isinstance(specifications, dict)
+        or not SPECIFICATION_KEYS.issubset(specifications)
+        or set(specifications) - SPECIFICATION_KEYS - OPTIONAL_SPECIFICATION_KEYS
+    ):
         raise ValidationError("Detected specifications are incomplete or contain unsupported fields.")
 
     cpu_name = _inventory_text(specifications, "cpu_name", 255)
     motherboard_brand = _inventory_text(specifications, "motherboard_brand", 120)
     os_name = _inventory_text(specifications, "operating_system_name", 120)
     os_version = _inventory_text(specifications, "operating_system_version", 255)
+    mac_address = _inventory_text(specifications, "mac_address", 17)
+    if mac_address and not re.fullmatch(
+        r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", mac_address
+    ):
+        raise ValidationError("MAC address must use the format 00:11:22:33:44:55.")
+    if mac_address:
+        mac_address = mac_address.upper()
     gpu_values = specifications.get("gpu_information")
     if not isinstance(gpu_values, list) or len(gpu_values) > 32:
         raise ValidationError("GPU information must be a list of at most 32 names.")
@@ -445,6 +457,7 @@ def validate_detected_specifications(specifications):
         "operating_system_version": os_version,
         "network_adapters": network_adapters,
         "ip_addresses": ip_addresses,
+        "mac_address": mac_address,
     }
 
 
@@ -495,7 +508,9 @@ def register_agent_device(token, data):
         device_type=device_type,
         operating_system=specifications["operating_system_name"] or "Unknown",
         operating_system_version=specifications["operating_system_version"],
+        mac_address=specifications["mac_address"],
         status="online" if specifications["ip_addresses"] else "unknown",
+        last_seen_at=now if specifications["ip_addresses"] else None,
         is_verified=True,
         owner=user,
         registered_by=user,
@@ -526,6 +541,7 @@ def register_agent_device(token, data):
     db.session.add(device)
     db.session.flush()
     registration.device = device
+    registration.mac_address = device.mac_address
     _log_device_event(device, "Device registered with QR-based agent")
     db.session.add(
         ActivityLog(

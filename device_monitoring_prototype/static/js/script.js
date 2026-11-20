@@ -34,8 +34,7 @@ const deviceAddressRequests = new Map();
 let registrationRedirectTimer = null;
 let registrationRedirectInterval = null;
 let registrationSuccessShown = false;
-let diagnosticRedirectTimer = null;
-let diagnosticRedirectInterval = null;
+let scanRedirectInterval = null;
 
 function csrfToken() {
     return document.querySelector('meta[name="csrf-token"]')?.content || '';
@@ -68,6 +67,18 @@ function escapeHTML(value) {
     const element = document.createElement('span');
     element.textContent = value == null ? '' : String(value);
     return element.innerHTML;
+}
+
+function deviceStatusBadge(status) {
+    const normalized = String(status || 'unknown').toLowerCase();
+    const className = {
+        online: 'badge-online',
+        offline: 'badge-offline',
+        maintenance: 'badge-maintenance',
+        unknown: 'badge-unknown'
+    }[normalized] || 'badge-unknown';
+    const label = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+    return `<span class="${className}" aria-label="Device status: ${escapeHTML(label)}">${escapeHTML(label)}</span>`;
 }
 
 function showToast(message, type = 'success') {
@@ -127,58 +138,41 @@ function showRegistrationSuccess(device = null) {
     }, 1000);
 }
 
-function showDiagnosticSuccess(deviceId, runId) {
-    const modalRoot = document.getElementById('deviceDiagnosticSuccessModal');
+function showDeviceScanSuccess(deviceId) {
+    const modalRoot = document.getElementById('deviceScanSuccessModal');
     if (!modalRoot) return;
-    const specsUrl = `/devices/${encodeURIComponent(deviceId)}/specifications#health-report`;
     const deviceUrl = `/devices/${encodeURIComponent(deviceId)}/specifications`;
-    const viewResultsButton = modalRoot.querySelector('#deviceDiagnosticViewResultsButton');
-    const viewDeviceButton = modalRoot.querySelector('#deviceDiagnosticViewDeviceButton');
-    const dashboardButton = modalRoot.querySelector('#deviceDiagnosticDashboardButton');
-    const closeButton = modalRoot.querySelector('#deviceDiagnosticCloseButton');
-    if (viewResultsButton) {
-        viewResultsButton.href = specsUrl;
-        viewResultsButton.dataset.runId = String(runId);
-    }
+    const viewDeviceButton = modalRoot.querySelector('#deviceScanViewDeviceButton');
+    const dashboardButton = modalRoot.querySelector('#deviceScanDashboardButton');
     if (viewDeviceButton) viewDeviceButton.href = deviceUrl;
 
     const redirect = destination => {
-        window.clearTimeout(diagnosticRedirectTimer);
-        window.clearInterval(diagnosticRedirectInterval);
+        window.clearInterval(scanRedirectInterval);
         window.location.assign(destination);
     };
-    viewResultsButton?.addEventListener('click', event => {
-        event.preventDefault();
-        redirect(viewResultsButton.href);
-    }, { once: true });
     viewDeviceButton?.addEventListener('click', event => {
         event.preventDefault();
         redirect(viewDeviceButton.href);
     }, { once: true });
     dashboardButton?.addEventListener('click', event => {
         event.preventDefault();
-        redirect('/dashboard');
-    }, { once: true });
-    closeButton?.addEventListener('click', () => {
-        window.clearTimeout(diagnosticRedirectTimer);
-        window.clearInterval(diagnosticRedirectInterval);
+        redirect('/dashboard?scan=complete');
     }, { once: true });
 
-    const countdown = modalRoot.querySelector('#deviceDiagnosticCountdown');
+    const countdown = modalRoot.querySelector('#deviceScanCountdown');
     let remaining = 5;
-    if (countdown) countdown.textContent = String(remaining);
+    if (countdown) countdown.textContent = `Redirecting to Dashboard in ${remaining} seconds...`;
     bootstrap.Modal.getOrCreateInstance(modalRoot).show();
-    diagnosticRedirectInterval = window.setInterval(() => {
+    scanRedirectInterval = window.setInterval(() => {
         remaining -= 1;
-        if (countdown) countdown.textContent = String(Math.max(remaining, 0));
+        if (countdown) {
+            countdown.textContent =
+                `Redirecting to Dashboard in ${Math.max(remaining, 0)} seconds...`;
+        }
         if (remaining <= 0) {
-            redirect(specsUrl);
+            redirect('/dashboard?scan=complete');
         }
     }, 1000);
-    modalRoot.addEventListener('hidden.bs.modal', () => {
-        window.clearTimeout(diagnosticRedirectTimer);
-        window.clearInterval(diagnosticRedirectInterval);
-    }, { once: true });
 }
 
 function initSidebar() {
@@ -274,9 +268,7 @@ function renderDevicesCards() {
         <article class="device-card">
             <div class="device-card-header">
                 <div class="device-card-icon" aria-hidden="true"><i class="bi bi-laptop"></i></div>
-                <span class="${device.status === 'Online' ? 'badge-online' : 'badge-offline'}">
-                    ${escapeHTML(device.status)}
-                </span>
+                ${deviceStatusBadge(device.status)}
             </div>
             <h3 class="device-card-title">${escapeHTML(device.name)}</h3>
             <p class="device-card-subtitle">${escapeHTML(device.type)}</p>
@@ -315,8 +307,8 @@ function renderDevicesCards() {
                     onclick="openDeviceModal('view', ${device.id})"><i class="bi bi-eye"></i></button>
                 <button class="btn btn-sm btn-outline-primary" title="Edit" aria-label="Edit device"
                     onclick="openDeviceModal('edit', ${device.id})"><i class="bi bi-pencil"></i></button>
-                <button class="btn btn-sm btn-outline-success" title="Diagnose device"
-                    aria-label="Diagnose device"
+                <button class="btn btn-sm btn-outline-success" title="Scan device"
+                    aria-label="Scan device"
                     onclick="scanDevice(${device.id})"><i class="bi bi-search"></i></button>
                 <button class="btn btn-sm btn-outline-danger" title="Archive" aria-label="Archive device"
                     onclick="confirmDeleteDevice(${device.id})"><i class="bi bi-archive"></i></button>
@@ -402,9 +394,20 @@ function loadDeviceAddress(device) {
 function initDevicesPage() {
     refreshDevices().catch(error => showToast(error.message, 'danger'));
     window.setInterval(() => {
-        if (!document.hidden) refreshDevices().catch(error => {
+        if (document.hidden) return;
+        refreshDevices().catch(error => {
             showToast(`Could not refresh device information: ${error.message}`, 'danger');
         });
+        const detailsView = document.getElementById('deviceDetailsView');
+        if (selectedDeviceId && detailsView && !detailsView.classList.contains('d-none')) {
+            api(`/api/devices/${selectedDeviceId}`, { cache: 'no-store' })
+                .then(details => {
+                    if (detailsView === document.getElementById('deviceDetailsView')) {
+                        detailsView.innerHTML = renderDeviceDetails(details);
+                    }
+                })
+                .catch(error => showToast(`Could not refresh device status: ${error.message}`, 'danger'));
+        }
     }, 5000);
     document.getElementById('deviceSearchInput')?.addEventListener('input', event => {
         deviceSearch = event.target.value.trim().toLowerCase();
@@ -571,7 +574,11 @@ function renderDeviceDetails(device) {
     const card = (label, item) => `
         <div class="device-information-card">
             <span class="device-information-label">${escapeHTML(label)}</span>
-            <span class="device-information-value">${escapeHTML(value(item))}</span>
+            <span class="device-information-value">${
+                ['Device Status', 'Status'].includes(label)
+                    ? deviceStatusBadge(item)
+                    : escapeHTML(value(item))
+            }</span>
         </div>`;
     const section = (title, items) => {
         const visibleItems = items.length ? items : [['Information', 'No records available']];
@@ -588,6 +595,7 @@ function renderDeviceDetails(device) {
         return section('Device Information', [
             ['Device Name', device.device_name],
             ['Device Type', device.device_type],
+            ['MAC Address', device.mac_address],
             ['Operating System', device.operating_system],
             ['Device Status', device.status],
             ['IP Address', device.ip_address],
@@ -614,6 +622,7 @@ function renderDeviceDetails(device) {
             ['Device ID', device.id], ['Asset Tag', device.asset_tag],
             ['Device Name', device.device_name], ['Hostname', device.hostname],
             ['Type', device.device_type], ['Status', device.status],
+            ['MAC Address', device.mac_address],
             ['Owner User ID', device.owner_user_id],
             ['Registered By User ID', device.registered_by_user_id],
             ['Lifecycle', device.lifecycle_status],
@@ -670,11 +679,11 @@ function renderDeviceDetails(device) {
                 ['Observed At', observation.observed_at],
             ]),
         ])),
-        section('Diagnostic History', (device.diagnostics || []).flatMap(run => [
+        section('Device Scan History', (device.diagnostics || []).flatMap(run => [
             ['Run ID', run.id], ['Device ID', run.device_id],
             ['Initiated By ID', run.initiated_by_user_id],
             ['Initiated By', run.initiated_by?.full_name || run.initiated_by?.username],
-            ['Diagnostic Status', run.status], ['Summary', run.summary],
+            ['Scan Status', run.status], ['Summary', run.summary],
             ['Detected Problem', run.detected_problem], ['Recommendation', run.recommendation],
             ['Started At', run.started_at], ['Finished At', run.finished_at],
             ...run.checks.flatMap(check => [
@@ -934,13 +943,13 @@ async function scanDevice(deviceId) {
     document.getElementById('scanDownloadInstructions').classList.add('d-none');
     document.getElementById('scanResults').classList.add('d-none');
     document.getElementById('scanProgressText').textContent =
-        'Preparing a secure diagnostic agent...';
+        'Preparing the Device Scanner...';
     document.getElementById('scanRunStatus').textContent =
-        'Waiting for the downloaded agent to run and submit the report...';
+        'Waiting for the Device Scanner to run and submit results...';
     document.getElementById('scanRetryBtn').classList.add('d-none');
     modal.show();
     try {
-        const response = await fetch(`/api/devices/${deviceId}/diagnostics`, {
+        const response = await fetch(`/api/devices/${deviceId}/scan`, {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'X-CSRF-Token': csrfToken() }
@@ -949,19 +958,19 @@ async function scanDevice(deviceId) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.error || `Request failed (${response.status}).`);
         }
-        const runId = response.headers.get('X-Diagnostic-Run-ID');
-        if (!runId) throw new Error('The server did not identify this diagnostic run.');
+        const runId = response.headers.get('X-Scan-Run-ID');
+        if (!runId) throw new Error('The server did not identify this device scan.');
         const download = document.createElement('a');
         const objectUrl = URL.createObjectURL(await response.blob());
         download.href = objectUrl;
-        download.download = 'devmonitor-device-diagnostics.exe';
+        download.download = 'devmonitor-device-scanner.exe';
         document.body.appendChild(download);
         download.click();
         download.remove();
         window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
         document.getElementById('scanProgress').classList.add('d-none');
         document.getElementById('scanDownloadInstructions').classList.remove('d-none');
-        await pollDiagnosticRun(deviceId, runId);
+        await pollDeviceScan(deviceId, runId);
     } catch (error) {
         showToast(error.message, 'danger');
         document.getElementById('scanProgress').classList.add('d-none');
@@ -1003,7 +1012,7 @@ function renderHealthGauge(label, score) {
     </div>`;
 }
 
-function renderDiagnosticReport(report) {
+function renderDeviceScanReport(report) {
     const scores = report.scores || {};
     const components = scores.components || {};
     const gauges = [
@@ -1044,20 +1053,20 @@ function renderDiagnosticReport(report) {
     const score = Number.isInteger(scores.overall) ? `${scores.overall}%` : 'Not available';
     return `<section class="diagnostic-report">
         <div class="alert alert-success" role="status">
-            <strong>Full analysis complete.</strong> ${escapeHTML(report.summary || '')}
+            <strong>Device scan complete.</strong> ${escapeHTML(report.summary || '')}
         </div>
-        <h6 class="mb-3">Device Health Report <span class="text-muted">Overall: ${score}</span></h6>
+        <h6 class="mb-3">Device Health Summary <span class="text-muted">Overall: ${score}</span></h6>
         <div class="health-gauge-grid">${gauges.map(([label, value]) => renderHealthGauge(label, value)).join('')}</div>
         <h6 class="mt-4">Recommended actions and issues requiring attention</h6>
         ${issues || '<p class="text-success">No issues requiring attention were identified by the supported checks.</p>'}
-        <details class="mt-3"><summary>All diagnostic checks and limitations</summary>
+        <details class="mt-3"><summary>Scan checks and limitations</summary>
             <ul class="diagnostic-check-list mt-2">${checks}</ul>
         </details>
         ${report.finished_at ? `<p class="small text-muted mt-3 mb-0">Saved ${escapeHTML(new Date(report.finished_at).toLocaleString())}</p>` : ''}
     </section>`;
 }
 
-async function pollDiagnosticRun(deviceId, runId) {
+async function pollDeviceScan(deviceId, runId) {
     const status = document.getElementById('scanRunStatus');
     const retryButton = document.getElementById('scanRetryBtn');
     retryButton.classList.add('d-none');
@@ -1066,7 +1075,7 @@ async function pollDiagnosticRun(deviceId, runId) {
         let report;
         try {
             report = await api(
-                `/api/devices/${deviceId}/diagnostics/${runId}`,
+                `/api/devices/${deviceId}/scans/${runId}`,
                 { cache: 'no-store' }
             );
         } catch (error) {
@@ -1085,7 +1094,7 @@ async function pollDiagnosticRun(deviceId, runId) {
         }
         if (report.status === 'completed') {
             document.getElementById('scanDownloadInstructions').classList.add('d-none');
-            document.getElementById('scanResultsBody').innerHTML = renderDiagnosticReport(report);
+            document.getElementById('scanResultsBody').innerHTML = renderDeviceScanReport(report);
             document.getElementById('scanResults').classList.remove('d-none');
             await Promise.allSettled([
                 refreshDevices(),
@@ -1095,13 +1104,13 @@ async function pollDiagnosticRun(deviceId, runId) {
             showToast('Device scan complete. Results are now available in DevMonitor.');
             const scanModal = bootstrap.Modal.getInstance(document.getElementById('scanModal'));
             scanModal?.hide();
-            showDiagnosticSuccess(deviceId, runId);
+            showDeviceScanSuccess(deviceId);
             return;
         }
         if (report.status === 'failed') {
             document.getElementById('scanDownloadInstructions').classList.add('d-none');
             document.getElementById('scanResultsBody').innerHTML =
-                `<div class="alert alert-danger" role="alert">${escapeHTML(report.summary || 'The diagnostic run failed.')}</div>`;
+                `<div class="alert alert-danger" role="alert">${escapeHTML(report.summary || 'The device scan failed.')}</div>`;
             document.getElementById('scanResults').classList.remove('d-none');
             return;
         }
@@ -1111,7 +1120,7 @@ async function pollDiagnosticRun(deviceId, runId) {
     status.textContent =
         'No report was received yet. If you approved submission in the agent, check again.';
     retryButton.classList.remove('d-none');
-    retryButton.onclick = () => pollDiagnosticRun(deviceId, runId);
+    retryButton.onclick = () => pollDeviceScan(deviceId, runId);
 }
 
 async function refreshUsers() {
@@ -1158,7 +1167,58 @@ function renderUsersTable() {
     }
 }
 
+async function exportAdminDatabase(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = document.getElementById('adminExportButton');
+    const status = document.getElementById('adminExportStatus');
+    const password = document.getElementById('exportPassword');
+    button.disabled = true;
+    status.textContent = 'Verifying credentials and preparing the workbook...';
+    try {
+        const datasets = [...form.querySelectorAll('input[name="datasets"]:checked')]
+            .map(input => input.value);
+        const response = await fetch('/api/admin/export', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken()
+            },
+            body: JSON.stringify({
+                username: document.getElementById('exportUsername').value.trim(),
+                password: password.value,
+                datasets
+            })
+        });
+        if (!response.ok) {
+            const result = await response.json().catch(() => ({}));
+            throw new Error(result.error || `Export failed (${response.status}).`);
+        }
+        const objectUrl = URL.createObjectURL(await response.blob());
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = 'devmonitor-database-export.xlsx';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+        status.textContent = 'Export downloaded successfully.';
+        showToast('Database export completed and recorded in the audit log.');
+    } catch (error) {
+        status.textContent = error.message;
+        showToast(error.message, 'danger');
+    } finally {
+        password.value = '';
+        button.disabled = false;
+    }
+}
+
 function initAdminPage() {
+    document.getElementById('adminExportForm')?.addEventListener(
+        'submit',
+        exportAdminDatabase
+    );
     document.getElementById('usersPanel')?.addEventListener('shown.bs.collapse', () => {
         if (!usersLoaded) refreshUsers().catch(error => showToast(error.message, 'danger'));
     });
@@ -1345,6 +1405,7 @@ async function deactivateSelectedUser() {
 }
 
 function initDashboard(notifyOnError = true) {
+    const scanCompleted = new URLSearchParams(window.location.search).get('scan');
     if (dashboardRefreshPromise) return dashboardRefreshPromise;
     dashboardRefreshPromise = (async () => {
       try {
@@ -1372,9 +1433,13 @@ function initDashboard(notifyOnError = true) {
                     style="color:${color}">
                     ${escapeHTML(value)}
                 </a></td>
-                <td>${escapeHTML(device.status)}</td></tr>`;
+                <td>${deviceStatusBadge(device.status)}</td></tr>`;
         }).join('') :
             '<tr><td colspan="7" class="text-center text-muted py-4">No registered devices yet.</td></tr>';
+        if (scanCompleted === 'complete') {
+            showToast('Device scan completed successfully. Dashboard data is up to date.');
+            window.history.replaceState({}, '', window.location.pathname);
+        }
       } catch (error) {
         if (notifyOnError) showToast(error.message, 'danger');
       }

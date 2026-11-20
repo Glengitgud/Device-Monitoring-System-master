@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import platform
+import re
 import socket
 import ssl
 import sys
@@ -24,8 +25,8 @@ import psutil
 
 REGISTRATION_TOKEN = "__REGISTRATION_TOKEN__"
 SUBMISSION_URL = "__SUBMISSION_URL__"
-DIAGNOSTIC_RUN_ID = "__DIAGNOSTIC_RUN_ID__"
-DIAGNOSTIC_TOKEN = "__DIAGNOSTIC_TOKEN__"
+SCAN_RUN_ID = "__SCAN_RUN_ID__"
+SCAN_TOKEN = "__SCAN_TOKEN__"
 DASHBOARD_URL = "__DASHBOARD_URL__"
 UNAVAILABLE = "Unavailable"
 LOGGER = logging.getLogger("devmonitor.device_agent")
@@ -51,6 +52,7 @@ FIELD_LABELS = (
     ("Operating system version", "operating_system_version"),
     ("Installed network adapters", "network_adapters"),
     ("IP address", "ip_addresses"),
+    ("MAC address", "mac_address"),
 )
 
 
@@ -232,8 +234,18 @@ def _collect_network():
     addresses = psutil.net_if_addrs()
     adapters = sorted(name for name in addresses if name.strip())
     ip_addresses = set()
+    mac_addresses = []
+    link_family = getattr(psutil, "AF_LINK", None)
     for interface_addresses in addresses.values():
         for address in interface_addresses:
+            if link_family is not None and address.family == link_family:
+                candidate = address.address.strip().replace("-", ":")
+                if (
+                    re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", candidate)
+                    and candidate != "00:00:00:00:00:00"
+                ):
+                    mac_addresses.append(candidate.upper())
+                continue
             if address.family not in {socket.AF_INET, socket.AF_INET6}:
                 continue
             candidate = address.address.split("%", 1)[0]
@@ -247,6 +259,7 @@ def _collect_network():
     return {
         "network_adapters": adapters or [UNAVAILABLE],
         "ip_addresses": sorted(ip_addresses),
+        "mac_address": sorted(set(mac_addresses))[0] if mac_addresses else None,
     }
 
 
@@ -260,9 +273,9 @@ def _collect_component(name, collector, fallback):
 
 def _show_log_location(log_path):
     if log_path:
-        print(f"Diagnostic log: {log_path}")
+        print(f"Device Agent log: {log_path}")
     else:
-        print("Diagnostic details were written to the console.", file=sys.stderr)
+        print("Device Agent details were written to the console.", file=sys.stderr)
 
 
 def _unavailable_specification_fields(specifications):
@@ -1025,121 +1038,6 @@ def _health_issue(title, score, description, root_cause, recommendation, steps):
     }
 
 
-def show_health_window(report, title="Device health assessment"):
-    """Display accessible circular scores and actionable local findings."""
-    import tkinter as tk
-    from tkinter.scrolledtext import ScrolledText
-
-    try:
-        root = tk.Tk()
-    except tk.TclError as error:
-        raise RuntimeError("A graphical desktop is unavailable.") from error
-    root.title(title)
-    root.geometry("860x690")
-    root.minsize(680, 560)
-    root.configure(background="#0d0221")
-    root.option_add("*Font", "{Segoe UI} 10")
-    tk.Label(
-        root,
-        text="Device health overview",
-        font=("Segoe UI", 19, "bold"),
-        foreground="#f8fafc",
-        background="#0d0221",
-    ).pack(anchor="w", padx=24, pady=(22, 2))
-    tk.Label(
-        root,
-        text=(
-            f"Overall {report['scores']['overall'] if report['scores']['overall'] is not None else 'N/A'}%  ·  "
-            f"Hardware {report['scores']['hardware'] if report['scores']['hardware'] is not None else 'N/A'}%  ·  "
-            f"Software {report['scores']['software'] if report['scores']['software'] is not None else 'N/A'}%  ·  "
-            f"Drivers {report['scores']['drivers'] if report['scores']['drivers'] is not None else 'N/A'}%  "
-            "— one-time checks on this computer; guidance, not continuous monitoring."
-        ),
-        foreground="#cbd5e1",
-        background="#0d0221",
-        wraplength=800,
-        justify="left",
-    ).pack(anchor="w", padx=24, pady=(0, 14))
-
-    gauges = _health_gauges(report["scores"])
-    gauge_frame = tk.Frame(root, background="#0d0221")
-    gauge_frame.pack(fill="x", padx=16)
-    for index, (label, score) in enumerate(gauges):
-        card = tk.Frame(
-            gauge_frame,
-            background="#120636",
-            highlightbackground="#334155",
-            highlightthickness=1,
-        )
-        card.grid(row=index // 4, column=index % 4, padx=6, pady=6, sticky="nsew")
-        gauge_frame.grid_columnconfigure(index % 4, weight=1)
-        canvas = tk.Canvas(card, width=112, height=112, background="#120636", highlightthickness=0)
-        canvas.pack(padx=8, pady=(10, 0))
-        canvas.create_oval(12, 12, 100, 100, outline="#334155", width=9)
-        color, state = _health_band(score)
-        if score is not None:
-            canvas.create_arc(
-                12, 12, 100, 100, start=90, extent=-score * 3.6,
-                style="arc", outline=color, width=9,
-            )
-            score_text = f"{score}%"
-        else:
-            score_text = "N/A"
-        canvas.create_text(56, 49, text=score_text, fill="#f8fafc", font=("Segoe UI", 17, "bold"))
-        tk.Label(
-            card,
-            text=label,
-            foreground="#f8fafc",
-            background="#120636",
-            wraplength=135,
-        ).pack(padx=5, pady=(3, 0))
-        tk.Label(
-            card,
-            text=state,
-            foreground=color,
-            background="#120636",
-            font=("Segoe UI", 9, "bold"),
-        ).pack(padx=5, pady=(0, 10))
-
-    actions = ScrolledText(
-        root, height=13, wrap="word", background="#120636",
-        foreground="#e2e8f0", insertbackground="#ffffff",
-        relief="flat", padx=12, pady=10,
-    )
-    actions.pack(fill="both", expand=True, padx=24, pady=12)
-    if report["issues"]:
-        for issue in report["issues"]:
-            actions.insert(
-                "end",
-                f"{issue['severity'].upper()} — {issue['title']}\n"
-                f"{issue['description']}\nCause: {issue['root_cause']}\n"
-                f"Suggested action: {issue['recommendation']}\n"
-                + "\n".join(f"  {step}. {instruction}" for step, instruction in enumerate(issue["steps"], 1))
-                + "\n\n",
-            )
-    else:
-        actions.insert("end", "No issues requiring attention were identified by the supported checks.\n\n")
-    skipped = [
-        check["name"] for check in report["checks"] if check["status"] == "skipped"
-    ]
-    if skipped:
-        actions.insert("end", "Not assessed: " + ", ".join(skipped) + "\n")
-    actions.configure(state="disabled")
-    tk.Button(
-        root,
-        text="Continue",
-        command=root.destroy,
-        background="#3458a8",
-        foreground="#ffffff",
-        activebackground="#26408b",
-        activeforeground="#ffffff",
-        relief="flat",
-        padx=24,
-        pady=9,
-    ).pack(anchor="e", padx=24, pady=(0, 18))
-    root.mainloop()
-
-
 def show_registration_success():
     import tkinter as tk
 
@@ -1234,6 +1132,7 @@ def collect_specifications():
         "operating_system_version": platform.version() or UNAVAILABLE,
         "network_adapters": [UNAVAILABLE],
         "ip_addresses": [],
+        "mac_address": None,
     }
 
     memory = _collect_component("memory", _collect_memory, {})
@@ -1273,9 +1172,9 @@ def display_value(key, value):
 
 def main():
     log_path = configure_logging()
-    diagnostic_mode = (
-        DIAGNOSTIC_RUN_ID not in {"__DIAGNOSTIC_RUN_ID__", ""}
-        or "/api/device-agent/diagnostics/" in SUBMISSION_URL
+    scanner_mode = (
+        SCAN_RUN_ID not in {"__SCAN_RUN_ID__", ""}
+        or "/api/device-agent/scans/" in SUBMISSION_URL
     )
     try:
         specifications = collect_specifications()
@@ -1286,29 +1185,20 @@ def main():
         return 1
 
     report = collect_health_report(specifications)
-    if diagnostic_mode:
-        try:
-            show_health_window(report)
-        except (ImportError, OSError, RuntimeError) as error:
-            LOGGER.exception("The graphical health overview could not be displayed.")
-            print(f"Health overview window unavailable: {error}", file=sys.stderr)
-
-    print("\nDetected device specifications (review before submission):")
-    for label, key in FIELD_LABELS:
-        value = specifications.get(key)
-        if (
-            key in {"storage_total_bytes", "storage_available_bytes"}
-            and not specifications["storage_devices"]
-        ):
-            value = UNAVAILABLE
-        print(f"  {label}: {display_value(key, value)}")
-    _show_log_location(log_path)
-
-    if diagnostic_mode:
-        print("\nSubmitting endpoint diagnostic report to DevMonitor...")
-        payload = {"report": report}
-        authorization_token = DIAGNOSTIC_TOKEN
+    if scanner_mode:
+        payload = {"report": report, "specifications": specifications}
+        authorization_token = SCAN_TOKEN
     else:
+        print("\nDetected device specifications (review before submission):")
+        for label, key in FIELD_LABELS:
+            value = specifications.get(key)
+            if (
+                key in {"storage_total_bytes", "storage_available_bytes"}
+                and not specifications["storage_devices"]
+            ):
+                value = UNAVAILABLE
+            print(f"  {label}: {display_value(key, value)}")
+        _show_log_location(log_path)
         name = input(f"\nDevice name for DevMonitor [{platform.node()}]: ").strip()
         name = name or platform.node()
         if not name or len(name) > 120:
@@ -1333,10 +1223,10 @@ def main():
 
     try:
         payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
-        report_keys = sorted(report.keys()) if diagnostic_mode and isinstance(report, dict) else []
+        report_keys = sorted(report.keys()) if scanner_mode and isinstance(report, dict) else []
         LOGGER.info(
             "Submitting payload (mode=%s, url=%s, payload_keys=%s, report_keys=%s).",
-            "diagnostic" if diagnostic_mode else "registration",
+            "scanner" if scanner_mode else "registration",
             SUBMISSION_URL,
             payload_keys,
             report_keys,
@@ -1358,7 +1248,7 @@ def main():
             response_status,
             sorted(result.keys()) if isinstance(result, dict) else [],
         )
-        response_key = "run_id" if diagnostic_mode else "device_id"
+        response_key = "run_id" if scanner_mode else "device_id"
         if not isinstance(result, dict) or response_key not in result:
             raise ValueError("The server returned an invalid submission response.")
     except urllib.error.HTTPError as error:
@@ -1378,9 +1268,8 @@ def main():
         _show_log_location(log_path)
         return 1
 
-    if diagnostic_mode:
-        LOGGER.info("Diagnostic report submitted (run_id=%s).", result["run_id"])
-        print(f"Diagnostic report submitted (Run ID: {result['run_id']}).")
+    if scanner_mode:
+        LOGGER.info("Device scan submitted (run_id=%s).", result["run_id"])
     else:
         LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
         print(f"Device Registered Successfully (Device ID: {result['device_id']}).")

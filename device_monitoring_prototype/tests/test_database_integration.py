@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
 import hmac
+import io
 import json
 import smtplib
 import socket
@@ -34,6 +35,7 @@ from device_monitoring_prototype.models import (
     DeviceRegistrationToken,
     DeviceMetric,
     DiagnosticRun,
+    DeviceSpecification,
     EmailVerification,
     Log,
     NetworkInterface,
@@ -1609,7 +1611,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             return_value=b"MZ-test-agent",
         ) as build_agent:
             response = self.client.post(
-                f"/api/devices/{device_id}/diagnostics",
+                f"/api/devices/{device_id}/scan",
                 headers={"X-CSRF-Token": token},
             )
         self.assertEqual(response.status_code, 200)
@@ -1617,7 +1619,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             response.mimetype, "application/vnd.microsoft.portable-executable"
         )
         self.assertIn("attachment", response.headers["Content-Disposition"])
-        self.assertEqual(build_agent.call_args.kwargs["mode"], "diagnostic")
+        self.assertEqual(build_agent.call_args.kwargs["mode"], "scanner")
         history = self.client.get(f"/api/devices/{device_id}/history")
         self.assertEqual(len(history.json["diagnostics"]), 1)
         self.assertEqual(len(history.json["network"]), 1)
@@ -1625,7 +1627,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         run = history.json["diagnostics"][0]
         self.assertEqual(run["status"], "running")
         self.assertIsNone(run["scores"]["overall"])
-        run_id = int(response.headers["X-Diagnostic-Run-ID"])
+        run_id = int(response.headers["X-Scan-Run-ID"])
         specifications = {
             "storage_devices": [
                 {"name": "C:\\", "total_bytes": 1000, "available_bytes": 300}
@@ -1661,16 +1663,34 @@ class DatabaseIntegrationTest(unittest.TestCase):
             ),
         ):
             report = device_agent.collect_health_report(specifications)
-        diagnostic_token = build_agent.call_args.kwargs["diagnostic_token"]
+        scan_token = build_agent.call_args.kwargs["scan_token"]
+        scan_specifications = {
+            "cpu_name": "Scanned CPU",
+            "cpu_cores": 4,
+            "ram_capacity_bytes": 8 * 1024**3,
+            "ram_usage_bytes": 2 * 1024**3,
+            "storage_devices": [
+                {"name": "C:\\", "total_bytes": 1000, "available_bytes": 300}
+            ],
+            "storage_total_bytes": 1000,
+            "storage_available_bytes": 300,
+            "gpu_information": ["Test GPU"],
+            "motherboard_brand": "Test Board",
+            "operating_system_name": "Windows 11",
+            "operating_system_version": "Test build",
+            "network_adapters": ["Ethernet"],
+            "ip_addresses": ["192.0.2.10"],
+            "mac_address": "02:1A:2B:3C:4D:5E",
+        }
         report_response = self.client.post(
-            f"/api/device-agent/diagnostics/{run_id}",
-            headers={"Authorization": f"Bearer {diagnostic_token}"},
-            json={"report": report},
+            f"/api/device-agent/scans/{run_id}",
+            headers={"Authorization": "Bearer " + scan_token},
+            json={"report": report, "specifications": scan_specifications},
         )
         self.assertEqual(report_response.status_code, 201, report_response.json)
         self.assertEqual(report_response.json["status"], "completed")
         status_response = self.client.get(
-            f"/api/devices/{device_id}/diagnostics/{run_id}"
+            f"/api/devices/{device_id}/scans/{run_id}"
         )
         self.assertEqual(status_response.status_code, 200)
         self.assertEqual(status_response.json["status"], "completed")
@@ -1711,7 +1731,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b"192.0.2.10", specifications_page.data)
         retry_response = self.client.post(
             f"/api/device-agent/diagnostics/{run_id}",
-            headers={"Authorization": f"Bearer {diagnostic_token}"},
+            headers={"Authorization": "Bearer " + scan_token},
             json={"report": report},
         )
         self.assertEqual(retry_response.status_code, 400)
@@ -1734,6 +1754,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "view_mode",
                 "device_name",
                 "device_type",
+                "mac_address",
                 "operating_system",
                 "status",
                 "ip_address",
@@ -1741,21 +1762,25 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "registered_at",
             },
         )
-        self.assertEqual(details.json["specification"]["cpu_model"], "Test CPU")
+        self.assertEqual(details.json["mac_address"], "02:1A:2B:3C:4D:5E")
+        self.assertEqual(details.json["specification"]["cpu_model"], "Scanned CPU")
         self.assertEqual(details.json["specification"]["cpu_cores"], 4)
         with self.app.app_context():
             device = db.session.get(Device, device_id)
+            self.assertEqual(device.mac_address, "02:1A:2B:3C:4D:5E")
+            self.assertEqual(device.status, "online")
+            self.assertIsNotNone(device.last_seen_at)
             self.assertEqual(DiagnosticRun.query.count(), 2)
-            self.assertEqual(NetworkRecord.query.count(), 2)
+            self.assertEqual(NetworkRecord.query.count(), 3)
             self.assertEqual(
                 Log.query.filter(Log.device_id == device_id).count(), 3
             )
             self.assertEqual(
                 {entry.event for entry in device.logs} & {
-                    "Endpoint diagnostics started",
-                    "Endpoint diagnostics completed",
+                    "Device scan started",
+                    "Device scan completed",
                 },
-                {"Endpoint diagnostics started", "Endpoint diagnostics completed"},
+                {"Device scan started", "Device scan completed"},
             )
             self.assertEqual(len(device.network_interfaces), 1)
             self.assertEqual(len(device.metric_samples), 1)
@@ -1847,6 +1872,12 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(self.client.get("/api/users").status_code, 403)
         denied_logs = self.client.get("/api/admin/logs")
         self.assertEqual(denied_logs.status_code, 403)
+        denied_export = self.client.post(
+            "/api/admin/export",
+            headers={"X-CSRF-Token": token},
+            json={"username": "testuser", "password": "nope", "datasets": ["users"]},
+        )
+        self.assertEqual(denied_export.status_code, 403)
         self.assertEqual(
             denied_logs.json["error"],
             "Administrator access is required for this action.",
@@ -2070,6 +2101,157 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(device_logs.status_code, 200, device_logs.get_data(as_text=True))
         self.assertTrue(any("updated" in entry["event"].lower() for entry in device_logs.json))
 
+    def test_stale_devices_transition_to_offline_and_are_audited(self):
+        self.register_and_login()
+        last_seen = datetime.now(timezone.utc) - timedelta(minutes=6)
+        with self.app.app_context():
+            owner = User.query.filter_by(username="testuser").one()
+            device = Device(
+                asset_tag="DM-STALE-DEVICE",
+                device_name="Stale Device",
+                hostname="stale-device",
+                device_type="Laptop",
+                status="online",
+                is_verified=True,
+                owner=owner,
+                registered_by=owner,
+                registered_at=last_seen,
+                last_seen_at=last_seen,
+            )
+            db.session.add(device)
+            db.session.commit()
+            device_id = device.id
+
+        response = self.client.get("/api/devices")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json[0]["status"], "Offline")
+        details = self.client.get(f"/api/devices/{device_id}")
+        self.assertEqual(details.status_code, 200)
+        self.assertEqual(details.json["status"], "offline")
+        with self.app.app_context():
+            self.assertEqual(
+                ActivityLog.query.filter_by(
+                    event_type="device.status_offline",
+                    entity_id=device_id,
+                ).count(),
+                1,
+            )
+            self.assertEqual(
+                Log.query.filter_by(
+                    device_id=device_id,
+                    event="Device status changed to offline",
+                ).count(),
+                1,
+            )
+
+    def test_admin_excel_export_requires_fresh_credentials_and_is_audited(self):
+        with self.app.app_context():
+            administrator = User(
+                username="rootadmin",
+                email="admin@example.com",
+                full_name="Root Admin",
+                password_hash=generate_password_hash("admin-password-long-enough"),
+                status="active",
+                email_verified=True,
+            )
+            administrator.roles.append(
+                Role.query.filter_by(name="Administrator").one()
+            )
+            db.session.add(administrator)
+            db.session.flush()
+            device = Device(
+                asset_tag="DM-EXPORT-DEVICE",
+                device_name="Export Device",
+                hostname="export-device",
+                device_type="Laptop",
+                operating_system="Windows",
+                mac_address="02:1A:2B:3C:4D:5E",
+                status="online",
+                owner=administrator,
+                registered_by=administrator,
+            )
+            device.hardware_spec = DeviceSpecification(
+                cpu_model="Export CPU",
+                memory_bytes=1024,
+                network_adapters=["Ethernet"],
+            )
+            db.session.add(device)
+            db.session.flush()
+            db.session.add(
+                DeviceMetric(device=device, cpu_percent=12.5, memory_percent=30)
+            )
+            db.session.commit()
+
+        self.client.get("/login")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        login = self.client.post(
+            "/login",
+            data={
+                "csrf_token": csrf,
+                "username": "rootadmin",
+                "password": "admin-password-long-enough",
+            },
+        )
+        self.assertEqual(login.status_code, 302)
+        self.client.get("/admin")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        request_data = {
+            "username": "rootadmin",
+            "password": "wrong-password",
+            "datasets": [
+                "users",
+                "devices",
+                "device_information",
+                "audit_logs",
+                "monitoring_data",
+            ],
+        }
+        denied = self.client.post(
+            "/api/admin/export",
+            headers={"X-CSRF-Token": csrf},
+            json=request_data,
+        )
+        self.assertEqual(denied.status_code, 403)
+        request_data["password"] = "admin-password-long-enough"
+        exported = self.client.post(
+            "/api/admin/export",
+            headers={"X-CSRF-Token": csrf},
+            json=request_data,
+        )
+        self.assertEqual(exported.status_code, 200)
+        self.assertIn("no-store", exported.headers["Cache-Control"])
+        self.assertEqual(
+            exported.mimetype,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(io.BytesIO(exported.data), read_only=True)
+        self.assertEqual(
+            workbook.sheetnames,
+            ["Users", "Devices", "Device Information", "Audit Logs", "Monitoring Data"],
+        )
+        self.assertEqual(workbook["Devices"]["E2"].value, "02:1A:2B:3C:4D:5E")
+        self.assertEqual(workbook["Device Information"]["B2"].value, "Export CPU")
+        self.assertEqual(workbook["Monitoring Data"]["D2"].value, 12.5)
+        with self.app.app_context():
+            events = {
+                entry.event_type
+                for entry in ActivityLog.query.filter(
+                    ActivityLog.event_type.like("admin.database_export_%")
+                )
+            }
+            self.assertEqual(
+                events,
+                {
+                    "admin.database_export_denied",
+                    "admin.database_export_started",
+                    "admin.database_exported",
+                },
+            )
+
     def test_admin_can_create_users_and_role_changes_are_server_checked(self):
         with self.app.app_context():
             administrator = User(
@@ -2260,6 +2442,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             "operating_system_version": "10.0.26100",
             "network_adapters": ["Ethernet"],
             "ip_addresses": ["192.0.2.15", "2001:db8::1"],
+            "mac_address": "02:1A:2B:3C:4D:5E",
         }
         payload = {
             "name": "Test Desktop",
@@ -2281,6 +2464,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             {**specifications, "ip_addresses": ["not-an-ip"]},
             {**specifications, "storage_total_bytes": 1},
             {**specifications, "cpu_cores": 513},
+            {**specifications, "mac_address": "not-a-mac-address"},
             {**specifications, "unexpected": "field"},
         ]
         for invalid_spec in invalid_specifications:
@@ -2303,9 +2487,17 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(consumed_status.status_code, 200)
         self.assertEqual(consumed_status.json["status"], "used")
+        self.assertEqual(
+            consumed_status.json["device"]["mac_address"],
+            "02:1A:2B:3C:4D:5E",
+        )
         details = self.client.get(f"/api/devices/{device_id}")
         self.assertEqual(details.status_code, 200)
         self.assertEqual(details.json["specification"]["cpu_model"], "Example CPU")
+        self.assertEqual(details.json["mac_address"], "02:1A:2B:3C:4D:5E")
+        self.assertEqual(
+            details.json["specification"]["mac_address"], "02:1A:2B:3C:4D:5E"
+        )
         self.assertEqual(
             details.json["specification"]["ram_usage_bytes"], 8 * 1024**3
         )
@@ -2326,12 +2518,15 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(specifications_page.status_code, 200)
         self.assertIn(b"Detected Device Specifications", specifications_page.data)
         self.assertIn(b"Example Board", specifications_page.data)
+        self.assertIn(b"MAC Address", specifications_page.data)
+        self.assertIn(b"02:1A:2B:3C:4D:5E", specifications_page.data)
         self.assertIn(b"Device registered with QR-based agent", specifications_page.data)
         with self.app.app_context():
             device = db.session.get(Device, device_id)
             self.assertEqual(device.owner.username, "testuser")
             self.assertEqual(device.registered_by.id, device.owner_user_id)
             self.assertEqual(device.status, "online")
+            self.assertEqual(device.mac_address, "02:1A:2B:3C:4D:5E")
             self.assertIsNotNone(device.registered_at)
             self.assertIsNotNone(device.updated_at)
             self.assertEqual(device.network_records[0].ip_address, "192.0.2.15")
@@ -2341,6 +2536,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             self.assertIsNotNone(token_record.used_at)
             self.assertEqual(token_record.device_id, device.id)
             self.assertEqual(token_record.user_id, device.owner_user_id)
+            self.assertEqual(token_record.mac_address, "02:1A:2B:3C:4D:5E")
 
         replay = agent_client.post(
             "/api/device-agent/enroll",
@@ -2466,6 +2662,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             "operating_system_version": "10.0.26100",
             "network_adapters": ["Ethernet"],
             "ip_addresses": ["192.0.2.20"],
+            "mac_address": "02:1A:2B:3C:4D:5E",
         }
         with patch.dict(
             device_agent.collect_specifications.__globals__,
@@ -2512,6 +2709,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
                     return_value={
                         "network_adapters": ["Ethernet"],
                         "ip_addresses": ["192.0.2.20"],
+                        "mac_address": "02:1A:2B:3C:4D:5E",
                     },
                 ),
             ):
@@ -2559,6 +2757,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
                     return_value={
                         "network_adapters": ["Ethernet"],
                         "ip_addresses": ["192.0.2.20"],
+                        "mac_address": "02:1A:2B:3C:4D:5E",
                     },
                 ),
             ):
@@ -2623,6 +2822,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(network["network_adapters"], ["Ethernet", "Loopback"])
         self.assertEqual(network["ip_addresses"], ["192.0.2.20"])
+        self.assertIsNone(network["mac_address"])
 
     def test_collection_failures_are_logged_and_reported_as_unavailable(self):
         def fail_gpu_collection():
@@ -2677,7 +2877,6 @@ class DatabaseIntegrationTest(unittest.TestCase):
         with (
             patch.object(device_agent, "configure_logging", return_value="agent.log"),
             patch.object(device_agent, "collect_specifications", return_value=specifications),
-            patch.object(device_agent, "show_health_window"),
             patch.object(device_agent, "show_registration_success"),
             patch.object(device_agent.platform, "node", return_value="endpoint-host"),
             patch.object(device_agent, "input", side_effect=["", "Laptop", "yes"], create=True),
@@ -2703,6 +2902,58 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(request_holder["request"].full_url, "https://devmonitor.example/api/device-agent/enroll")
         self.assertEqual(request_holder["timeout"], 30)
+
+    def test_scanner_submits_inventory_and_health_silently(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"run_id": 8, "status": "completed"}'
+        request_holder = {}
+        specifications = {"cpu_name": "Scanner CPU", "mac_address": "02:1A:2B:3C:4D:5E"}
+        report = {"summary": "All supported checks completed."}
+
+        def capture_request(request, timeout):
+            request_holder["request"] = request
+            request_holder["timeout"] = timeout
+            return response
+
+        with (
+            patch.object(device_agent, "configure_logging", return_value="agent.log"),
+            patch.object(device_agent, "collect_specifications", return_value=specifications),
+            patch.object(device_agent, "collect_health_report", return_value=report),
+            patch.object(device_agent, "SCAN_RUN_ID", "8"),
+            patch.object(device_agent, "SCAN_TOKEN", "s" * 43),
+            patch.object(
+                device_agent,
+                "SUBMISSION_URL",
+                "https://devmonitor.example/api/device-agent/scans/8",
+            ),
+            patch.object(
+                device_agent,
+                "DASHBOARD_URL",
+                "https://devmonitor.example/dashboard",
+            ),
+            patch.object(
+                device_agent.urllib.request, "urlopen", side_effect=capture_request
+            ),
+            patch("builtins.print") as print_output,
+        ):
+            result = device_agent.main()
+
+        submitted = json.loads(request_holder["request"].data)
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            submitted,
+            {"report": report, "specifications": specifications},
+        )
+        self.assertEqual(
+            request_holder["request"].full_url,
+            "https://devmonitor.example/api/device-agent/scans/8",
+        )
+        self.assertEqual(
+            request_holder["request"].get_header("Authorization"),
+            f"Bearer {'s' * 43}",
+        )
+        print_output.assert_not_called()
 
     def test_exe_download_reports_packaging_failure_without_python_fallback(self):
         csrf = self.register_and_login()

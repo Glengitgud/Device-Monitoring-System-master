@@ -226,6 +226,7 @@ class Device(db.Model):
     hostname = db.Column(db.String(255), nullable=False)
     device_type = db.Column(db.String(64), nullable=False)
     serial_number = db.Column(db.String(128), unique=True)
+    mac_address = db.Column(db.String(17))
     manufacturer = db.Column(db.String(120))
     model = db.Column(db.String(120))
     operating_system = db.Column(db.String(120))
@@ -374,6 +375,7 @@ class DeviceRegistrationToken(db.Model):
     device_id = db.Column(
         ID_TYPE, db.ForeignKey("devices.id", ondelete="SET NULL"), unique=True
     )
+    mac_address = db.Column(db.String(17))
     created_at = db.Column(
         db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )

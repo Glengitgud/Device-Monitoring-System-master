@@ -11,6 +11,38 @@ from device_monitoring_prototype.agent_builder import (
 
 
 class DeviceAgentBuilderTest(unittest.TestCase):
+    def test_builds_a_silent_scanner_executable_with_scan_authorization(self):
+        captured = {}
+
+        def fake_build(command, **kwargs):
+            source_path = Path(command[-1])
+            captured["source"] = source_path.read_text(encoding="utf-8")
+            captured["command"] = command
+            dist_dir = Path(command[command.index("--distpath") + 1])
+            dist_dir.mkdir(parents=True)
+            (dist_dir / "devmonitor-device-scanner.exe").write_bytes(b"MZscan")
+            return SimpleNamespace(returncode=0)
+
+        with patch(
+            "device_monitoring_prototype.agent_builder.subprocess.run",
+            side_effect=fake_build,
+        ):
+            executable = build_agent_executable(
+                None,
+                "https://devmonitor.example/api/device-agent/scans/8",
+                mode="scanner",
+                scan_run_id=8,
+                scan_token="s" * 43,
+                dashboard_url="https://devmonitor.example/dashboard",
+            )
+
+        self.assertEqual(executable, b"MZscan")
+        self.assertIn("SCAN_RUN_ID = \"8\"", captured["source"])
+        self.assertIn("SCAN_TOKEN = ", captured["source"])
+        self.assertIn("--noconsole", captured["command"])
+        self.assertNotIn("--console", captured["command"])
+        self.assertIn("devmonitor-device-scanner", captured["command"])
+
     def test_builds_a_windows_executable_with_enrollment_settings(self):
         registration_token = "a" * 43
         submission_url = "https://devmonitor.example/api/device-agent/enroll"

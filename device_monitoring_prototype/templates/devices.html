@@ -212,7 +212,7 @@
     </div>
 </div>
 
-<!-- Endpoint diagnostics run on the Windows device agent, not on the web server. -->
+<!-- The one-time Device Scanner runs on the endpoint and submits results to the website. -->
 <div class="modal fade" id="scanModal" tabindex="-1" aria-hidden="true"
      data-bs-backdrop="static">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -228,21 +228,21 @@
                 <!-- Scan Progress Section (shown during scan) -->
                 <div id="scanProgress" class="text-center">
                     <div class="spinner-border text-primary mb-3" role="status">
-                        <span class="visually-hidden">Preparing diagnostics...</span>
+                        <span class="visually-hidden">Preparing the Device Scanner...</span>
                     </div>
                     <p class="fw-semibold" id="scanProgressText">
-                        Preparing a secure diagnostic agent...
+                        Preparing the Device Scanner...
                     </p>
                     <p class="text-muted mb-0">
-                        Download and run the EXE on the device being diagnosed. The
-                        agent submits results directly to DevMonitor and this page will
-                        update automatically.
+                        Download and run the scanner on this device. It collects device
+                        information and health once, submits results to DevMonitor, and
+                        updates the website automatically.
                     </p>
                 </div>
                 <div id="scanDownloadInstructions" class="alert alert-info d-none"
                      role="status" aria-live="polite">
                     <i class="bi bi-download me-2" aria-hidden="true"></i>
-                    Run the downloaded EXE on the device being diagnosed.
+                    Run the downloaded Device Scanner.
                     <span id="scanRunStatus">Waiting for the agent...</span>
                     <button type="button" class="btn btn-sm btn-outline-primary ms-2 d-none"
                             id="scanRetryBtn">Check report again</button>
@@ -261,7 +261,7 @@
 </div>
 
 {% include "_device_scan_success_modal.html" %}
-{% include "_device_diagnostic_success_modal.html" %}
+{% include "_device_scan_complete_modal.html" %}
 
 <!-- ======================================================
      DELETE DEVICE CONFIRMATION MODAL

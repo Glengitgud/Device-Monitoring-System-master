@@ -9,3 +9,4 @@ qrcode==8.2
 python-dotenv==1.0.1
 bcrypt==5.0.0
 PyInstaller==6.17.0
+openpyxl==3.1.5

@@ -17,21 +17,21 @@ def build_agent_executable(
     submission_url,
     *,
     mode="registration",
-    diagnostic_run_id="",
-    diagnostic_token="",
+    scan_run_id="",
+    scan_token="",
     dashboard_url="",
 ):
-    if mode not in {"registration", "diagnostic"}:
+    if mode not in {"registration", "scanner"}:
         raise DeviceAgentBuildError("The Device Agent mode is invalid.")
     if mode == "registration" and not re.fullmatch(
         r"[A-Za-z0-9_-]{40,64}", registration_token or ""
     ):
         raise DeviceAgentBuildError("The device registration token is invalid.")
-    if mode == "diagnostic" and (
-        not str(diagnostic_run_id).isdigit()
-        or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", diagnostic_token or "")
+    if mode == "scanner" and (
+        not str(scan_run_id).isdigit()
+        or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", scan_token or "")
     ):
-        raise DeviceAgentBuildError("The diagnostic authorization is invalid.")
+        raise DeviceAgentBuildError("The scan authorization is invalid.")
     if sys.platform != "win32":
         raise DeviceAgentBuildError(
             "The Windows agent must be built on a Windows application host."
@@ -47,8 +47,8 @@ def build_agent_executable(
     replacements = {
         "__REGISTRATION_TOKEN__": registration_token or "",
         "__SUBMISSION_URL__": submission_url,
-        "__DIAGNOSTIC_RUN_ID__": str(diagnostic_run_id or ""),
-        "__DIAGNOSTIC_TOKEN__": diagnostic_token or "",
+        "__SCAN_RUN_ID__": str(scan_run_id or ""),
+        "__SCAN_TOKEN__": scan_token or "",
         "__DASHBOARD_URL__": dashboard_url or "",
     }
     for placeholder, value in replacements.items():
@@ -67,11 +67,11 @@ def build_agent_executable(
                 "-m",
                 "PyInstaller",
                 "--onefile",
-                "--console",
+                "--console" if mode == "registration" else "--noconsole",
                 "--clean",
                 "--noconfirm",
                 "--name",
-                "devmonitor-device-agent",
+                "devmonitor-device-agent" if mode == "registration" else "devmonitor-device-scanner",
                 "--distpath",
                 str(dist_dir),
                 "--workpath",
@@ -94,7 +94,12 @@ def build_agent_executable(
                     "The Windows agent executable could not be built."
                 ) from error
 
-            executable = dist_dir / "devmonitor-device-agent.exe"
+            executable_name = (
+                "devmonitor-device-agent.exe"
+                if mode == "registration"
+                else "devmonitor-device-scanner.exe"
+            )
+            executable = dist_dir / executable_name
             if not executable.is_file():
                 raise DeviceAgentBuildError(
                     "The Windows agent build did not produce an executable."

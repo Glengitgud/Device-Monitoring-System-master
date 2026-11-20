@@ -13,8 +13,14 @@ from device_monitoring_prototype.models import (
     ActivityLog,
     DiagnosticCheck,
     DiagnosticRun,
+    DeviceSpecification,
     Log,
+    NetworkRecord,
     db,
+)
+from device_monitoring_prototype.services import (
+    ValidationError,
+    validate_detected_specifications,
 )
 
 DIAGNOSTIC_TOKEN_LIFETIME = timedelta(minutes=15)
@@ -40,11 +46,11 @@ def create_diagnostic_run(device, user):
         started_at=datetime.now(timezone.utc),
     )
     db.session.add(run)
-    db.session.add(Log(device_id=device.id, event="Endpoint diagnostics started"))
+    db.session.add(Log(device_id=device.id, event="Device scan started"))
     db.session.add(
         ActivityLog(
             actor_user_id=user.id,
-            event_type="device.diagnostics_started",
+            event_type="device.scan_started",
             entity_type="device",
             entity_id=device.id,
             details={"device_name": device.device_name},
@@ -150,8 +156,13 @@ def validate_health_report(report):
     return report
 
 
-def complete_diagnostic_run(run_id, token, report):
+def complete_diagnostic_run(run_id, token, report, specifications=None):
     report = validate_health_report(report)
+    if specifications is not None:
+        try:
+            specifications = validate_detected_specifications(specifications)
+        except ValidationError as error:
+            raise DiagnosticValidationError(str(error)) from error
     if not isinstance(token, str) or not token:
         raise DiagnosticValidationError("A diagnostic authorization token is required.")
     expected_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -207,6 +218,41 @@ def complete_diagnostic_run(run_id, token, report):
         db.session.rollback()
         raise DiagnosticValidationError("This diagnostic run has already been submitted.")
 
+    if specifications is not None:
+        device = run.device
+        device.operating_system = specifications["operating_system_name"] or "Unknown"
+        device.operating_system_version = specifications["operating_system_version"]
+        device.mac_address = specifications["mac_address"] or device.mac_address
+        device.status = "online"
+        device.last_seen_at = finished_at
+        if device.registration_token and device.mac_address:
+            device.registration_token.mac_address = device.mac_address
+        hardware = device.hardware_spec
+        if hardware is None:
+            hardware = DeviceSpecification(device=device)
+            db.session.add(hardware)
+        hardware.cpu_model = specifications["cpu_name"]
+        hardware.cpu_cores = specifications["cpu_cores"]
+        hardware.memory_bytes = specifications["ram_capacity_bytes"]
+        hardware.ram_usage_bytes = specifications["ram_usage_bytes"]
+        hardware.storage_bytes = specifications["storage_total_bytes"]
+        hardware.storage_available_bytes = specifications["storage_available_bytes"]
+        hardware.storage_devices = specifications["storage_devices"]
+        hardware.gpu_model = ", ".join(specifications["gpu_information"]) or None
+        hardware.motherboard_model = specifications["motherboard_brand"]
+        hardware.motherboard_brand = specifications["motherboard_brand"]
+        hardware.operating_system_name = specifications["operating_system_name"]
+        hardware.operating_system_version = specifications["operating_system_version"]
+        hardware.network_adapters = specifications["network_adapters"]
+        hardware.ip_addresses = specifications["ip_addresses"]
+        if specifications["ip_addresses"]:
+            device.network_records.append(
+                NetworkRecord(
+                    ip_address=specifications["ip_addresses"][0],
+                    connectivity_status="connected",
+                )
+            )
+
     for check in report["checks"]:
         db.session.add(
             DiagnosticCheck(
@@ -219,11 +265,11 @@ def complete_diagnostic_run(run_id, token, report):
             )
         )
     record_health_report(run, report)
-    db.session.add(Log(device_id=run.device_id, event="Endpoint diagnostics completed"))
+    db.session.add(Log(device_id=run.device_id, event="Device scan completed"))
     db.session.add(
         ActivityLog(
             actor_user_id=run.initiated_by_user_id,
-            event_type="device.diagnostics_completed",
+            event_type="device.scan_completed",
             entity_type="diagnostic_run",
             entity_id=run_id,
             details={
