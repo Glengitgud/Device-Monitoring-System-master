@@ -52,10 +52,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 from device_monitoring_prototype.authentication import (
+    EMAIL_RESEND_INTERVAL,
     EmailDeliveryError,
     cancel_registration,
     check_smtp_connection,
     complete_registration,
+    registration_authenticator_qr,
     resend_email_code,
     start_registration,
     verify_email_code,
@@ -474,15 +476,39 @@ def create_app(test_config=None):
                 "dashboard" if current_user.is_admin else "device_verification"
             )
             return redirect(url_for(destination))
+        if request.method == "GET":
+            pending_user_id = session.get("pending_login_user_id")
+            if pending_user_id:
+                pending_user = db.session.get(User, pending_user_id)
+                if pending_user and pending_user.is_active and pending_user.totp_enabled:
+                    return render_template(
+                        "login.html",
+                        requires_totp=True,
+                        login_identifier=pending_user.username,
+                    )
+                session.pop("pending_login_user_id", None)
+                session.pop("pending_login_next", None)
+                flash("Sign-in expired. Please enter your credentials again.", "warning")
         if request.method == "POST":
             pending_user_id = session.get("pending_login_user_id")
             if pending_user_id:
                 user = db.session.get(User, pending_user_id)
+                if request.form.get("back_to_login") == "1":
+                    next_url = session.pop("pending_login_next", "")
+                    session.pop("pending_login_user_id", None)
+                    return render_template(
+                        "login.html",
+                        login_identifier=user.username if user else "",
+                        next_url=next_url,
+                    )
                 if not user or not user.is_active or not user.totp_enabled:
                     session.pop("pending_login_user_id", None)
                     session.pop("pending_login_next", None)
                     flash("Sign-in expired. Please enter your credentials again.", "warning")
-                    return render_template("login.html"), 401
+                    return render_template(
+                        "login.html",
+                        login_identifier=user.username if user else "",
+                    ), 401
                 if not verify_login_totp(user, request.form.get("totp_code", "")):
                     user.totp_attempts += 1
                     db.session.add(
@@ -502,9 +528,16 @@ def create_app(test_config=None):
                             "Too many incorrect authenticator codes. Sign in again to retry.",
                             "danger",
                         )
-                        return render_template("login.html"), 401
+                        return render_template(
+                            "login.html",
+                            login_identifier=user.username,
+                        ), 401
                     flash("That authenticator code is invalid or expired. Please try again.", "danger")
-                    return render_template("login.html", requires_totp=True), 401
+                    return render_template(
+                        "login.html",
+                        requires_totp=True,
+                        login_identifier=user.username,
+                    ), 401
                 next_url = session.pop("pending_login_next", "")
                 session.pop("pending_login_user_id", None)
                 user.totp_attempts = 0
@@ -562,7 +595,11 @@ def create_app(test_config=None):
                 db.session.commit()
                 session["pending_login_user_id"] = user.id
                 session["pending_login_next"] = next_url
-                return render_template("login.html", requires_totp=True)
+                return render_template(
+                    "login.html",
+                    requires_totp=True,
+                    login_identifier=user.username,
+                )
             session.clear()
             login_user(user, remember=False, fresh=True)
             user.last_login_at = datetime.now(timezone.utc)
@@ -591,7 +628,21 @@ def create_app(test_config=None):
             )
         if request.method == "POST":
             return begin_registration()
-        return render_template("register.html")
+        draft = {}
+        challenge_id = session.get("registration_challenge_id")
+        if isinstance(challenge_id, int):
+            challenge = db.session.get(RegistrationChallenge, challenge_id)
+            if (
+                challenge
+                and challenge.completed_at is None
+                and challenge.expires_at > datetime.now(timezone.utc).replace(tzinfo=None)
+            ):
+                draft = {
+                    "full_name": challenge.display_name,
+                    "email": challenge.email,
+                    "username": challenge.username,
+                }
+        return render_template("register.html", registration_draft=draft)
 
     def registration_challenge():
         challenge_id = session.get("registration_challenge_id")
@@ -604,8 +655,15 @@ def create_app(test_config=None):
 
     @app.post("/api/registration/start")
     def begin_registration():
+        existing_challenge = None
+        existing_id = session.get("registration_challenge_id")
+        if isinstance(existing_id, int):
+            existing_challenge = db.session.get(RegistrationChallenge, existing_id)
         try:
-            challenge = start_registration(request.form)
+            challenge = start_registration(
+                request.form,
+                existing_challenge=existing_challenge,
+            )
         except ValidationError as error:
             app.logger.warning("Registration start rejected: %s", error)
             return jsonify(error=str(error)), 400
@@ -619,8 +677,53 @@ def create_app(test_config=None):
         session.pop("registration_challenge_id", None)
         session["registration_challenge_id"] = challenge.id
         return jsonify(
-            message="We sent a 6-digit verification code to your email address.",
+            message=(
+                "Continue verifying your email address."
+                if existing_challenge and existing_challenge.id == challenge.id
+                else "We sent a 6-digit verification code to your email address."
+            ),
+            resumed=bool(existing_challenge and existing_challenge.id == challenge.id),
         )
+
+    @app.get("/api/registration/status")
+    def registration_status():
+        try:
+            challenge = registration_challenge()
+        except ValidationError:
+            session.pop("registration_challenge_id", None)
+            response = jsonify(active=False)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        if challenge.completed_at is not None or challenge.expires_at <= datetime.now(
+            timezone.utc
+        ).replace(tzinfo=None):
+            session.pop("registration_challenge_id", None)
+            response = jsonify(active=False)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        resend_remaining = (
+            challenge.last_email_sent_at
+            + EMAIL_RESEND_INTERVAL
+            - datetime.now(timezone.utc).replace(tzinfo=None)
+        ).total_seconds()
+        resend_in_seconds = (
+            int(resend_remaining) + 1 if resend_remaining > 0 else 0
+        )
+        response = jsonify(
+            active=True,
+            email=challenge.email,
+            full_name=challenge.display_name,
+            username=challenge.username,
+            email_verified=challenge.email_verified_at is not None,
+            qr_code=(
+                registration_authenticator_qr(challenge)
+                if challenge.email_verified_at is not None
+                else None
+            ),
+            resend_in_seconds=resend_in_seconds,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.post("/api/registration/resend-code")
     def resend_registration_code():
@@ -630,7 +733,10 @@ def create_app(test_config=None):
             return jsonify(error=str(error)), 400
         except EmailDeliveryError as error:
             return jsonify(error=str(error)), 503
-        return jsonify(message="A new verification code has been sent.")
+        return jsonify(
+            message="A new verification code has been sent.",
+            resend_in_seconds=EMAIL_RESEND_INTERVAL.total_seconds(),
+        )
 
     @app.post("/api/registration/cancel")
     def cancel_registration_verification():

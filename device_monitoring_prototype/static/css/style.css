@@ -879,232 +879,228 @@ code {
     text-align: center;
 }
 
-.health-gauge-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-    gap: 0.8rem;
-}
-
-.health-gauge-card {
-    min-width: 0;
-    padding: 0.85rem 0.55rem;
-    text-align: center;
-    color: var(--dm-text);
-    background: var(--dm-surface);
-    border: 1px solid var(--dm-border);
-    border-radius: var(--radius-md);
-}
-
-.health-gauge {
-    display: grid;
-    width: 92px;
-    height: 92px;
-    margin: 0 auto 0.55rem;
-    place-items: center;
-    border-radius: 50%;
-    background: conic-gradient(
-        var(--health-color) calc(var(--health-score) * 1%),
-        #334155 0
-    );
-    position: relative;
-}
-
-.health-gauge::before {
-    position: absolute;
-    width: 72px;
-    height: 72px;
-    content: "";
-    background: var(--dm-surface);
-    border-radius: 50%;
-}
-
-.health-gauge > span {
-    z-index: 1;
-    color: #f8fafc;
-    font-weight: 700;
-}
-
-.health-gauge-label {
-    color: #f1f5f9;
-    font-size: 0.9rem;
-    font-weight: 600;
-    overflow-wrap: anywhere;
-}
-
-.health-gauge-status {
-    min-height: 1.25rem;
-    margin-top: 0.2rem;
-    font-size: 0.78rem;
-    font-weight: 700;
-}
-
-.diagnostic-report {
-    color: var(--dm-text);
-}
-
-.diagnostic-issue {
-    margin-top: 0.75rem;
-    padding: 1rem;
-    color: var(--dm-text);
-    background: var(--dm-surface);
-    border: 1px solid #475569;
-    border-left: 4px solid #eab308;
-    border-radius: var(--radius-md);
-}
-
-.diagnostic-issue-critical {
-    border-left-color: #dc2626;
-}
-
-.diagnostic-issue-attention {
-    border-left-color: #f97316;
-}
-
-.diagnostic-issue-warning {
-    border-left-color: #eab308;
-}
-
-.diagnostic-issue-info {
-    border-left-color: #16a34a;
-}
-
-.diagnostic-issue h6 {
-    color: #f8fafc;
-}
-
-.diagnostic-issue p,
-.diagnostic-issue li {
-    color: #e2e8f0;
-}
-
-.severity-label {
-    display: inline-block;
-    margin-left: 0.25rem;
-    padding: 0.15rem 0.5rem;
-    color: #f8fafc;
-    background: #334155;
-    border-radius: 999px;
-    font-size: 0.72rem;
-    text-transform: capitalize;
-}
-
-.diagnostic-check-list {
-    display: grid;
-    gap: 0.65rem;
-    padding-left: 0;
-    list-style: none;
-}
-
-.diagnostic-check {
-    color: #e2e8f0;
-}
-
-.diagnostic-check small {
-    display: block;
-    margin-top: 0.2rem;
-    color: var(--dm-text-muted);
-}
-
-.diagnostic-check .badge {
-    margin-left: 0.35rem;
-    vertical-align: middle;
-}
-
-.diagnostic-history-table td,
-.diagnostic-history-table th {
-    vertical-align: middle;
-}
-
-.registration-success-card {
-    color: var(--dm-text);
-    background: var(--dm-surface);
-    border: 1px solid var(--dm-border);
-    border-radius: var(--radius-lg);
-}
-
-.registration-success-mark {
-    display: grid;
-    width: 4.25rem;
-    height: 4.25rem;
-    margin: 0.4rem auto 0.9rem;
-    place-items: center;
-    color: #ffffff;
-    background: #15803d;
-    border: 4px solid rgba(134, 239, 172, 0.3);
-    border-radius: 50%;
-    font-size: 2rem;
-    font-weight: 700;
-    animation: registration-success-pop 450ms ease-out both;
-}
-
-.dashboard-shortcut-card {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.65rem;
-    padding: 1rem;
-    color: #dbeafe;
-    background: #172554;
-    border: 1px solid #3b82f6;
-    border-radius: var(--radius-md);
-    font-weight: 700;
-}
-
-.dashboard-shortcut-card:hover,
-.dashboard-shortcut-card:focus-visible {
-    color: #ffffff;
-    background: #1e3a8a;
-    outline: 3px solid #93c5fd;
-    outline-offset: 2px;
-}
-
-@keyframes registration-success-pop {
-    0% {
-        opacity: 0;
-        transform: scale(0.65);
-    }
-
-    75% {
-        opacity: 1;
-        transform: scale(1.08);
-    }
-
-    100% {
-        transform: scale(1);
-    }
-}
-
-.content-card .text-muted,
-.modal-content .text-muted {
-    color: var(--dm-text-muted) !important;
-}
-
-.device-card-details {
-    gap: 0.75rem;
-}
-
 @media (max-width: 575.98px) {
     .device-card {
         padding: 1.1rem;
     }
 
     .health-gauge-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+        gap: 0.8rem;
+    }
+
+    .health-gauge-card {
+        min-width: 0;
+        padding: 0.85rem 0.55rem;
+        text-align: center;
+        color: var(--dm-text);
+        background: var(--dm-surface);
+        border: 1px solid var(--dm-border);
+        border-radius: var(--radius-md);
+    }
+
+    .health-gauge {
+        display: grid;
+        width: 92px;
+        height: 92px;
+        margin: 0 auto 0.55rem;
+        place-items: center;
+        border-radius: 50%;
+        background: conic-gradient(
+            var(--health-color) calc(var(--health-score) * 1%),
+            #334155 0
+        );
+        position: relative;
+    }
+
+    .health-gauge::before {
+        position: absolute;
+        width: 72px;
+        height: 72px;
+        content: "";
+        background: var(--dm-surface);
+        border-radius: 50%;
+    }
+
+    .health-gauge > span {
+        z-index: 1;
+        color: #f8fafc;
+        font-weight: 700;
+    }
+
+    .health-gauge-label {
+        color: #f1f5f9;
+        font-size: 0.9rem;
+        font-weight: 600;
+        overflow-wrap: anywhere;
+    }
+
+    .health-gauge-status {
+        min-height: 1.25rem;
+        margin-top: 0.2rem;
+        font-size: 0.78rem;
+        font-weight: 700;
+    }
+
+    .diagnostic-report {
+        color: var(--dm-text);
     }
 
     .diagnostic-issue {
-        padding: 0.8rem;
+        margin-top: 0.75rem;
+        padding: 1rem;
+        color: var(--dm-text);
+        background: var(--dm-surface);
+        border: 1px solid #475569;
+        border-left: 4px solid #eab308;
+        border-radius: var(--radius-md);
     }
-}
 
-@media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-        scroll-behavior: auto !important;
-        transition-duration: 0.01ms !important;
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
+    .diagnostic-issue-critical {
+        border-left-color: #dc2626;
+    }
+
+    .diagnostic-issue-attention {
+        border-left-color: #f97316;
+    }
+
+    .diagnostic-issue-warning {
+        border-left-color: #eab308;
+    }
+
+    .diagnostic-issue-info {
+        border-left-color: #16a34a;
+    }
+
+    .diagnostic-issue h6 {
+        color: #f8fafc;
+    }
+
+    .diagnostic-issue p,
+    .diagnostic-issue li {
+        color: #e2e8f0;
+    }
+
+    .severity-label {
+        display: inline-block;
+        margin-left: 0.25rem;
+        padding: 0.15rem 0.5rem;
+        color: #f8fafc;
+        background: #334155;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        text-transform: capitalize;
+    }
+
+    .diagnostic-check-list {
+        display: grid;
+        gap: 0.65rem;
+        padding-left: 1.25rem;
+    }
+
+    .diagnostic-check {
+        color: #e2e8f0;
+    }
+
+    .diagnostic-check small {
+        display: block;
+        margin-top: 0.2rem;
+        color: var(--dm-text-muted);
+    }
+
+    .diagnostic-check .badge {
+        margin-left: 0.35rem;
+        vertical-align: middle;
+    }
+
+    .registration-success-card {
+        color: var(--dm-text);
+        background: var(--dm-surface);
+        border: 1px solid var(--dm-border);
+        border-radius: var(--radius-lg);
+    }
+
+    .registration-success-mark {
+        display: grid;
+        width: 4.25rem;
+        height: 4.25rem;
+        margin: 0.4rem auto 0.9rem;
+        place-items: center;
+        color: #ffffff;
+        background: #15803d;
+        border: 4px solid rgba(134, 239, 172, 0.3);
+        border-radius: 50%;
+        font-size: 2rem;
+        font-weight: 700;
+        animation: registration-success-pop 450ms ease-out both;
+    }
+
+    .dashboard-shortcut-card {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.65rem;
+        padding: 1rem;
+        color: #dbeafe;
+        background: #172554;
+        border: 1px solid #3b82f6;
+        border-radius: var(--radius-md);
+        font-weight: 700;
+    }
+
+    .dashboard-shortcut-card:hover,
+    .dashboard-shortcut-card:focus-visible {
+        color: #ffffff;
+        background: #1e3a8a;
+        outline: 3px solid #93c5fd;
+        outline-offset: 2px;
+    }
+
+    @keyframes registration-success-pop {
+        0% {
+            opacity: 0;
+            transform: scale(0.65);
+        }
+
+        75% {
+            opacity: 1;
+            transform: scale(1.08);
+        }
+
+        100% {
+            transform: scale(1);
+        }
+    }
+
+    .content-card .text-muted,
+    .modal-content .text-muted {
+        color: var(--dm-text-muted) !important;
+    }
+
+    @media (max-width: 575.98px) {
+        .health-gauge-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .diagnostic-issue {
+            padding: 0.8rem;
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+            scroll-behavior: auto !important;
+            transition-duration: 0.01ms !important;
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+        }
+    }
+
+    .device-card-details {
+        gap: 0.75rem;
     }
 }
 
@@ -1547,4 +1543,24 @@ code {
     .registration-dialog-content {
         padding: 1rem;
     }
+}
+
+.login-page .form-control[aria-invalid="true"] {
+    border-color: #f87171;
+    box-shadow: 0 0 0 0.15rem rgba(248, 113, 113, 0.2);
+}
+
+.password-requirements {
+    margin: 0.5rem 0 0;
+    padding-left: 1.25rem;
+    color: #d1d5db;
+    font-size: 0.875rem;
+}
+
+.password-requirements .is-valid {
+    color: #4ade80;
+}
+
+.password-requirements .is-invalid {
+    color: #f87171;
 }

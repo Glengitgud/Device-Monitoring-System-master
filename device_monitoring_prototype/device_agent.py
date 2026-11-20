@@ -1273,7 +1273,10 @@ def display_value(key, value):
 
 def main():
     log_path = configure_logging()
-    diagnostic_mode = DIAGNOSTIC_RUN_ID not in {"__DIAGNOSTIC_RUN_ID__", ""}
+    diagnostic_mode = (
+        DIAGNOSTIC_RUN_ID not in {"__DIAGNOSTIC_RUN_ID__", ""}
+        or "/api/device-agent/diagnostics/" in SUBMISSION_URL
+    )
     try:
         specifications = collect_specifications()
     except RuntimeError as error:
@@ -1283,7 +1286,7 @@ def main():
         return 1
 
     report = collect_health_report(specifications)
-    if not diagnostic_mode:
+    if diagnostic_mode:
         try:
             show_health_window(report)
         except (ImportError, OSError, RuntimeError) as error:
@@ -1329,6 +1332,15 @@ def main():
         authorization_token = REGISTRATION_TOKEN
 
     try:
+        payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
+        report_keys = sorted(report.keys()) if diagnostic_mode and isinstance(report, dict) else []
+        LOGGER.info(
+            "Submitting payload (mode=%s, url=%s, payload_keys=%s, report_keys=%s).",
+            "diagnostic" if diagnostic_mode else "registration",
+            SUBMISSION_URL,
+            payload_keys,
+            report_keys,
+        )
         request = urllib.request.Request(
             SUBMISSION_URL,
             data=json.dumps(payload).encode("utf-8"),
@@ -1339,7 +1351,13 @@ def main():
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=30) as response:
+            response_status = getattr(response, "status", None) or response.getcode()
             result = json.loads(response.read().decode("utf-8"))
+        LOGGER.info(
+            "Submission response received (status=%s, keys=%s).",
+            response_status,
+            sorted(result.keys()) if isinstance(result, dict) else [],
+        )
         response_key = "run_id" if diagnostic_mode else "device_id"
         if not isinstance(result, dict) or response_key not in result:
             raise ValueError("The server returned an invalid submission response.")

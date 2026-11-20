@@ -33,6 +33,7 @@ from device_monitoring_prototype.services import (
     ValidationError,
     hash_password,
     validate_password,
+    verify_password,
 )
 
 EMAIL_CODE_LIFETIME = timedelta(minutes=5)
@@ -86,7 +87,7 @@ def _email_code_hash(challenge_id, code):
     return hmac.new(secret, value, hashlib.sha256).hexdigest()
 
 
-def _validate_registration(data):
+def _validate_registration(data, exclude_challenge_id=None):
     def required_text(name, limit):
         value = data.get(name)
         if not isinstance(value, str) or not value.strip():
@@ -115,24 +116,21 @@ def _validate_registration(data):
         or_(func.lower(User.username) == username.lower(), func.lower(User.email) == email)
     ).first():
         raise ValidationError("That username or email address is already registered.")
-    if RegistrationChallenge.query.filter(
+    existing_challenges = RegistrationChallenge.query.filter(
         RegistrationChallenge.expires_at > utcnow(),
         RegistrationChallenge.completed_at.is_(None),
         or_(
             func.lower(RegistrationChallenge.username) == username.lower(),
             func.lower(RegistrationChallenge.email) == email,
         ),
-    ).first():
+    )
+    if exclude_challenge_id is not None:
+        existing_challenges = existing_challenges.filter(
+            RegistrationChallenge.id != exclude_challenge_id
+        )
+    if existing_challenges.first():
         raise ValidationError(
             "A registration verification is already in progress for that username or email."
-        )
-    recent_sends = RegistrationChallenge.query.filter(
-        func.lower(RegistrationChallenge.email) == email,
-        RegistrationChallenge.created_at > utcnow() - timedelta(hours=1),
-    ).count()
-    if recent_sends >= EMAIL_SENDS_PER_HOUR:
-        raise ValidationError(
-            "Too many verification requests. Please wait before trying again."
         )
     return full_name, username, email, password
 
@@ -306,13 +304,36 @@ def _new_email_code(challenge_id, previous_hash=None):
     raise RuntimeError("Could not generate a fresh verification code.")
 
 
-def start_registration(data):
-    full_name, username, email, password = _validate_registration(data)
+def start_registration(data, existing_challenge=None):
+    full_name, username, email, password = _validate_registration(
+        data,
+        exclude_challenge_id=existing_challenge.id if existing_challenge else None,
+    )
+    if existing_challenge and existing_challenge.completed_at is None:
+        if (
+            existing_challenge.expires_at > utcnow()
+            and existing_challenge.username == username
+            and existing_challenge.email == email
+            and existing_challenge.display_name == full_name
+            and existing_challenge.password_hash
+            and verify_password(password, existing_challenge.password_hash)
+        ):
+            return existing_challenge
     if Role.query.filter_by(name="User").one_or_none() is None:
         raise DatabaseSetupError(
             "Database roles are missing; run "
             "`flask --app device_monitoring_prototype.app init-db` from the repository root."
         )
+    recent_sends = RegistrationChallenge.query.filter(
+        func.lower(RegistrationChallenge.email) == email,
+        RegistrationChallenge.created_at > utcnow() - timedelta(hours=1),
+    ).count()
+    if recent_sends >= EMAIL_SENDS_PER_HOUR:
+        raise ValidationError(
+            "Too many verification requests. Please wait before trying again."
+        )
+    if existing_challenge and existing_challenge.completed_at is None:
+        cancel_registration(existing_challenge)
     now = utcnow()
     challenge = RegistrationChallenge(
         username=username,
@@ -424,6 +445,32 @@ def cancel_registration(challenge):
     db.session.commit()
 
 
+def registration_authenticator_qr(challenge):
+    if not challenge.totp_secret_encrypted:
+        raise ValidationError("Authenticator setup is not available yet.")
+    secret = decrypt_totp_secret(challenge.totp_secret_encrypted)
+    label = quote(f"DevMonitor:{challenge.email}")
+    issuer = quote("DevMonitor")
+    uri = (
+        f"otpauth://totp/{label}?secret={secret}&issuer={issuer}"
+        f"&algorithm=SHA1&digits=6&period={TOTP_PERIOD_SECONDS}"
+    )
+    image = qrcode.make(uri, image_factory=SvgPathImage, box_size=8, border=4)
+    root = ET.fromstring(image.to_string())
+    namespace = "{http://www.w3.org/2000/svg}"
+    root.insert(
+        0,
+        ET.Element(
+            f"{namespace}rect",
+            {"width": "100%", "height": "100%", "fill": "#ffffff"},
+        ),
+    )
+    for path in root.iter(f"{namespace}path"):
+        path.set("fill", "#111827")
+    encoded = base64.b64encode(ET.tostring(root, encoding="utf-8")).decode("ascii")
+    return "data:image/svg+xml;base64," + encoded
+
+
 def verify_email_code(challenge, code):
     _ensure_challenge_is_open(challenge)
     if challenge.email_verified_at is not None:
@@ -476,27 +523,7 @@ def verify_email_code(challenge, code):
     challenge.totp_secret_encrypted = encrypt_totp_secret(secret)
     db.session.commit()
     current_app.logger.info("Email verified for registration challenge_id=%s.", challenge.id)
-    label = quote(f"DevMonitor:{challenge.email}")
-    issuer = quote("DevMonitor")
-    uri = (
-        f"otpauth://totp/{label}?secret={secret}&issuer={issuer}"
-        f"&algorithm=SHA1&digits=6&period={TOTP_PERIOD_SECONDS}"
-    )
-    image = qrcode.make(uri, image_factory=SvgPathImage, box_size=8, border=4)
-    root = ET.fromstring(image.to_string())
-    namespace = "{http://www.w3.org/2000/svg}"
-    root.insert(
-        0,
-        ET.Element(
-            f"{namespace}rect",
-            {"width": "100%", "height": "100%", "fill": "#ffffff"},
-        ),
-    )
-    for path in root.iter(f"{namespace}path"):
-        path.set("fill", "#111827")
-    encoded = base64.b64encode(ET.tostring(root, encoding="utf-8")).decode("ascii")
-    qr_data_uri = "data:image/svg+xml;base64," + encoded
-    return qr_data_uri
+    return registration_authenticator_qr(challenge)
 
 
 def totp_counter(secret, code, now=None):

@@ -324,8 +324,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         login_page = self.client.get("/")
         self.assertEqual(login_page.status_code, 200)
         self.assertIn(b'id="loginEmailValidation"', login_page.data)
-        self.assertIn(b'id="loginPasswordStrength"', login_page.data)
-        self.assertIn(b"js/password-strength.js", login_page.data)
+        self.assertIn(b'aria-required="true"', login_page.data)
         response = self.client.get("/register")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'id="registerForm"', response.data)
@@ -334,9 +333,20 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b'id="registerPasswordStrength"', response.data)
         self.assertIn(b'id="registrationVerificationDialog"', response.data)
         self.assertIn(b'id="authenticatorQrCode"', response.data)
+        self.assertIn(b'id="registrationEmailAddress"', response.data)
+        self.assertIn(b'id="resendCodeCountdown"', response.data)
+        self.assertIn(b'Back to sign up', response.data)
         self.assertIn(b"js/password-strength.js", response.data)
         self.assertIn(b"js/register.js", response.data)
         self.assertIn(b"js/register.js", login_page.data)
+        register_script = (
+            Path(__file__).resolve().parents[1] / "static" / "js" / "register.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("verificationDialog.close()", register_script)
+        self.assertIn("full_name: fullName.value", register_script)
+        self.assertNotIn("form.reset()", register_script)
+        self.assertNotIn("/api/registration/cancel", register_script)
+        self.assertNotIn("password: password.value", register_script)
 
     def test_login_accepts_registered_email_and_rejects_unknown_email(self):
         csrf = self.register_and_login(
@@ -359,6 +369,10 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(email_login.status_code, 200)
         self.assertIn(b"Google Authenticator code", email_login.data)
+        self.assertIn(b"Signing in as", email_login.data)
+        refreshed_totp = self.client.get("/login")
+        self.assertEqual(refreshed_totp.status_code, 200)
+        self.assertIn(b"Google Authenticator code", refreshed_totp.data)
         with self.client.session_transaction() as session:
             csrf = session["_csrf_token"]
         with self.app.app_context():
@@ -375,6 +389,28 @@ class DatabaseIntegrationTest(unittest.TestCase):
             data={"csrf_token": csrf, "totp_code": invalid_code},
         )
         self.assertEqual(failed_mfa.status_code, 401)
+        restored_totp = self.client.get("/login")
+        self.assertEqual(restored_totp.status_code, 200)
+        self.assertIn(b"Google Authenticator code", restored_totp.data)
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        returned_to_login = self.client.post(
+            "/login",
+            data={"csrf_token": csrf, "back_to_login": "1"},
+        )
+        self.assertEqual(returned_to_login.status_code, 200)
+        self.assertIn(b'value="emaillogin"', returned_to_login.data)
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        email_login = self.client.post(
+            "/login",
+            data={
+                "csrf_token": csrf,
+                "username": "emaillogin",
+                "password": "EmailPass1!",
+            },
+        )
+        self.assertEqual(email_login.status_code, 200)
         with self.client.session_transaction() as session:
             csrf = session["_csrf_token"]
         with patch(
@@ -410,6 +446,86 @@ class DatabaseIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(unknown_email_login.status_code, 401)
+        self.assertIn(b'value="unknown@example.com"', unknown_email_login.data)
+
+    def test_registration_state_restores_and_resumes_without_resending_code(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        registration = {
+            "csrf_token": csrf,
+            "full_name": "Preserved Registration",
+            "email": "preserved@example.com",
+            "username": "preserved_user",
+            "password": "Preserved1!",
+            "confirm_password": "Preserved1!",
+        }
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            started = self.client.post("/api/registration/start", data=registration)
+            self.assertEqual(started.status_code, 200, started.get_data(as_text=True))
+            with self.client.session_transaction() as session:
+                challenge_id = session["registration_challenge_id"]
+            resumed = self.client.post("/api/registration/start", data=registration)
+
+        self.assertEqual(resumed.status_code, 200, resumed.get_data(as_text=True))
+        self.assertTrue(resumed.json["resumed"])
+        self.assertEqual(send_email.call_count, 1)
+        with self.client.session_transaction() as session:
+            self.assertEqual(session["registration_challenge_id"], challenge_id)
+        status = self.client.get("/api/registration/status")
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.headers["Cache-Control"], "no-store")
+        self.assertEqual(status.json["email"], "preserved@example.com")
+        self.assertEqual(status.json["username"], "preserved_user")
+        self.assertGreater(status.json["resend_in_seconds"], 0)
+        refreshed_page = self.client.get("/register")
+        self.assertIn(b'value="Preserved Registration"', refreshed_page.data)
+        self.assertIn(b'value="preserved@example.com"', refreshed_page.data)
+        self.assertIn(b'value="preserved_user"', refreshed_page.data)
+
+        verified = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": csrf, "code": send_email.call_args.args[1]},
+        )
+        self.assertEqual(verified.status_code, 200, verified.get_data(as_text=True))
+        restored_status = self.client.get("/api/registration/status")
+        self.assertTrue(restored_status.json["email_verified"])
+        self.assertTrue(restored_status.json["qr_code"].startswith(
+            "data:image/svg+xml;base64,"
+        ))
+
+    def test_registration_edit_restarts_challenge_without_losing_form_values(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        registration = {
+            "csrf_token": csrf,
+            "full_name": "Original Name",
+            "email": "edited@example.com",
+            "username": "edited_user",
+            "password": "EditedPass1!",
+            "confirm_password": "EditedPass1!",
+        }
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            self.assertEqual(
+                self.client.post("/api/registration/start", data=registration).status_code,
+                200,
+            )
+            with self.client.session_transaction() as session:
+                previous_id = session["registration_challenge_id"]
+            registration["full_name"] = "Updated Name"
+            updated = self.client.post("/api/registration/start", data=registration)
+        self.assertEqual(updated.status_code, 200, updated.get_data(as_text=True))
+        self.assertFalse(updated.json["resumed"])
+        self.assertEqual(send_email.call_count, 2)
+        with self.client.session_transaction() as session:
+            current_id = session["registration_challenge_id"]
+        self.assertNotEqual(current_id, previous_id)
+        with self.app.app_context():
+            previous = db.session.get(RegistrationChallenge, previous_id)
+            self.assertLessEqual(previous.expires_at, utcnow())
+        status = self.client.get("/api/registration/status")
+        self.assertEqual(status.json["full_name"], "Updated Name")
 
     def test_registration_rejects_malformed_and_duplicate_emails_case_insensitively(self):
         csrf = self.register_and_login(

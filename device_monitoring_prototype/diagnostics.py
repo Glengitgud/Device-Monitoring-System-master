@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -20,6 +21,7 @@ DIAGNOSTIC_TOKEN_LIFETIME = timedelta(minutes=15)
 REPORT_LIMIT_BYTES = 192_000
 ALLOWED_CATEGORIES = {"hardware", "software", "driver"}
 ALLOWED_STATUSES = {"passed", "warning", "failed", "skipped"}
+LOGGER = logging.getLogger("devmonitor.diagnostics")
 
 
 class DiagnosticValidationError(ValueError):
@@ -179,23 +181,29 @@ def complete_diagnostic_run(run_id, token, report):
         if report["issues"]
         else "No immediate action is recommended by the checks that ran."
     )
+    finished_at = datetime.now(timezone.utc)
     claim = db.session.execute(
         update(DiagnosticRun)
         .where(
             DiagnosticRun.id == run_id,
             DiagnosticRun.status == "running",
-            DiagnosticRun.recommendation == json.dumps({"token_hash": credential["token_hash"]}),
         )
         .values(
             status="completed",
             summary=report["summary"],
             detected_problem="; ".join(issue_titles) or None,
             recommendation=recommendation,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=finished_at,
         )
         .execution_options(synchronize_session=False)
     )
     if claim.rowcount != 1:
+        LOGGER.warning(
+            "Diagnostic completion claim failed (run_id=%s, rowcount=%s, status=%s).",
+            run_id,
+            claim.rowcount,
+            run.status,
+        )
         db.session.rollback()
         raise DiagnosticValidationError("This diagnostic run has already been submitted.")
 
@@ -225,6 +233,13 @@ def complete_diagnostic_run(run_id, token, report):
         )
     )
     db.session.commit()
+    LOGGER.info(
+        "Diagnostic run completed (run_id=%s, device_id=%s, checks=%d, issues=%d).",
+        run_id,
+        run.device_id,
+        len(report["checks"]),
+        len(report["issues"]),
+    )
     db.session.refresh(run)
     return run
 
