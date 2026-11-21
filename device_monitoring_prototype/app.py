@@ -3,6 +3,7 @@
 import os
 import re
 import secrets
+import ssl
 import sys
 import uuid
 import base64
@@ -199,6 +200,22 @@ def _database_uri():
     return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
 
 
+def _database_engine_options():
+    """Enable verified TLS for remote MySQL hosts such as TiDB Cloud.
+
+    Local XAMPP (localhost/127.0.0.1) stays unencrypted. Set MYSQL_SSL=true or
+    MYSQL_SSL=false in .env to force it on or off.
+    """
+    options = {"pool_pre_ping": True}
+    setting = os.environ.get("MYSQL_SSL", "").strip().lower()
+    host = os.environ.get("MYSQL_HOST", "localhost").strip().lower()
+    remote = host not in {"localhost", "127.0.0.1", "::1"}
+    if setting == "true" or (setting != "false" and remote):
+        # Uses the operating system's trusted certificates and checks the hostname.
+        options["connect_args"] = {"ssl": ssl.create_default_context()}
+    return options
+
+
 def _database_error_message(error):
     original = getattr(error, "orig", None)
     arguments = getattr(original, "args", ())
@@ -256,7 +273,7 @@ def create_app(test_config=None):
         MAIL_TIMEOUT=int(os.environ.get("MAIL_TIMEOUT", "15")),
         SQLALCHEMY_DATABASE_URI=_database_uri(),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
-        SQLALCHEMY_ENGINE_OPTIONS={"pool_pre_ping": True},
+        SQLALCHEMY_ENGINE_OPTIONS=_database_engine_options(),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "").lower() == "true",
