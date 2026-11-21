@@ -15,7 +15,32 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode, urljoin, urlsplit
-#
+
+
+def _ensure_package_importable():
+    """Let "device_monitoring_prototype.*" imports work when this folder is the deploy root.
+
+    Hosts such as Vercel may deploy only this folder and load app.py as a
+    top-level module, so the parent package is not on sys.path. Register this
+    folder as the package so the absolute imports below still resolve.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("device_monitoring_prototype") is not None:
+        return
+    package_dir = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(
+        "device_monitoring_prototype",
+        package_dir / "__init__.py",
+        submodule_search_locations=[str(package_dir)],
+    )
+    package = importlib.util.module_from_spec(spec)
+    sys.modules["device_monitoring_prototype"] = package
+    spec.loader.exec_module(package)
+
+
+_ensure_package_importable()
+
 import click
 from device_monitoring_prototype.agent_builder import (
     DeviceAgentBuildError,
