@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Verify Administrator Access - Device Monitoring System{% endblock %}
+{% block page_title %}Verify Administrator Access{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-6 col-xl-5">
+        <section class="content-card" aria-labelledby="adminVerifyTitle">
+            <div class="content-card-header">
+                <h1 class="h5 mb-0" id="adminVerifyTitle">
+                    <i class="bi bi-shield-lock-fill me-2"></i>Additional Credential Verification
+                </h1>
+            </div>
+            <div class="content-card-body">
+                <p class="text-muted">
+                    Confirm your administrator credentials before entering protected administrative features.
+                </p>
+                <form method="post" autocomplete="off">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <div class="mb-3">
+                        <label class="form-label" for="adminVerifyUsername">Username</label>
+                        <input class="form-control" id="adminVerifyUsername" name="username"
+                               maxlength="64" autocomplete="username" required
+                               value="{{ request.form.get('username', current_user.username) }}">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="adminVerifyPassword">Password</label>
+                        <input class="form-control" id="adminVerifyPassword" name="password"
+                               type="password" autocomplete="current-password" required>
+                    </div>
+                    <div class="alert alert-secondary mb-3" role="note">
+                        Role validation: <strong>Administrator</strong>
+                    </div>
+                    <button class="btn btn-primary" type="submit">
+                        <i class="bi bi-shield-check me-1"></i>Verify and Continue
+                    </button>
+                    <a class="btn btn-outline-secondary ms-2" href="{{ url_for('dashboard') }}">Cancel</a>
+                </form>
+            </div>
+        </section>
+    </div>
+</div>
+{% endblock %}
