@@ -92,6 +92,20 @@ class DatabaseIntegrationTest(unittest.TestCase):
             db.session.remove()
             db.drop_all()
 
+    def verify_admin(self, username="admin", password="admin123"):
+        self.client.get("/admin/verify")
+        with self.client.session_transaction() as session:
+            token = session["_csrf_token"]
+        response = self.client.post(
+            "/admin/verify",
+            data={
+                "csrf_token": token,
+                "username": username,
+                "password": password,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
     def register_and_login(
         self,
         email="test@example.com",
@@ -753,6 +767,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 302)
+        self.verify_admin(password="old-admin-password")
         admin_page = self.client.get("/admin")
         self.assertEqual(admin_page.status_code, 200)
         self.assertIn(b'id="usersPanel" class="accordion-collapse collapse"', admin_page.data)
@@ -1863,6 +1878,60 @@ class DatabaseIntegrationTest(unittest.TestCase):
             self.assertEqual(device.lifecycle_status, "active")
             self.assertIsNone(device.archived_at)
 
+    def test_admin_refresh_requires_verification_and_usernames_remain_visible(self):
+        with self.app.app_context():
+            administrator = User(
+                username="refreshadmin",
+                email="refreshadmin@example.com",
+                full_name="Refresh Admin",
+                password_hash=generate_password_hash("refresh-admin-password"),
+                status="active",
+                email_verified=True,
+            )
+            regular = User(
+                username="johnsmith",
+                email="exampletesting@gmail.com",
+                full_name="John Smith",
+                password_hash=generate_password_hash("regular-password"),
+                status="active",
+                email_verified=True,
+            )
+            admin_role = Role.query.filter_by(name="Administrator").one()
+            user_role = Role.query.filter_by(name="User").one()
+            administrator.roles.append(admin_role)
+            regular.roles.append(user_role)
+            db.session.add_all([administrator, regular])
+            db.session.commit()
+
+        self.client.get("/login")
+        with self.client.session_transaction() as session:
+            token = session["_csrf_token"]
+        login = self.client.post(
+            "/login",
+            data={
+                "csrf_token": token,
+                "username": "refreshadmin",
+                "password": "refresh-admin-password",
+            },
+        )
+        self.assertEqual(login.status_code, 302)
+        self.verify_admin(
+            username="refreshadmin",
+            password="refresh-admin-password",
+        )
+        panel = self.client.get("/admin")
+        self.assertEqual(panel.status_code, 200)
+
+        users = self.client.get("/api/users")
+        self.assertEqual(users.status_code, 200)
+        john = next(user for user in users.json if user["username"] == "johnsmith")
+        self.assertEqual(john["username"], "johnsmith")
+        self.assertEqual(john["email"], "e*********g****.com")
+
+        refreshed = self.client.get("/admin")
+        self.assertEqual(refreshed.status_code, 302)
+        self.assertEqual(self.client.get("/api/users").status_code, 403)
+
     def test_standard_user_cannot_open_admin_panel(self):
         token = self.register_and_login()
         self.complete_qr_enrollment(token)
@@ -1997,6 +2066,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(login.status_code, 302)
+        self.verify_admin(username="deviceadmin", password="device-admin-password")
         self.client.get("/dashboard")
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
@@ -2194,6 +2264,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(login.status_code, 302)
+        self.verify_admin(username="rootadmin", password="admin-password-long-enough")
         self.client.get("/admin")
         with self.client.session_transaction() as session:
             csrf = session["_csrf_token"]
@@ -2279,6 +2350,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 302)
+        self.verify_admin(username="rootadmin", password="admin-password-long-enough")
         self.assertEqual(self.client.get("/admin").status_code, 200)
         self.client.get("/dashboard")
         with self.client.session_transaction() as session:

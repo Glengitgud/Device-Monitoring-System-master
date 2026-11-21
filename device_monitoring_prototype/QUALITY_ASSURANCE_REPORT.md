@@ -6,7 +6,7 @@
 
 ## Current QA status
 
-The existing prototype supports verified QR enrollment, one-time Windows inventory collection, website-based saved health reports, periodic browser refresh, role-based administration, and database-backed audit events. The regression suite passes. The enhancements listed below are in scope for the current implementation and remain open until their feature-specific checks are completed; existing prototype behavior is not evidence that these requirements pass.
+The existing prototype supports verified QR enrollment, one-time Windows inventory collection, website-based saved health reports, periodic browser refresh, re-verified role-based administration, consistent sensitive-data masking, and database-backed audit events. The automated regression suite passes; browser and production-host validations remain separate deployment checks.
 
 | Area | Existing baseline | Required validation / remaining work |
 |---|---|---|
@@ -26,12 +26,71 @@ The existing prototype supports verified QR enrollment, one-time Windows invento
 
 | Stage | Result |
 |---|---|
-| Baseline and report update | Existing authentication and device integration suite: 56 tests passed. This is baseline coverage only; it does not validate the enhancements above. |
+| Baseline and report update | Existing authentication and device integration suite: 60 tests passed after the security enhancements. Unit coverage does not replace live browser or production database validation. |
 | MAC address collection and persistence | Implemented and verified: collector, input validation, device/enrollment persistence, owner/admin details, specifications page, and registration status. Three focused enrollment/collector tests passed. Production MySQL migration execution remains unverified. |
 | Scanner consolidation and removal of standalone diagnostics UI/executable | Implemented and verified: one My Devices scan action, one silent scanner executable, combined inventory/health submission, website-based history/results, and dashboard redirect; 58 tests passed. A production PyInstaller build and browser acceptance run remain unverified. |
 | Live status and Excel export | Implemented and verified: stale status transition/audit and authenticated multi-sheet workbook export; denied credentials and successful exports are audited. |
 | Scheduled monitoring | Pending the explicitly consented persistent agent, device credential lifecycle, startup/pause/stop controls, and scheduled scan delivery. |
 | Cross-platform collection, accessibility, and user acceptance | Pending implementation and platform/browser tests; current executable collector/build is Windows-only. |
+
+## Admin Panel Security Validation
+
+| Check | Result | Evidence |
+|---|---|---|
+| Direct `/admin` access | Implemented; validated server-side | Normal login alone redirects administrators to `/admin/verify`; `/api/admin/*` rejects an unverified administrator. |
+| Additional credentials | Implemented | Verification requires the signed-in username, password, active account status, and Administrator role. |
+| Protected features | Implemented | User/device management, logs, database export, and system settings remain behind `admin_required`. |
+| Access attempts | Implemented | Requested, succeeded, denied, credential-failed, and role-failed events include username, timestamp, IP address, and status. |
+
+## Sensitive Data Protection Validation
+
+User-facing and administrative email values use a shared server-side masking helper. Usernames, device names, dashboard labels, MAC addresses, and monitoring labels remain fully visible and operational. Verified administrator views may receive full account details; audit details are masked server-side before presentation.
+
+| Location | Validation |
+|---|---|
+| User listings | Administrator access is re-verified; authorized listings receive full usernames and display masked emails when masking is required. |
+| Dashboard/device views | Full usernames, device names, ownership labels, MAC addresses, and operational values remain visible. |
+| Device details and monitoring | No username or operational label masking is applied. |
+| Audit logs and exports | Audit details mask embedded email values. Export operations remain permission-gated and are audited. |
+
+## Access Control and User Privacy Testing
+
+- Standard users cannot open `/admin` or call `/api/admin/*`; they receive HTTP 403 for protected API resources.
+- Administrator role checks are enforced independently of a successful password login.
+- Sensitive device and account fields are masked before serialization where full access is not established.
+- Phone and MAC masking helpers are retained for future fields and consistently use the same readable format.
+- Browser-side rendering escapes values and does not grant authorization; all checks remain server-side.
+
+## Audit Logging Validation
+
+The audit trail now records administrator verification requests/success/failure, verified and denied panel access, sensitive user/list/audit/device viewing, and database export denied/start/success/failure events. Records include actor identity, event type, timestamp, IP address, and a success/failure or reason field. Passwords, submitted codes, and export credential values are not written to audit details.
+
+## Session Persistence Validation
+
+Administrator verification is session-bound to the signed-in user and is not an 15-minute frontend state. Entering `/admin` requires a fresh username/password/role check. Refreshing or reopening `/admin` invalidates the panel verification and redirects back to `/admin/verify`; browser restart or session reload has no verification marker and follows the same backend check. Protected `/api/admin/*` routes independently require the verification marker and role.
+
+## Email Masking Validation
+
+| Area | Expected behavior | Validation |
+|---|---|---|
+| Admin → User Accounts | Email addresses are masked server-side; usernames stay unchanged. | The `/api/users` response masks email values before rendering and uses the same value across refresh/navigation. |
+| User Management/Edit | The masked email is shown without returning a full address through the listing endpoint. | New accounts accept a full email; editing requires entering a new email explicitly rather than re-submitting a masked value. |
+| Dashboard/device views | Operational user and device fields remain unmasked. | Dashboard serialization retains device names and ownership/display values. |
+
+Email example: `exampletesting@gmail.com` becomes `e*********g****.com`. Masking is produced during server serialization and is not restored or exposed by frontend state.
+
+## User Acceptance Testing
+
+Recommended acceptance pass:
+
+1. Sign in as a standard user and attempt direct `/admin` and admin API URLs.
+2. Sign in as an administrator, confirm `/admin` redirects to credential verification, and test wrong username/password/role states.
+3. Verify that a successful administrator check opens user, device, monitoring, log, export, and settings areas.
+4. Confirm email, username, phone, and MAC examples remain readable and are masked in listings, dashboard, details, logs, and previews.
+5. Confirm an owner can view their own record while a non-owner cannot.
+6. Review audit entries for verification, access, sensitive viewing, and export operations.
+
+**Acceptance status:** Implementation complete; browser, production database, SMTP, and live workstation checks remain separate deployment validations.
 
 ## Security and verification limits
 

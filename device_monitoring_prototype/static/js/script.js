@@ -1361,10 +1361,18 @@ async function saveUser() {
     const data = {
         full_name: document.getElementById('userFormFullName').value.trim(),
         username: document.getElementById('userFormUsername').value.trim(),
-        email: document.getElementById('userFormEmail').value.trim(),
         role: document.getElementById('userFormRole').value,
         status: document.getElementById('userFormStatus').value.toLowerCase()
     };
+    const email = document.getElementById('userFormEmail').value.trim();
+    if (mode === 'add') {
+        data.email = email;
+    } else {
+        const selectedUser = users.find(item => item.id === selectedUserId);
+        if (email && email !== selectedUser?.email && !email.includes('*')) {
+            data.email = email;
+        }
+    }
     if (mode === 'add') {
         data.password = document.getElementById('userFormPassword').value;
         data.confirm_password = document.getElementById('userFormConfirmPassword').value;

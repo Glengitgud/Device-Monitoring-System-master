@@ -128,6 +128,44 @@ login_manager.login_message = "Please sign in to continue."
 login_manager.login_message_category = "warning"
 DEFAULT_ADMIN_USERNAME = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin123"
+def mask_email(value):
+    if not isinstance(value, str) or "@" not in value:
+        return ""
+    local, domain = value.rsplit("@", 1)
+    if len(local) == 1:
+        masked_local = local[0] + "*" * 9
+    else:
+        masked_local = local[0] + "*" * 9
+    if "." in domain:
+        name, suffix = domain.rsplit(".", 1)
+        masked_domain = (
+            (name[0] + "*" * max(1, len(name) - 1) if name else "")
+            + "." + suffix
+        )
+    else:
+        masked_domain = domain[0] + "*" * max(1, len(domain) - 1)
+    return f"{masked_local}{masked_domain}"
+
+
+def mask_sensitive_strings(value):
+    if isinstance(value, str):
+        return re.sub(
+            r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+            lambda match: mask_email(match.group(0)),
+            value,
+        )
+    if isinstance(value, dict):
+        return {
+            key: (
+                mask_email(item)
+                if key.lower() in {"email", "email_address"} and isinstance(item, str)
+                else mask_sensitive_strings(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [mask_sensitive_strings(item) for item in value]
+    return value
 
 
 def _database_uri():
@@ -263,6 +301,37 @@ def create_app(test_config=None):
                 return jsonify(error="This account is inactive."), 401
             return redirect(url_for("login"))
         if (
+            request.endpoint == "admin"
+            and request.method == "GET"
+        ):
+            if not session.pop("admin_verification_allow_next", False):
+                if current_user.is_authenticated and current_user.is_admin:
+                    session.pop("admin_verified_at", None)
+                    session.pop("admin_verified_user_id", None)
+        if (
+            request.endpoint == "admin"
+            and request.method == "GET"
+            and current_user.is_authenticated
+            and current_user.is_admin
+            and session.get("admin_verified_user_id") != current_user.id
+        ):
+            if "_csrf_token" not in session:
+                session["_csrf_token"] = secrets.token_urlsafe(32)
+            db.session.add(
+                ActivityLog(
+                    actor_user_id=current_user.id,
+                    event_type="admin.panel_access_denied",
+                    entity_type="admin_panel",
+                    details={
+                        "reason": "credential_verification_required",
+                        "ip_address": request.remote_addr,
+                        "username": current_user.username,
+                    },
+                )
+            )
+            db.session.commit()
+            return redirect(url_for("admin_verify"))
+        if (
             current_user.is_authenticated
             and not current_user.is_admin
             and not verified_device_count(current_user.id)
@@ -309,7 +378,29 @@ def create_app(test_config=None):
                 session["_csrf_token"] = token
             return token
 
-        return {"csrf_token": csrf_token}
+        def is_admin_verified():
+            if (
+                not current_user.is_authenticated
+                or not current_user.is_admin
+                or session.get("admin_verified_user_id") != current_user.id
+            ):
+                return False
+            return True
+
+        return {
+            "csrf_token": csrf_token,
+            "is_admin_verified": is_admin_verified,
+            "mask_email": mask_email,
+        }
+
+    def admin_is_verified():
+        if not current_user.is_authenticated or not current_user.is_admin:
+            return False
+        if (
+            session.get("admin_verified_user_id") != current_user.id
+        ):
+            return False
+        return True
 
     def admin_required(view):
         from functools import wraps
@@ -318,7 +409,42 @@ def create_app(test_config=None):
         @login_required
         def wrapped(*args, **kwargs):
             if not current_user.is_admin:
+                db.session.add(
+                    ActivityLog(
+                        actor_user_id=current_user.id,
+                        event_type="admin.panel_access_denied",
+                        entity_type="admin_panel",
+                        details={
+                            "reason": "role_validation_failed",
+                            "ip_address": request.remote_addr,
+                            "username": current_user.username,
+                        },
+                    )
+                )
+                db.session.commit()
                 abort(403)
+            if not admin_is_verified():
+                db.session.add(
+                    ActivityLog(
+                        actor_user_id=current_user.id,
+                        event_type="admin.panel_access_denied",
+                        entity_type="admin_panel",
+                        details={
+                            "reason": "credential_verification_required",
+                            "ip_address": request.remote_addr,
+                            "username": current_user.username,
+                        },
+                    )
+                )
+                db.session.commit()
+                if request.path.startswith("/api/"):
+                    return jsonify(
+                        error="Additional administrator credential verification is required.",
+                        verification_required=True,
+                    ), 403
+                if "_csrf_token" not in session:
+                    session["_csrf_token"] = secrets.token_urlsafe(32)
+                return redirect(url_for("admin_verify"))
             return view(*args, **kwargs)
 
         return wrapped
@@ -454,6 +580,7 @@ def create_app(test_config=None):
             "name": device.device_name,
             "hostname": device.hostname,
             "owner": device.owner.full_name,
+            "macAddress": device.mac_address,
             "owner_id": device.owner_user_id,
             "type": device.device_type,
             "os": device.operating_system or "",
@@ -489,7 +616,7 @@ def create_app(test_config=None):
             "id": user.id,
             "fullName": user.full_name or "",
             "username": user.username,
-            "email": user.email,
+            "email": mask_email(user.email),
             "role": user.role_name,
             "status": user.status.capitalize(),
         }
@@ -834,6 +961,20 @@ def create_app(test_config=None):
     @app.post("/logout")
     @login_required
     def logout():
+        if current_user.is_admin:
+            db.session.add(
+                ActivityLog(
+                    actor_user_id=current_user.id,
+                    event_type="admin.session_ended",
+                    entity_type="admin_panel",
+                    details={
+                        "ip_address": request.remote_addr,
+                        "username": current_user.username,
+                        "status": "success",
+                    },
+                )
+            )
+            db.session.commit()
         logout_user()
         session.clear()
         flash("You have been signed out.", "info")
@@ -878,6 +1019,22 @@ def create_app(test_config=None):
     def device_specifications(device_id):
         device = db.get_or_404(Device, device_id)
         can_access_device(device)
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type="sensitive.device_information_viewed",
+                entity_type="device",
+                entity_id=device.id,
+                details={
+                    "ip_address": request.remote_addr,
+                    "view_mode": (
+                        "administrator" if current_user.is_admin and admin_is_verified()
+                        else "owner"
+                    ),
+                },
+            )
+        )
+        db.session.commit()
         specification = device.hardware_spec
 
         def display_names(value):
@@ -985,9 +1142,106 @@ def create_app(test_config=None):
     def archived_devices():
         return render_template("archived_devices.html", active_page="archived-devices")
 
+    @app.route("/admin/verify", methods=["GET", "POST"])
+    @login_required
+    def admin_verify():
+        if not current_user.is_admin:
+            db.session.add(
+                ActivityLog(
+                    actor_user_id=current_user.id,
+                    event_type="admin.verification_failed",
+                    entity_type="admin_panel",
+                    details={
+                        "reason": "role_validation_failed",
+                        "ip_address": request.remote_addr,
+                        "username": current_user.username,
+                    },
+                )
+            )
+            db.session.commit()
+            abort(403)
+
+        if request.method == "POST":
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "")
+            administrator = User.query.filter(
+                func.lower(User.username) == username.lower()
+            ).one_or_none()
+            verified = (
+                administrator is not None
+                and administrator.id == current_user.id
+                and administrator.is_active
+                and administrator.is_admin
+                and verify_password(password, administrator.password_hash)
+            )
+            if not verified:
+                db.session.add(
+                    ActivityLog(
+                        actor_user_id=current_user.id,
+                        event_type="admin.verification_failed",
+                        entity_type="admin_panel",
+                        details={
+                            "reason": "credential_or_role_validation_failed",
+                            "ip_address": request.remote_addr,
+                            "username": username or current_user.username,
+                        },
+                    )
+                )
+                db.session.commit()
+                flash("Administrator verification failed.", "danger")
+                return render_template("admin_verify.html", active_page="admin"), 403
+
+            session["admin_verified_user_id"] = current_user.id
+            session["admin_verified_at"] = datetime.now(timezone.utc).timestamp()
+            session["admin_verification_allow_next"] = True
+            db.session.add(
+                ActivityLog(
+                    actor_user_id=current_user.id,
+                    event_type="admin.verification_succeeded",
+                    entity_type="admin_panel",
+                    details={
+                        "ip_address": request.remote_addr,
+                        "username": current_user.username,
+                        "role": current_user.role_name,
+                        "status": "success",
+                    },
+                )
+            )
+            db.session.commit()
+            flash("Administrator identity verified.", "success")
+            return redirect(url_for("admin"))
+
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type="admin.verification_requested",
+                entity_type="admin_panel",
+                details={
+                    "ip_address": request.remote_addr,
+                    "username": current_user.username,
+                },
+            )
+        )
+        db.session.commit()
+        return render_template("admin_verify.html", active_page="admin")
+
     @app.get("/admin")
     @admin_required
     def admin():
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type="admin.panel_access_succeeded",
+                entity_type="admin_panel",
+                details={
+                    "ip_address": request.remote_addr,
+                    "username": current_user.username,
+                    "role": current_user.role_name,
+                    "status": "success",
+                },
+            )
+        )
+        db.session.commit()
         return render_template("admin.html", active_page="admin")
 
     @app.post("/api/device-registration-tokens")
@@ -1318,6 +1572,22 @@ def create_app(test_config=None):
         refresh_stale_device_statuses()
         device = db.get_or_404(Device, device_id)
         can_access_device(device)
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type="sensitive.device_information_viewed",
+                entity_type="device",
+                entity_id=device.id,
+                details={
+                    "ip_address": request.remote_addr,
+                    "view_mode": (
+                        "administrator" if current_user.is_admin and admin_is_verified()
+                        else "owner"
+                    ),
+                },
+            )
+        )
+        db.session.commit()
         diagnostic_ids = [run.id for run in device.diagnostic_runs]
         activity_query = ActivityLog.query.filter(
             or_(
@@ -1507,7 +1777,7 @@ def create_app(test_config=None):
                     "entity_id": entry.entity_id,
                     "actor": entry.actor.full_name or entry.actor.username
                     if entry.actor else "System",
-                    "details": entry.details,
+                    "details": mask_sensitive_strings(entry.details),
                     "id": entry.id,
                     "occurred_at": entry.occurred_at.isoformat(),
                 }
@@ -1694,6 +1964,15 @@ def create_app(test_config=None):
     @app.get("/api/users")
     @admin_required
     def list_users():
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type="sensitive.user_listing_viewed",
+                entity_type="user",
+                details={"ip_address": request.remote_addr},
+            )
+        )
+        db.session.commit()
         users = User.query.filter(
             func.lower(User.username) != DEFAULT_ADMIN_USERNAME
         ).order_by(User.id.asc()).all()
@@ -2217,6 +2496,18 @@ def create_app(test_config=None):
     @app.get("/api/admin/logs")
     @admin_required
     def admin_logs():
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type="sensitive.audit_logs_viewed",
+                entity_type="audit_log",
+                details={
+                    "ip_address": request.remote_addr,
+                    "kind": request.args.get("kind", "all"),
+                },
+            )
+        )
+        db.session.commit()
         kind = request.args.get("kind", "all")
         query_text = request.args.get("q", "").strip()
         try:
@@ -2256,7 +2547,7 @@ def create_app(test_config=None):
                     "entity_id": entry.entity_id,
                     "actor": entry.actor.full_name or entry.actor.username
                     if entry.actor else "System",
-                    "details": entry.details,
+                    "details": mask_sensitive_strings(entry.details),
                     "timestamp": entry.occurred_at.isoformat(),
                 }
                 for entry in activity_query.order_by(
