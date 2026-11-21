@@ -1270,6 +1270,21 @@ def main():
 
     if scanner_mode:
         LOGGER.info("Device scan submitted (run_id=%s).", result["run_id"])
+        if not DASHBOARD_URL:
+            LOGGER.warning("The dashboard URL is not configured; scan results were saved.")
+        else:
+            try:
+                if not webbrowser.open(DASHBOARD_URL, new=2):
+                    LOGGER.warning(
+                        "Could not open the dashboard after scan submission: %s",
+                        DASHBOARD_URL,
+                    )
+            except (OSError, webbrowser.Error):
+                LOGGER.warning(
+                    "Could not open the dashboard after scan submission: %s",
+                    DASHBOARD_URL,
+                    exc_info=True,
+                )
     else:
         LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
         print(f"Device Registered Successfully (Device ID: {result['device_id']}).")

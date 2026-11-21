@@ -351,6 +351,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b'id="authenticatorQrCode"', response.data)
         self.assertIn(b'id="registrationEmailAddress"', response.data)
         self.assertIn(b'id="resendCodeCountdown"', response.data)
+        self.assertIn(b'id="registrationFormStatus"', response.data)
+        self.assertNotIn(b"Save Credentials", response.data)
         self.assertIn(b'Back to sign up', response.data)
         self.assertIn(b"js/password-strength.js", response.data)
         self.assertIn(b"js/register.js", response.data)
@@ -360,6 +362,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("verificationDialog.close()", register_script)
         self.assertIn("full_name: fullName.value", register_script)
+        self.assertNotIn("restoreRegistrationState", register_script)
+        self.assertNotIn("registrationStatePromise", register_script)
         self.assertNotIn("form.reset()", register_script)
         self.assertNotIn("/api/registration/cancel", register_script)
         self.assertNotIn("password: password.value", register_script)
@@ -3008,6 +3012,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "https://devmonitor.example/dashboard",
             ),
             patch.object(
+                device_agent.webbrowser, "open", return_value=True
+            ) as open_dashboard,
+            patch.object(
                 device_agent.urllib.request, "urlopen", side_effect=capture_request
             ),
             patch("builtins.print") as print_output,
@@ -3023,6 +3030,10 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(
             request_holder["request"].full_url,
             "https://devmonitor.example/api/device-agent/scans/8",
+        )
+        open_dashboard.assert_called_once_with(
+            "https://devmonitor.example/dashboard",
+            new=2,
         )
         self.assertEqual(
             request_holder["request"].get_header("Authorization"),

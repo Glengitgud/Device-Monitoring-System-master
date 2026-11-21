@@ -1,118 +1,239 @@
-# Device Monitoring Prototype — Feature Summary
+# DevMonitor — Features and Future Work
 
-## Implemented Features vs. Future Development
+**System:** Device Monitoring System  
+**Document status:** Capstone implementation baseline  
+**Review date:** 2026-11-21
 
-This document separates working, database-backed prototype features from
-the enhancements that still require production development.
+This document describes the functionality present in the current
+`device_monitoring_prototype` codebase. Status is based on implementation,
+database models, Flask routes, UI templates, and automated tests. Items marked
+as partially implemented are operational only within documented limitations.
 
----
+## Implemented Features
 
-## UI/UX Design
+### Account Registration and Authentication
 
-The prototype uses a **dark minimal theme** built on a custom colour
-palette derived from three core hex values:
+- Public staged registration requires a username, display name, email, and an
+  8–16 character password containing at least one capital letter and one
+  special character.
+- Registration sends a six-digit Gmail email verification code that expires
+  after five minutes. Codes are HMAC-hashed, single-use, attempt-limited,
+  resend-cooled, and hourly-limited.
+- Registration then requires a Google Authenticator-compatible TOTP code.
+  TOTP secrets are encrypted at rest and TOTP replay is rejected.
+- The account is created only after email and TOTP verification succeed.
+- New passwords use bcrypt. Existing Werkzeug password hashes remain
+  verifiable for migration compatibility.
+- Login accepts a username or registered email. TOTP-enabled accounts receive
+  a second-factor challenge after password verification.
+- Sessions use Flask-Login with CSRF protection on API writes.
+- Administrator login is separate from administrator panel verification.
+  `/admin` and `/api/admin/*` require a fresh password check and active
+  Administrator role.
+- Account status, password, role, and email verification data are persisted and
+  checked server-side.
 
-| Token | Hex | Usage |
+### Role-Based Access and Administration
+
+- Role and permission models support Administrator and User roles.
+- Server-side checks restrict administrator pages, user management, audit logs,
+  exports, and administrator-only device deletion.
+- Device pages and APIs are owner-scoped, while administrators can manage all
+  active, archived, and deleted devices.
+- Administrators can create accounts, assign Administrator or User roles,
+  update account status and profile data, and deactivate accounts.
+- Reserved bootstrap account `admin` is excluded from public and
+  administrator user-management operations.
+- Administrator verification, panel access, account actions, device actions,
+  scan actions, and export actions are recorded in the audit system.
+
+### Device Registration
+
+- Standard users receive a QR-based, 30-minute, single-use enrollment flow.
+- Enrollment tokens are random, SHA-256 hashed at rest, owner-bound,
+  revocable, and consumed atomically after registration.
+- The QR page synchronizes its countdown and status with the server.
+- Regenerating a token revokes the previous unused token.
+- The enrollment page requires explicit account verification and confirmation
+  of trust before an executable is downloaded.
+- QR registration is unavailable to Administrator accounts.
+- Successful registration links and verifies the device, stores the owner and
+  registrant, captures inventory, and unlocks the standard-user dashboard.
+- Registration success shows a confirmation state with a five-second automatic
+  dashboard redirect and immediate navigation controls.
+
+### MAC Address Support
+
+- The Windows enrollment and scanner agents collect an available hardware MAC
+  address.
+- MAC addresses are validated in colon-separated hexadecimal format and stored
+  in uppercase.
+- The address is persisted on the device and its enrollment token.
+- Device details and specifications views expose the stored MAC address.
+- Network interface records can retain interface names and MAC addresses.
+- Migration `011_device_mac_address.sql` provides additive support for existing
+  databases.
+
+### Windows Device Agent and Scanner
+
+- The application host can build one-file Windows executables with PyInstaller.
+- Registration mode is a console executable that displays the detected
+  inventory and submits it only after user approval.
+- Scanner mode is a silent, no-console executable with a short-lived bearer
+  token and an explicit submission endpoint.
+- Collector components are best-effort: a failed hardware or network check does
+  not prevent the remaining inventory from being submitted.
+- Collection includes CPU name and core count, RAM capacity and usage, storage
+  devices and available space, GPU information, motherboard brand, OS details,
+  network adapter names, IP addresses, and MAC address.
+- Scanner reports include overall, hardware, software, and driver scores;
+  component scores; individual checks; detected issues; severity; root-cause
+  text; recommendations; and numbered troubleshooting steps.
+- Network checks distinguish DNS, TCP, TLS, and endpoint-path failures.
+- Storage findings identify affected volumes. Unsupported values remain
+  unavailable rather than being inferred.
+- Diagnostic and inventory submissions are size-limited and strictly validated.
+
+### Device Monitoring
+
+- Active, archived, and deleted lifecycle states are stored separately from
+  online, offline, maintenance, retired, and unknown connectivity status.
+- A device is marked online after a successful IP-bearing registration or
+  scanner submission and is recorded with `last_seen_at`.
+- Devices without a successful scan or check-in for five minutes transition to
+  offline and produce a device event and audit record.
+- Dashboard and device views refresh through browser-side polling.
+- The dashboard shows total, online, and offline fleet counts plus device,
+  owner, operating system, CPU, RAM, health, and status information.
+- Health data reflects the latest approved one-time scanner result. It does not
+  represent continuous telemetry.
+- Scanner history is retained in `diagnostic_runs` and `diagnostic_checks`.
+- A 15-minute scanner authorization expires if a report is not submitted.
+- Resource samples are represented in the schema, but live CPU, memory, storage,
+  and network collection is not performed continuously.
+
+### Dashboard, Device Management, and UI
+
+- The dashboard is database-backed and restricted for standard users until at
+  least one verified device is registered.
+- My Devices provides owner/registrant-scoped inventory, status filtering,
+  search, sorting, pagination, details, specifications, archive/restore, and
+  administrator soft-delete operations.
+- Device details show collected specifications, IP information, MAC address,
+  lifecycle state, timestamps, event history, scanner runs, network records,
+  and metrics when present.
+- Archived Devices provides device search and lifecycle restoration.
+- The custom responsive dark UI includes desktop navigation and a mobile
+  sidebar, status badges, cards, tables, alerts, and modal flows.
+- Browser-side values are escaped and presentation data is returned from
+  server-authorized endpoints.
+
+### Audit Logs and Data Privacy
+
+- Two audit streams are implemented: device event `logs` and broader
+  `activity_logs`.
+- Audit records include actor, event type, entity, timestamp, IP address where
+  applicable, and success or reason details.
+- Administrator credential values, email verification codes, and submitted
+  passwords are not persisted in audit details.
+- Server-side masking protects email addresses in administrative listings,
+  audit details, and exports. Operational usernames and device fields remain
+  visible.
+- Device and account history is preserved by archive and soft-delete behavior.
+  There is no physical-delete route for devices.
+- Export and sensitive-view operations are re-authenticated or
+  permission-gated and audited.
+
+### Excel Export
+
+- Administrators can export selected Users, Devices, Device Information, Audit
+  Logs, and Monitoring Data worksheets to an in-memory `.xlsx` workbook.
+- Export requires fresh administrator username and password verification.
+- Denied, started, failed, and successful export attempts are audited.
+- The export is downloaded directly and is not written to public static
+  directories.
+
+### Database and Deployment Support
+
+- Flask-SQLAlchemy models define users, RBAC, staged registration, email
+  verification, devices, specifications, MAC addresses, network observations,
+  diagnostic runs/checks, metrics, device events, and activity logs.
+- `schema.sql` provides a full MySQL/MariaDB schema for new installations.
+- Additive migrations `001` through `011` support documented upgrade paths.
+- `init-db` creates missing model-backed tables, default roles, and the
+  development Administrator account without resetting existing credentials.
+- `check-db` performs read-only model/schema parity checks.
+- `check-mail` validates Gmail SMTP connectivity and authentication without
+  sending mail.
+- The application supports XAMPP on Windows, environment-based database
+  configuration, `.env` credentials, pooled connection pre-ping, and optional
+  secure session cookies.
+- `create-admin` and `seed-sample-data` provide controlled CLI setup.
+- Automated Flask, database, authentication, and agent-builder tests cover
+  core workflows in an isolated SQLite test database.
+
+## Partially Implemented Features
+
+| Area | Current implementation | Remaining limitation |
 |---|---|---|
-| `--dm-darkest` | `#0d0221` | Page backgrounds, deepest surface |
-| `--dm-dark` | `#0f084b` | Sidebar, top navbar, card headers |
-| `--dm-accent` | `#26408b` | Primary buttons, active states, focus rings |
+| **Device monitoring** | Online/offline state, last-seen timestamps, five-minute stale-status transition, and latest scanner health | No persistent agent or continuous CPU/RAM/storage/network telemetry |
+| **Device Scanner** | One-time, authorized Windows inventory and health report | Windows-only, per-run executable, user-initiated, and no persistent scheduling |
+| **Device health diagnostics** | CPU, RAM, storage, GPU, network, operating-system, driver, and PnP checks with color bands and guidance | Smart/disk-health, CPU temperature, startup timing, event-log, and complete security posture may be unavailable |
+| **Dashboard updates** | Browser polling and scanner-completion refresh | No WebSocket or server-sent event push and no real-time trend display |
+| **Manual device registration** | A server API can create an owned device and collect the Flask-host inventory | Not the primary QR workflow and not exposed as the modern My Devices registration path |
+| **Cross-platform support** | Windows 64-bit executable build and collection | macOS, Linux, ARM, and mobile endpoint collectors are not implemented |
+| **Deployment planning** | Local XAMPP/Flask setup, environment configuration, migrations, database and mail checks | HTTPS, code signing, production server configuration, backups, and operations are deployment prerequisites rather than completed production services |
+| **Data privacy controls** | Masking, soft lifecycle operations, environment-secret handling, and audit records | No configurable retention policy, consent ledger, data subject workflow, or formal privacy review |
+| **Security hardening** | CSRF, server-side authorization, password hashing, TOTP, email throttles, validated reports, and secure-cookie configuration | No completed penetration test, general web request-rate limiter, security headers audit, or production key-management integration |
 
-Design principles followed:
+## Planned Features
 
-- **Dark-first, minimal UI** — reduces visual clutter and eye strain.
-- **Consistent spacing & border radii** — 12 px card radius, 8 px input radius.
-- **Accessible contrast** — light text on dark surfaces meets WCAG AA.
-- **Responsive layout** — sidebar collapses to a mobile drawer at ≤ 992 px.
-- **Clean login screen** — no extraneous information; a focused sign-in form.
+These items are supported as roadmap work only when they are not already
+present in the codebase.
 
----
+- Independent account recovery and password-reset flow.
+- Password-reset audit controls and account unlock/recovery operations.
+- Administrator-managed organization email domains and verified-domain login
+  policies.
+- Persistent, explicitly consented endpoint agent lifecycle.
+- Agent installation, update, signature verification, pause/stop controls, and
+  device credential revocation.
+- Scheduled and automatically initiated endpoint scans.
+- Continuous CPU, RAM, storage, and connectivity telemetry.
+- Historical resource and utilization trend charts.
+- Offline/threshold alert delivery by email or in-app notification center.
+- SMS, webhook, Slack, or PagerDuty integrations.
+- PDF and CSV reports for inventory, health, and user activity.
+- General API request and login rate limiting.
+- Production security review, automated vulnerability scanning, and hardening
+  of security headers and error responses.
+- HTTPS deployment and signed Windows executable delivery.
+- Containerization and production reverse-proxy/application-server deployment.
+- Load balancing and horizontal scaling for large organizations.
+- Expanded audit coverage for future schedules, recovery, notifications,
+  retention, and operations.
 
-## Implemented Database Features
+## Future Enhancements
 
-The application uses MySQL through Flask-SQLAlchemy. New public accounts are staged in a temporary registration challenge and are not created until both Gmail email and Google Authenticator checks pass. Email uses configurable Gmail SMTP with STARTTLS; six-digit codes are HMAC-hashed, expire after five minutes, are single-use, and have bounded attempts and resend cooldown/hour limits. New passwords use bcrypt; existing Werkzeug hashes remain verifiable for backward compatibility. Authenticator secrets are Fernet-encrypted at rest. Existing accounts are retained as verified during migration; TOTP is required at sign-in whenever enabled. Login accepts a username or registered email. Auth forms provide real-time email-format feedback, while registration checks case-insensitive email uniqueness on the server. On first setup, `init-db` creates the reserved `admin` account with the Administrator role and bootstrap password `admin123`; rerunning it preserves existing credentials and account status. Administrator-only user management/log access and owner-scoped device operations are enforced by Flask views, not by JavaScript alone. Device enrollment continues to use separate, expiring, single-use QR tokens; administrators cannot access device registration.
+- macOS inventory and diagnostics collector.
+- Linux inventory and diagnostics collector.
+- Mobile operating-system support, subject to platform security and permissions.
+- Architecture-aware and signed multi-platform agent builds.
+- Centralized schedule, policy, and endpoint configuration management.
+- Configurable health thresholds and organization-specific alert policies.
+- Metrics retention tiers, archival, purge, and privacy-compliant export.
+- Capacity and fleet-health analytics, forecasting, and executive reporting.
+- Optional machine-learning-assisted anomaly detection based on verified
+  historical telemetry.
+- Progressive web application or native administrative clients.
+- Organization-wide directory/identity integration after domain ownership and
+  identity-provider verification are established.
+- High-availability database deployment and documented disaster recovery.
 
-| Feature | Current implementation |
-|---|---|
-| **User Registration and Login** | Account creation enforces password policy and matching confirmation. A required six-digit email code and authenticator TOTP are verified before the account row is created. Existing users may sign in with a username or email; users with TOTP enabled must complete the second-factor challenge. |
-| **Email Verification** | A registration popup requests a six-digit code sent through Gmail SMTP (`smtp.gmail.com:587`, STARTTLS) from the authenticated Gmail account. The multipart plain-text/HTML message includes DevMonitor branding and the five-minute expiry. Codes are HMAC-hashed at rest, cannot be reused, and have bounded attempts plus 60-second resend cooldown/hourly limits. SMTP sender/account mismatches and malformed messages are rejected; failed initial delivery expires the unsent code and permits an immediate retry, while failed resends consume the cooldown to prevent abuse. `check-mail` validates SMTP connectivity/authentication without sending; delivery failures and code rejection are logged without logging credentials or codes. |
-| **Google Authenticator** | A unique TOTP secret is generated per pending registration, encrypted in the database, and delivered to the UI only as a provisioning QR. RFC 6238 6-digit codes are checked with a small clock-skew window and replay protection. Successful verification stores the encrypted secret and verification timestamp. |
-| **Authentication Database Changes** | `users.email_verified` defaults to false for newly created rows; legacy accounts retain their verified state. `registration_challenges` stages account data and rate-limit counters. `email_verifications` stores HMAC-digested codes, expiry, verified/used state, and timestamps; plaintext codes are never persisted. Migration `010_gmail_email_verification.sql` adds the table and default without deleting existing data. |
-| **Role-Based Access** | Roles and permissions are stored in RBAC tables; `/admin`, user-management, and administrator log endpoints require an administrator. |
-| **Administrator Re-Verification** | Administrators must re-enter their username and password after login before `/admin` or `/api/admin/*` protected features are available. Role and account status are rechecked; successful and failed attempts, panel access, IP addresses, timestamps, and reasons are audited. Refreshing or reopening `/admin` requires verification again. |
-| **Sensitive Data Masking** | Shared server-side masking protects email values in applicable administrative and audit views. Usernames, device names, dashboard labels, MAC addresses, and monitoring information remain fully visible. |
-| **Device Registration and Verification** | Account registration issues a 30-minute QR link containing a random token stored as a SHA-256 hash. Scanning opens a verification page; explicit account verification and a trust confirmation are required before the token-bound Windows EXE is built and downloaded. The QR is rendered on a white canvas with a dark pattern, displays a server-clock-synchronized countdown/token status, and can be regenerated; regenerating revokes the prior unused token. A dashboard link enters the same protected flow. Successful registration validates and stores the collected MAC address on both the device and its enrollment record, links the device, marks it verified, and unlocks protected dashboard/device/monitoring routes. Administrators always retain dashboard access and can manage existing devices but cannot register devices or use QR enrollment. |
-| **Windows EXE Device Agent and Scanner** | On a 64-bit Windows application host, PyInstaller builds one-file enrollment and scanner executables with their respective short-lived authorization and server URL. Enrollment collects CPU name/core count, RAM capacity/usage, storage devices/capacity/available space, GPU, motherboard brand, OS name/version, network adapter names, IP addresses, and an available hardware MAC address. A Device Scanner run collects inventory and one-time health checks together and submits them to the website using a silent, no-console executable. Component failures are logged and unavailable fields do not prevent other results from being submitted. The scanner does not open a health window, show command-prompt results, or run persistently. |
-| **Device Specifications** | The confirmed inventory is validated, stored with the device and owner, and available on the Detected Device Specifications page and from the existing View action. The MAC address is shown with device details and available from the registration status record. Registration/update dates, status, and device event history are shown. Schema upgrades use additive migration `011_device_mac_address.sql`. |
-| **Device Editing and Removal** | Active devices can be updated; archive/restore uses a lifecycle state, while administrator deletion is a retained soft delete. No application route physically removes devices. |
-| **Device Scanner and Health** | My Devices provides one scan action. The run-specific Windows Device Scanner submits inventory, one-time health checks, recommendations, and troubleshooting results to the website. The website validates and stores reports in the existing `diagnostic_runs` and `diagnostic_checks` tables, updates device specifications/status/last-seen data, and refreshes dashboard data. Existing tables are retained for history and database integrity; there is no separate diagnostics button or health-result window. Health scoring is advisory, not continuous monitoring. |
-| **Health Indicators and Guidance** | CPU, RAM, storage capacity, GPU presence, network, driver metadata, Windows-reported Plug-and-Play problem codes, and selected OS/service signals use circular indicators and color bands (green 80–100, yellow 60–79, orange 40–59, red 0–39). Findings can include severity, likely cause, recommendation, and numbered steps. Network checks distinguish DNS, TCP, TLS, and endpoint-path failures; low storage names the affected volume. A PnP code identifies a reported device problem but cannot by itself prove a loose connection. Unsupported signals are not inferred. |
-| **Diagnostic History** | Device details/history retain each diagnostic run, its saved checks, scores, recommendations, and status. Dashboard health links open the corresponding device report. |
-| **Registration Completion** | Successful QR registration displays a success state, Dashboard shortcut, and five-second automatic redirect with an immediate navigation option. |
-| **User Management** | Administrators can create accounts, update roles/status, and deactivate users without deleting their history. |
-| **Device Details and Logs** | Owners/registrants see their device specifications; administrators can view and manage all active/archived devices and see complete device and audit history. Device search and status filtering, online/offline/maintenance indicators, archive/restore, and retained soft deletion are available. Online devices transition to offline after five minutes without a successful scan/check-in, with a recorded event. Administrators can also search/filter activity and device event logs. These are application records, not operating-system or web-server logs. |
-| **Dashboard** | Fleet counts and rows are queried from MySQL and refreshed periodically; device and status details update automatically while pages are open. Standard users need at least one non-deleted verified device and see their verification status; unverified users cannot access device or monitoring pages/APIs. Administrators are not subject to this gate. |
-| **Administrator Excel Export** | Administrators can export selected Users, Devices, Device Information, Audit Logs, and Monitoring Data worksheets as an in-memory `.xlsx` file. Each export requires fresh credentials for the signed-in administrator; invalid, started, failed, and successful attempts are logged without storing credentials. |
-| **Search, Sort and Pagination** | Browser-side presentation of records returned from the database-backed endpoints. |
-| **Input and Session Security** | Server-side validation, CSRF token checks, bcrypt password hashes for new accounts, legacy hash verification, HMAC-digested single-use email codes, resend/attempt throttles, Fernet-encrypted TOTP secrets, HttpOnly/SameSite cookies, and configurable Secure cookies. Gmail app credentials are loaded only from `.env`; SMTP and verification logs never include credentials or submitted codes. |
-| **Database Health Check** | `check-db` compares model tables, columns, indexes, foreign keys, and check constraints with the configured database and reports key record counts without modifying data. |
+## Implementation Scope
 
----
-
-## Remaining Work for Production Monitoring
-
-To turn this prototype into a production-ready system, the following
-areas would need to be designed and built with proper backend
-technologies.
-
-### 1. Account Hardening
-- Add password reset and operational account recovery. Registration and login MFA are implemented; production still needs independent security review and operational alerting for abuse.
-- The reserved `admin` / `admin123` bootstrap credential is for local setup only and is created only when the account is missing; rerunning `init-db` preserves existing credentials and account status. Replace the bootstrap credential before deployment.
-- For multi-domain login, keep local username login separate from organization email login. Validate email syntax, normalize and check the domain against an administrator-managed allowed-domains table, verify credentials and account status (active, suspended, or disabled), record success/failure without logging credentials, then redirect by assigned role. Verify domain ownership before enabling it; an email suffix alone does not establish identity.
-
-### 2. Endpoint Agent and Real Device Collection
-- Enrollment and Device Scanner executables are currently Windows-only; the scanner is a one-time, user-initiated inventory and health submission with best-effort per-component detection and local logging. A signed installer, managed deployment, agent updates, and continuous collection are future work.
-- Continuous CPU, RAM, storage, and connectivity telemetry remains future work and requires an installed, consented agent plus a documented retention policy.
-- CPU temperature, SMART/storage health, startup duration, Windows event-log analysis, complete security posture, and Device Manager problem codes depend on hardware/Windows access and may be reported unavailable. Driver age metadata is only a review signal.
-
-### 3. Scheduled and Real-Time Monitoring
-- The current scanner is a one-time user-launched executable. Admin schedule CRUD and automatic collection require the approved, explicitly consented persistent agent, including device credential revocation and visible pause/stop controls; schedules must not silently run endpoint code.
-- The dashboard and device list currently poll for updates. Use WebSockets or Server-Sent Events if scale requires lower-latency status pushes.
-
-### 4. Security Hardening and Deployment
-- Protect against common web vulnerabilities (XSS, CSRF, SQL injection).
-- Use HTTPS for all communications.
-- Implement rate limiting and input sanitization.
-- Secure API endpoints with authentication middleware.
-
-### 5. Reporting & Analytics
-- Generate exportable reports (PDF, CSV) on device health, inventory, and user activity.
-- Add historical charts showing resource usage trends over time.
-
-### 6. Notification & Alerting System
-- Send email or SMS alerts when a device goes offline or a resource threshold is exceeded.
-- Provide an in-app notification center for administrators.
-
-### 7. Deployment & Scalability
-- Containerize the application (e.g., Docker).
-- Deploy behind a production web server (e.g., Nginx + Gunicorn).
-- Add load balancing and horizontal scaling for larger organizations.
-
-### 8. Audit Logging
-- Continue expanding audit coverage to include any future administrative actions and operational events.
-
----
-
-## Summary
-
-This prototype successfully demonstrates the **user interface** and
-**workflow** of a centralized device monitoring system. It is designed
-to be presented as a college project to show how the system would look
-and behave.
-
-The UI follows a **dark minimal design language** using a cohesive
-palette of deep purples and blues (`#0d0221`, `#0f084b`, `#26408b`),
-providing an industry-standard look with clean typography, consistent
-spacing, and responsive layouts.
-
-Accounts, five-minute email verification records, encrypted TOTP state, device inventory and verification flags, QR enrollment records, confirmed Windows endpoint specifications, network snapshots, and consented one-time health/diagnostic reports are persisted in MySQL. Reports reuse existing diagnostic tables; no diagnostics schema migration is required. New account passwords use bcrypt and pre-existing Werkzeug hashes remain supported. Gmail credentials are private `.env` configuration and must be rotated if exposed. The application does not continuously monitor endpoints. Production use still requires HTTPS, code signing and managed agent delivery, broader supported diagnostics, recovery controls, and operational review.
+DevMonitor is a database-backed Flask prototype with verified QR device
+enrollment, consented Windows inventory and one-time health scanning,
+owner-scoped device management, administrator controls, audit records, and
+Gmail/TOTP account protection. It does not continuously monitor endpoints,
+silently install agents, or provide a production operations platform.

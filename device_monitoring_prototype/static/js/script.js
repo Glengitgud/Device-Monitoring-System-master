@@ -34,7 +34,6 @@ const deviceAddressRequests = new Map();
 let registrationRedirectTimer = null;
 let registrationRedirectInterval = null;
 let registrationSuccessShown = false;
-let scanRedirectInterval = null;
 
 function csrfToken() {
     return document.querySelector('meta[name="csrf-token"]')?.content || '';
@@ -135,43 +134,6 @@ function showRegistrationSuccess(device = null) {
             countdown.textContent = `Redirecting to Dashboard in ${remaining} seconds...`;
         }
         if (remaining <= 0) redirect('/dashboard');
-    }, 1000);
-}
-
-function showDeviceScanSuccess(deviceId) {
-    const modalRoot = document.getElementById('deviceScanSuccessModal');
-    if (!modalRoot) return;
-    const deviceUrl = `/devices/${encodeURIComponent(deviceId)}/specifications`;
-    const viewDeviceButton = modalRoot.querySelector('#deviceScanViewDeviceButton');
-    const dashboardButton = modalRoot.querySelector('#deviceScanDashboardButton');
-    if (viewDeviceButton) viewDeviceButton.href = deviceUrl;
-
-    const redirect = destination => {
-        window.clearInterval(scanRedirectInterval);
-        window.location.assign(destination);
-    };
-    viewDeviceButton?.addEventListener('click', event => {
-        event.preventDefault();
-        redirect(viewDeviceButton.href);
-    }, { once: true });
-    dashboardButton?.addEventListener('click', event => {
-        event.preventDefault();
-        redirect('/dashboard?scan=complete');
-    }, { once: true });
-
-    const countdown = modalRoot.querySelector('#deviceScanCountdown');
-    let remaining = 5;
-    if (countdown) countdown.textContent = `Redirecting to Dashboard in ${remaining} seconds...`;
-    bootstrap.Modal.getOrCreateInstance(modalRoot).show();
-    scanRedirectInterval = window.setInterval(() => {
-        remaining -= 1;
-        if (countdown) {
-            countdown.textContent =
-                `Redirecting to Dashboard in ${Math.max(remaining, 0)} seconds...`;
-        }
-        if (remaining <= 0) {
-            redirect('/dashboard?scan=complete');
-        }
     }, 1000);
 }
 

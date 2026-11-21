@@ -122,9 +122,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const csrfInput = form.querySelector('[name="csrf_token"]');
     const resendButton = document.getElementById('resendVerificationCode');
     const resendCountdown = document.getElementById('resendCodeCountdown');
+    const registrationFormStatus = document.getElementById('registrationFormStatus');
     const profileStorageKey = 'devmonitor.registration.profile.v1';
     let activeRegistration = null;
+    let registrationStartPending = false;
     let resendTimer = null;
+
+    function setRegistrationFormStatus(message = '') {
+        registrationFormStatus.textContent = message;
+        registrationFormStatus.hidden = !message;
+    }
 
     function setDialogStatus(message, state = 'info') {
         dialogStatus.textContent = message;
@@ -140,15 +147,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }));
         } catch (error) {
             console.error('Registration profile could not be saved in this tab.', error);
-        }
-    }
-
-    function hasSavedProfile() {
-        try {
-            return Boolean(sessionStorage.getItem(profileStorageKey));
-        } catch (error) {
-            console.error('Registration profile could not be checked in this tab.', error);
-            return false;
         }
     }
 
@@ -366,42 +364,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!verificationDialog.open) verificationDialog.showModal();
     }
 
-    async function restoreRegistrationState() {
-        try {
-            const response = await fetch('/api/registration/status', {
-                headers: { Accept: 'application/json' },
-            });
-            if (!response.ok) throw new Error('Registration status could not be restored.');
-            const state = await response.json();
-            if (!state.active) return;
-            activeRegistration = state;
-            if (!hasSavedProfile()) {
-                fullName.value = state.full_name;
-                email.value = state.email;
-                username.value = state.username;
-                saveProfile();
-            }
-            updateProfileValidation();
-            showRegistrationState(state);
-            if (state.email_verified) {
-                document.getElementById('authenticatorVerificationCode').focus();
-            } else {
-                document.getElementById('emailVerificationCode').focus();
-            }
-        } catch (error) {
-            console.error(error);
-        }
-    }
-
     restoreProfile();
     updateProfileValidation();
     updatePasswordValidation();
-    const registrationStatePromise = restoreRegistrationState();
 
     form.addEventListener('submit', async event => {
         event.preventDefault();
-        await registrationStatePromise;
-        if (verificationDialog.open) return;
+        if (verificationDialog.open || registrationStartPending) return;
+        setRegistrationFormStatus();
         fullName.value = fullName.value.trim();
         email.value = email.value.trim();
         username.value = username.value.trim();
@@ -433,8 +403,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         saveProfile();
         document.getElementById('registrationEmailAddress').textContent = email.value.trim();
-        if (!verificationDialog.open) verificationDialog.showModal();
-        setDialogStatus('Sending your verification code...', 'info');
+        registrationStartPending = true;
         try {
             const button = form.querySelector('button[type="submit"]');
             const result = await withLoading(button, 'Sending code...', () =>
@@ -447,25 +416,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const state = await response.json();
             if (!state.active) throw new Error('Registration session expired. Please try again.');
             showRegistrationState(state, result.message);
+            setRegistrationFormStatus();
             if (state.email_verified) {
                 document.getElementById('authenticatorVerificationCode').focus();
             } else {
                 document.getElementById('emailVerificationCode').focus();
             }
         } catch (error) {
-            try {
-                const response = await fetch('/api/registration/status', {
-                    headers: { Accept: 'application/json' },
-                });
-                const state = response.ok ? await response.json() : null;
-                if (state?.active) {
-                    showRegistrationState(state, error.message);
-                    return;
-                }
-            } catch (statusError) {
-                console.error(statusError);
-            }
-            setDialogStatus(error.message, 'error');
+            setRegistrationFormStatus(error.message);
+        } finally {
+            registrationStartPending = false;
         }
     });
 

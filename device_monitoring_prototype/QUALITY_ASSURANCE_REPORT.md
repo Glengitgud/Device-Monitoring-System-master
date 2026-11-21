@@ -12,15 +12,15 @@ The existing prototype supports verified QR enrollment, one-time Windows invento
 |---|---|---|
 | Device Registration | QR-enrollment tokens are expiring, one-use, and owner-bound. MAC addresses are now collected, validated, stored on devices and enrollment records, and shown in device details. | Continue validating registration compatibility and the unified scanner in later stages. |
 | Device Monitoring | Dashboard and device lists refresh periodically; the unified scanner now submits inventory and health in one authorized operation and refreshes the website data. | Validate live status indicators and automatic synchronization across all views. |
-| Device Agent | The enrollment executable collects inventory; the Device Scanner executable collects inventory and health without a console or external result window. | Validate platform boundaries and packaging on supported production hosts. |
+| Device Agent | The enrollment executable collects inventory; the silent Device Scanner submits inventory and health, then opens the configured dashboard URL in the default browser. | Validate platform boundaries, packaging, and browser behavior on a supported Windows host. |
 | Device Status Monitoring | Devices have persisted status and last-seen fields. Online devices without a successful scan/check-in for five minutes transition to offline with an audit record; status indicators refresh on dashboard, lists, and open details. | Validate maintenance workflows and status behavior under a production scheduler. |
-| Dashboard Features | Database-backed fleet data and health summaries are available; successful scan completion refreshes data and redirects to the dashboard. | Verify live status, cross-platform results, and browser behavior in supported browsers. |
+| Dashboard Features | Database-backed fleet data and health summaries are available; the scanner opens the dashboard after a successful submission. | Verify live status, cross-platform results, and browser behavior in supported browsers. |
 | Admin Features | Administrator-only user/device management and logs use server-side authorization. Excel export requires the current administrator's username/password and records denied, started, failed, and successful attempts. | Implement and verify admin-controlled schedules and agent delivery. |
 | Cross-Platform Support | Endpoint collection and EXE packaging are Windows-specific. | Add platform-aware collection and validate Windows, macOS, and mobile capability limitations. |
 | Audit Logs | Authentication, device, scan, status-transition, and export events use persisted audit records; export events omit credentials. | Verify schedule events after the persistent-agent model is implemented. |
 | Database Integration | Flask-SQLAlchemy models, migrations, and SQLite-backed integration tests cover core workflows. MAC address columns are included in the schema and additive migration `011_device_mac_address.sql`. | Validate production database upgrade behavior; add schedule schema changes in a later stage. |
 | Error Handling | Validation, token, SMTP, packaging, and database errors have explicit responses. | Verify useful website errors for scanner, schedule, export, and unsupported-platform failures. |
-| User Experience Improvements | Responsive UI, status indicators, in-page scan results, data refresh, and the five-second dashboard redirect are implemented. | Validate browser download behavior and user acceptance; there is no separate download tab to close in the current flow. |
+| User Experience Improvements | Responsive UI, status indicators, in-page scan results, data refresh, and the scanner dashboard redirect are implemented. | Complete a live Windows/browser acceptance pass; no code opens Explorer, Downloads, or a local directory. |
 
 ## Stage validation record
 
@@ -32,6 +32,19 @@ The existing prototype supports verified QR enrollment, one-time Windows invento
 | Live status and Excel export | Implemented and verified: stale status transition/audit and authenticated multi-sheet workbook export; denied credentials and successful exports are audited. |
 | Scheduled monitoring | Pending the explicitly consented persistent agent, device credential lifecycle, startup/pause/stop controls, and scheduled scan delivery. |
 | Cross-platform collection, accessibility, and user acceptance | Pending implementation and platform/browser tests; current executable collector/build is Windows-only. |
+| Scanner dashboard redirect and sign-up refresh behavior | Implemented; full automated regression passed (61 tests). Live Windows/browser and SMTP acceptance remain pending. |
+
+## Registration, Scanner, and Redirect Validation
+
+| Area | Validation |
+|---|---|
+| Device Scanner Workflow | `device_agent.py:main()` submits its authorized report and inventory to `app.py:submit_agent_scan`; after success, it opens the configured `/dashboard` URL with `webbrowser.open()`. `app.py:scan_device()` only builds and serves the EXE. The agent contains no Explorer, Downloads-folder, shell, or local-directory launch command. Automated coverage verifies submission and URL selection; physical Windows/browser behavior still requires a workstation acceptance pass. |
+| Redirect Validation | A successful scan opens the dashboard after submission; the dashboard loads persisted results. Scanner submission failures do not trigger this redirect. |
+| Navigation Validation | Dashboard and device links remain server-routed; the scanner completion URL is the configured dashboard route. |
+| Registration Workflow Validation | The public form contains only account fields, password confirmation, and CSRF protection. No Save Credentials control exists. Passwords are not restored from browser storage; login, authentication, and session behavior were not changed. |
+| Verification Workflow Validation | The sign-up page no longer queries verification status on load or reopens the verification dialog after refresh. A successful registration submission and active server status are required before the dialog appears. Email-delivery and status errors remain on the sign-up form. Valid name, email, and username inputs may be restored from tab-scoped session storage. |
+| Form State Management and Error Handling | Registration validation and verification stages remain intact. Verification errors are shown in the verification dialog; initial registration errors are shown on the sign-up form. A browser-launch failure is logged without undoing a successfully stored scan. |
+| Regression Testing Results | Full automated regression: 61 tests passed, including scanner redirect target, registration form contents, page rendering, and staged verification APIs. Live scanner execution, SMTP delivery, and browser interaction are deployment acceptance checks, not inferred from unit tests. |
 
 ## Admin Panel Security Validation
 
@@ -128,8 +141,12 @@ Recommended acceptance pass:
 4. Confirm email, username, phone, and MAC examples remain readable and are masked in listings, dashboard, details, logs, and previews.
 5. Confirm an owner can view their own record while a non-owner cannot.
 6. Review audit entries for verification, access, sensitive viewing, and export operations.
+7. Download and run the Device Scanner on Windows; confirm its report is saved, the dashboard opens, and no local folder window appears.
+8. Open Create Account and confirm there is no Save Credentials option; submit valid details and complete email and authenticator verification.
+9. Refresh Sign Up before and after registration submission; confirm it stays on Sign Up and only opens verification after a successful submission.
+10. Confirm failed registration or email delivery displays an error on the form and does not open the verification dialog.
 
-**Acceptance status:** Implementation complete; browser, production database, SMTP, and live workstation checks remain separate deployment validations.
+**Acceptance status:** Automated workflow checks are covered by the regression suite. Browser, production database, SMTP, and live Windows workstation checks remain deployment validations.
 
 ## Security and verification limits
 
