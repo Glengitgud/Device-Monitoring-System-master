@@ -1211,8 +1211,11 @@ def main():
             print("Choose Desktop or Laptop.")
 
         print("\nOnly the specifications listed above and your device name/type will be sent.")
-        if input("Submit this device to your DevMonitor account? Type yes to confirm: ").strip().casefold() != "yes":
+        answer = input("Submit this device to your DevMonitor account? Type yes to confirm: ")
+        if answer.strip().casefold() not in {"yes", "y"}:
+            LOGGER.info("Submission cancelled at the confirmation prompt; nothing was sent.")
             print("Submission cancelled; no device was registered.")
+            print("Run this agent again and type yes to link the device to your account.")
             return 0
         payload = {
             "name": name,
@@ -1254,7 +1257,19 @@ def main():
     except urllib.error.HTTPError as error:
         LOGGER.exception("Device agent submission failed with HTTP %s.", error.code)
         message = error.read().decode("utf-8", errors="replace")
-        print(f"Submission failed ({error.code}): {message}", file=sys.stderr)
+        try:
+            message = json.loads(message).get("error") or message
+        except (ValueError, AttributeError):
+            pass
+        if error.code == 401 and not scanner_mode:
+            print(
+                "Submission failed: this download has expired or was already used.\n"
+                "Download the agent again from the DevMonitor website (Downloads page) "
+                "and run the new copy.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Submission failed ({error.code}): {message}", file=sys.stderr)
         _show_log_location(log_path)
         return 1
     except (
@@ -1299,5 +1314,16 @@ def main():
     return 0
 
 
+def _pause_before_closing():
+    """Keep the console window of the packaged EXE open so results stay readable."""
+    if getattr(sys, "frozen", False) and sys.stdin is not None and sys.stdin.isatty():
+        try:
+            input("\nPress Enter to close this window...")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    _pause_before_closing()
+    raise SystemExit(exit_code)

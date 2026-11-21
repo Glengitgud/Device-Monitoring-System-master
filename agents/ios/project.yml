@@ -1,0 +1,69 @@
+# XcodeGen spec: on a Mac run `brew install xcodegen && xcodegen generate`
+# to create DevMonitorAgent.xcodeproj, then open it in Xcode 15+.
+name: DevMonitorAgent
+options:
+  bundleIdPrefix: com.devmonitor
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+targets:
+  DevMonitorAgent:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Resources
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: DevMonitor Agent
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # "Link this device" on the website opens devmonitor://enroll?...
+        CFBundleURLTypes:
+          - CFBundleURLName: com.devmonitor.agent.enroll
+            CFBundleURLSchemes: [devmonitor]
+        # HTTPS everywhere; plain HTTP only to a local development server.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmonitor.agent  # must be unique in your Apple account
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""  # set to your Apple Developer Team ID
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+    scheme:
+      testTargets:
+        - DevMonitorAgentTests
+      gatherCoverageData: true
+  DevMonitorAgentTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: DevMonitorAgent
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.devmonitor.agent.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic

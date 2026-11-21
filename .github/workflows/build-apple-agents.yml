@@ -1,0 +1,265 @@
+# Builds and tests the DevMonitor macOS (.dmg) and iOS agents on GitHub-hosted
+# macOS runners, so no Mac is needed locally.
+#
+# Without any secrets this workflow:
+#   * builds a universal (Apple silicon + Intel) "DevMonitor Agent.app" and DevMonitor-Agent.dmg,
+#     checks the DMG contents, and enrolls the runner Mac end-to-end against a throwaway backend;
+#   * compiles the iOS app, runs its XCTest suite in the iOS Simulator (including a real
+#     enrollment against the throwaway backend) and compiles it for real devices (unsigned).
+# The DMG is ad-hoc signed (Gatekeeper will warn) and no installable .ipa is produced.
+#
+# Optional secrets for distributable builds (Apple Developer Program, US$99/year):
+#   macOS:  MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, DEVELOPER_ID_APPLICATION,
+#           NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_APP_PASSWORD
+#   iOS:    APPLE_TEAM_ID, ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8_BASE64 (App Store Connect API key)
+name: Apple agents (macOS .dmg + iOS app)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ios_distribution:
+        description: "Signed iOS build (needs Apple secrets)"
+        type: choice
+        options: [none, testflight, ad-hoc]
+        default: none
+  pull_request:
+    paths:
+      - "agents/**"
+      - "device_monitoring_prototype/device_agent_unix.py"
+      - "device_monitoring_prototype/services.py"
+      - ".github/workflows/build-apple-agents.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-agents-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-dmg:
+    name: macOS agent (.dmg) - build + end-to-end enrollment
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      PY_UNIVERSAL_VERSION: "3.12.8"
+      HAS_DEVELOPER_ID: ${{ secrets.MACOS_CERT_P12_BASE64 != '' }}
+      HAS_NOTARY: ${{ secrets.NOTARY_APPLE_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python for the throwaway backend
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: device_monitoring_prototype/requirements.txt
+
+      - name: Install backend requirements
+        run: python -m pip install -r device_monitoring_prototype/requirements.txt
+
+      - name: Install python.org universal2 Python (for an Intel + Apple silicon app)
+        run: |
+          curl -fsSLo python.pkg "https://www.python.org/ftp/python/${PY_UNIVERSAL_VERSION}/python-${PY_UNIVERSAL_VERSION}-macos11.pkg"
+          sudo installer -pkg python.pkg -target /
+          echo "UNIVERSAL_PYTHON=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3" >> "$GITHUB_ENV"
+
+      - name: Agent collects valid specifications on real macOS
+        run: |
+          "$UNIVERSAL_PYTHON" device_monitoring_prototype/device_agent_unix.py --print-specs | tee macos-specs.json
+          python agents/ci/ci_backend.py validate-specs macos-specs.json
+
+      - name: Import Developer ID certificate
+        if: env.HAS_DEVELOPER_ID == 'true'
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Store notarization credentials
+        if: env.HAS_NOTARY == 'true'
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials devmonitor-notary \
+            --apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_APP_PASSWORD"
+
+      - name: Build "DevMonitor Agent.app" and DevMonitor-Agent.dmg
+        env:
+          TARGET_ARCH: universal2
+          DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+        run: |
+          if [ "$HAS_NOTARY" = "true" ]; then export NOTARY_PROFILE=devmonitor-notary; fi
+          PYTHON="$UNIVERSAL_PYTHON" bash agents/macos/build_macos.sh
+
+      - name: Verify the DMG contains a working, universal app
+        run: |
+          hdiutil attach agents/macos/dist/DevMonitor-Agent.dmg -mountpoint "$RUNNER_TEMP/dmg" -nobrowse -readonly
+          APP="$RUNNER_TEMP/dmg/DevMonitor Agent.app"
+          test -d "$APP"
+          test -L "$RUNNER_TEMP/dmg/Applications"
+          plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw "$APP/Contents/Info.plist" | grep -qx devmonitor
+          plutil -extract LSMinimumSystemVersion raw "$APP/Contents/Info.plist"
+          lipo -archs "$APP/Contents/MacOS/DevMonitor Agent" | tee /dev/stderr | grep -q arm64
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          "$APP/Contents/MacOS/DevMonitor Agent" --version
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      - name: End-to-end - the packaged app enrolls this Mac with a real backend
+        run: |
+          python agents/ci/ci_backend.py serve --db "$RUNNER_TEMP/macos-ci.db" --port 5077 \
+            --link-file "$RUNNER_TEMP/links.txt" > "$RUNNER_TEMP/backend.log" 2>&1 &
+          for i in $(seq 60); do [ -s "$RUNNER_TEMP/links.txt" ] && break; sleep 1; done
+          LINK="$(head -n 1 "$RUNNER_TEMP/links.txt")"
+          "$APP/Contents/MacOS/DevMonitor Agent" --yes --name "CI Mac" "$LINK"
+          python agents/ci/ci_backend.py check --db "$RUNNER_TEMP/macos-ci.db" \
+            --expect-type Laptop Desktop --expect-os macOS
+          if "$APP/Contents/MacOS/DevMonitor Agent" --yes --name "CI Mac replay" "$LINK"; then
+            echo "A used registration link was accepted twice" >&2; exit 1
+          fi
+
+      - name: Backend log
+        if: always()
+        run: cat "$RUNNER_TEMP/backend.log" 2>/dev/null || true
+
+      - name: Checksum
+        run: shasum -a 256 agents/macos/dist/DevMonitor-Agent.dmg | tee agents/macos/dist/DevMonitor-Agent.dmg.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DevMonitor-Agent-macOS
+          path: |
+            agents/macos/dist/DevMonitor-Agent.dmg
+            agents/macos/dist/DevMonitor-Agent.dmg.sha256
+            macos-specs.json
+          if-no-files-found: error
+
+  ios-app:
+    name: iOS app - build + simulator tests (incl. backend enrollment)
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: device_monitoring_prototype/requirements.txt
+
+      - name: Install backend requirements
+        run: python -m pip install -r device_monitoring_prototype/requirements.txt
+
+      - name: Select the newest Xcode 15.3+ on the runner
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_1[5-9]*.app | sort -V | tail -n 1)"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Generate the Xcode project
+        run: |
+          brew install xcodegen
+          cd agents/ios && xcodegen generate
+
+      - name: Pick an iPhone simulator
+        run: |
+          UDID="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime in sorted(devices, reverse=True):
+              if "iOS" in runtime:
+                  for device in devices[runtime]:
+                      if device["name"].startswith("iPhone"):
+                          print(device["udid"]); sys.exit(0)
+          sys.exit("no iPhone simulator available")
+          ')"
+          echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
+
+      - name: Unit tests + real enrollment from the simulator
+        run: |
+          python agents/ci/ci_backend.py serve --db "$RUNNER_TEMP/ios-ci.db" --port 5078 \
+            --link-file "$RUNNER_TEMP/links.txt" > "$RUNNER_TEMP/backend.log" 2>&1 &
+          for i in $(seq 60); do [ -s "$RUNNER_TEMP/links.txt" ] && break; sleep 1; done
+          export TEST_RUNNER_DEVMONITOR_LINK="$(head -n 1 "$RUNNER_TEMP/links.txt")"
+          xcodebuild test \
+            -project agents/ios/DevMonitorAgent.xcodeproj \
+            -scheme DevMonitorAgent \
+            -destination "id=$SIMULATOR_UDID" \
+            -resultBundlePath "$RUNNER_TEMP/DevMonitorAgentTests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO
+          python agents/ci/ci_backend.py check --db "$RUNNER_TEMP/ios-ci.db" \
+            --expect-type Phone Tablet --expect-os iOS
+
+      - name: Compile for real iPhone/iPad hardware (unsigned - not installable)
+        run: |
+          xcodebuild build \
+            -project agents/ios/DevMonitorAgent.xcodeproj \
+            -scheme DevMonitorAgent -configuration Release \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Backend log
+        if: always()
+        run: cat "$RUNNER_TEMP/backend.log" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: DevMonitorAgent-iOS-test-results
+          path: ${{ runner.temp }}/DevMonitorAgentTests.xcresult
+          if-no-files-found: ignore
+
+  ios-signed:
+    name: iOS signed distribution (${{ inputs.ios_distribution }})
+    needs: ios-app
+    if: github.event_name == 'workflow_dispatch' && inputs.ios_distribution != 'none'
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require Apple signing secrets
+        run: |
+          for name in TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8_BASE64; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Secret for $name is missing; a signed iOS build needs the Apple Developer Program."
+              exit 1
+            fi
+          done
+
+      - name: Select the newest Xcode 15.3+ on the runner
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_1[5-9]*.app | sort -V | tail -n 1)"
+
+      - name: Archive, sign and export
+        env:
+          METHOD: ${{ inputs.ios_distribution }}
+        run: |
+          brew install xcodegen
+          export ASC_KEY_PATH="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          echo "$ASC_KEY_P8_BASE64" | base64 --decode > "$ASC_KEY_PATH"
+          bash agents/ios/build_ios.sh
+          rm -f "$ASC_KEY_PATH"
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.ios_distribution == 'ad-hoc'
+        with:
+          name: DevMonitorAgent-iOS-AdHoc
+          path: agents/ios/build/export/DevMonitorAgent.ipa
+          if-no-files-found: error

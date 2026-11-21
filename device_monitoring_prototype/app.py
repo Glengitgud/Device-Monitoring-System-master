@@ -3,20 +3,34 @@
 import os
 import re
 import secrets
+import sys
 import uuid
 import base64
 import hashlib
 import io
 import json
+import plistlib
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 #
 import click
 from device_monitoring_prototype.agent_builder import (
     DeviceAgentBuildError,
     build_agent_executable,
+)
+from device_monitoring_prototype.package_validation import (
+    PackageValidationError,
+    inspect_ipa,
+    validate_apk,
+    validate_dmg,
+)
+from device_monitoring_prototype.linux_package import (
+    PACKAGE_VERSION as LINUX_PACKAGE_VERSION,
+    LinuxPackageError,
+    build_deb,
+    build_portable_archive,
 )
 from flask import (
     Flask,
@@ -38,6 +52,7 @@ from flask_login import (
     logout_user,
 )
 from dotenv import load_dotenv
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from openpyxl import Workbook
 import qrcode
 from qrcode.image.svg import SvgPathImage
@@ -99,6 +114,8 @@ from device_monitoring_prototype.services import (
     deactivate_user,
     find_valid_registration_token,
     issue_device_registration_token,
+    issue_direct_agent_download_token,
+    pending_agent_enrollment,
     hash_password,
     register_agent_device,
     RegistrationTokenError,
@@ -246,6 +263,11 @@ def create_app(test_config=None):
         REMEMBER_COOKIE_HTTPONLY=True,
         REMEMBER_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "").lower() == "true",
         MAX_CONTENT_LENGTH=1024 * 1024,
+        # Prebuilt, signed app packages (Android APK, macOS DMG) are published here.
+        AGENT_PACKAGES_DIR=os.environ.get("AGENT_PACKAGES_DIR")
+        or str(project_dir / "agent_packages"),
+        # Public TestFlight or App Store link for the iOS app, once published.
+        IOS_DISTRIBUTION_URL=os.environ.get("IOS_DISTRIBUTION_URL", "").strip(),
     )
     if test_config:
         app.config.update(test_config)
@@ -348,6 +370,11 @@ def create_app(test_config=None):
                 "device_enrollment",
                 "verify_device_enrollment",
                 "download_device_agent",
+                "download_windows_agent",
+                "download_linux_agent",
+                "download_agent_package",
+                "download_page",
+                "create_device_link",
                 "submit_agent_enrollment",
             }
         ):
@@ -486,7 +513,7 @@ def create_app(test_config=None):
             or parsed_base.fragment
         ):
             raise ValueError(
-                "Set PUBLIC_BASE_URL to the reachable application origin before generating a QR code."
+                "Set PUBLIC_BASE_URL to the reachable application origin before creating a download link."
             )
         enrollment_url = f"{base_url}{url_for('device_enrollment', token=token)}"
         qr_code = qrcode.make(
@@ -628,14 +655,24 @@ def create_app(test_config=None):
             is_verified=True,
         ).filter(Device.lifecycle_status != "deleted").count()
 
+    def signed_in_landing_url(user, next_url=""):
+        """Where a signed-in user should land.
+
+        Standard users without a verified device must link one first. Everyone
+        else (administrators and verified users) goes to the already
+        same-host-validated ``next`` URL or the dashboard. Device state is read
+        from the database on every call, so a device linked moments ago counts
+        immediately and no re-login is needed.
+        """
+        if not user.is_admin and not verified_device_count(user.id):
+            return url_for("device_verification")
+        return next_url or url_for("dashboard")
+
     @app.route("/", methods=["GET", "POST"])
     @app.route("/login", methods=["GET", "POST"])
     def login():
         if current_user.is_authenticated and request.method == "GET":
-            destination = (
-                "dashboard" if current_user.is_admin else "device_verification"
-            )
-            return redirect(url_for(destination))
+            return redirect(signed_in_landing_url(current_user))
         if request.method == "GET":
             pending_user_id = session.get("pending_login_user_id")
             if pending_user_id:
@@ -713,9 +750,7 @@ def create_app(test_config=None):
                     )
                 )
                 db.session.commit()
-                if not user.is_admin:
-                    return redirect(url_for("device_verification"))
-                return redirect(next_url or url_for("dashboard"))
+                return redirect(signed_in_landing_url(user, next_url))
 
             identifier = request.form.get("username", "").strip()
             password = request.form.get("password", "")
@@ -773,19 +808,13 @@ def create_app(test_config=None):
                 )
             )
             db.session.commit()
-            if not user.is_admin:
-                return redirect(url_for("device_verification"))
-            return redirect(next_url or url_for("dashboard"))
+            return redirect(signed_in_landing_url(user, next_url))
         return render_template("login.html")
 
     @app.route("/register", methods=["GET", "POST"])
     def register():
         if current_user.is_authenticated and request.method == "GET":
-            return redirect(
-                url_for("dashboard")
-                if current_user.is_admin
-                else url_for("device_verification")
-            )
+            return redirect(signed_in_landing_url(current_user))
         if request.method == "POST":
             return begin_registration()
         draft = {}
@@ -999,12 +1028,12 @@ def create_app(test_config=None):
     def device_verification():
         if current_user.is_admin:
             abort(404)
+        count = verified_device_count(current_user.id)
         return render_template(
             "device_verification.html",
             active_page="device-verification",
-            verified_device_count=verified_device_count(current_user.id),
-            registration_qr=None,
-            registration_complete=False,
+            verified_device_count=count,
+            pending_enrollment=None if count else pending_agent_enrollment(current_user),
         )
 
     @app.get("/dashboard")
@@ -1013,7 +1042,7 @@ def create_app(test_config=None):
         registration_count = 0 if current_user.is_admin else verified_device_count(current_user.id)
         if not current_user.is_admin and not registration_count:
             flash(
-                "Verify at least one device with the QR registration workflow before opening the dashboard.",
+                "Download the Windows Device Agent and verify at least one device before opening the dashboard.",
                 "warning",
             )
             return redirect(url_for("device_verification"))
@@ -1274,7 +1303,7 @@ def create_app(test_config=None):
                 or parsed_base.fragment
             ):
                 return api_error(
-                    "Set PUBLIC_BASE_URL to the reachable application origin before generating a QR code.",
+                    "Set PUBLIC_BASE_URL to the reachable application origin before creating a download link.",
                     500,
                 )
             token, expires_at = issue_device_registration_token(current_user)
@@ -1348,13 +1377,13 @@ def create_app(test_config=None):
             )
         if find_valid_registration_token(token) is None:
             return enrollment_page(
-                message="This device registration QR code has expired or was already used.",
+                message="This device download link has expired or was already used.",
                 status=410,
             )
         registration = find_valid_registration_token(token)
         if registration is None:
             return enrollment_page(
-                message="This device registration QR code has expired or was already used.",
+                message="This device download link has expired or was already used.",
                 status=410,
             )
         return enrollment_page(verified=registration.verified_at is not None)
@@ -1369,7 +1398,7 @@ def create_app(test_config=None):
         registration = find_valid_registration_token(token)
         if registration is None or registration.user.status != "active":
             return enrollment_page(
-                message="This device registration QR code has expired or was already used.",
+                message="This device download link has expired or was already used.",
                 status=410,
             )
         if registration.verified_at is None:
@@ -1387,7 +1416,7 @@ def create_app(test_config=None):
         registration = find_valid_registration_token(token)
         if registration is None or registration.user.status != "active":
             return enrollment_page(
-                message="This device registration QR code has expired or was already used.",
+                message="This device download link has expired or was already used.",
                 status=410,
             )
         if request.method == "GET":
@@ -1448,6 +1477,481 @@ def create_app(test_config=None):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    # ------------------------------------------------------------------
+    # Device Agent downloads (all platforms)
+    # ------------------------------------------------------------------
+    AGENT_PACKAGES = {
+        "android": {
+            "filename": "devmonitor-agent.apk",
+            "mimetype": "application/vnd.android.package-archive",
+            "validate": validate_apk,
+        },
+        "macos": {
+            "filename": "DevMonitor-Agent.dmg",
+            "mimetype": "application/x-apple-diskimage",
+            "validate": validate_dmg,
+        },
+        "ios": {
+            "filename": "DevMonitor-Agent.ipa",
+            "mimetype": "application/octet-stream",
+            "validate": inspect_ipa,
+        },
+    }
+    IOS_DISTRIBUTION_PREFIXES = (
+        "https://testflight.apple.com/join/",
+        "https://apps.apple.com/",
+    )
+    IOS_INSTALL_LINK_SECONDS = 15 * 60
+    package_cache = {}
+
+    def agent_public_base_url():
+        """Origin that agents submit to, or None when it is not safely reachable."""
+        base_url = app.config["PUBLIC_BASE_URL"] or request.url_root.rstrip("/")
+        parsed_base = urlsplit(base_url)
+        if (
+            parsed_base.scheme not in {"http", "https"}
+            or not parsed_base.netloc
+            or parsed_base.username
+            or parsed_base.password
+            or parsed_base.path not in {"", "/"}
+            or parsed_base.query
+            or parsed_base.fragment
+            or (
+                parsed_base.scheme != "https"
+                and parsed_base.hostname not in {"localhost", "127.0.0.1", "::1"}
+            )
+        ):
+            return None
+        return base_url.rstrip("/")
+
+    def agent_package_path(platform_key):
+        package = AGENT_PACKAGES[platform_key]
+        path = Path(app.config["AGENT_PACKAGES_DIR"]) / package["filename"]
+        try:
+            return path if path.is_file() and path.stat().st_size > 0 else None
+        except OSError:
+            return None
+
+    def agent_package_details(platform_key):
+        """Validated details of a published package, or None when absent.
+
+        A file that fails validation is reported with ``error`` and is never
+        offered for download.
+        """
+        path = agent_package_path(platform_key)
+        if path is None:
+            return None
+        stat = path.stat()
+        cache_key = (platform_key, str(path), stat.st_mtime_ns, stat.st_size)
+        if cache_key not in package_cache:
+            try:
+                details = dict(AGENT_PACKAGES[platform_key]["validate"](path) or {})
+            except PackageValidationError as error:
+                app.logger.warning("Published %s package rejected: %s", platform_key, error)
+                package_cache[cache_key] = {"error": str(error)}
+            else:
+                digest = hashlib.sha256()
+                with path.open("rb") as package_file:
+                    for chunk in iter(lambda: package_file.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                size = stat.st_size
+                details.update(
+                    sha256=digest.hexdigest(),
+                    size_mb=(
+                        f"{size / 1024 / 1024:.1f} MB" if size >= 1024 * 1024
+                        else f"{max(1, round(size / 1024))} KB"
+                    ),
+                )
+                package_cache[cache_key] = details
+        return package_cache[cache_key]
+
+    def valid_package(platform_key):
+        details = agent_package_details(platform_key)
+        return details if details and "error" not in details else None
+
+    def ios_distribution_url():
+        url = app.config.get("IOS_DISTRIBUTION_URL") or ""
+        return url if url.startswith(IOS_DISTRIBUTION_PREFIXES) else ""
+
+    def ios_install_serializer():
+        return URLSafeTimedSerializer(app.secret_key, salt="ios-ota-install")
+
+    def ios_over_the_air_link():
+        """itms-services:// link for a signed Ad Hoc/Enterprise IPA, else None."""
+        ipa = valid_package("ios")
+        base_url = agent_public_base_url()
+        if (
+            not ipa
+            or not ipa.get("over_the_air")
+            or not base_url
+            or not base_url.startswith("https://")
+            or not current_user.is_authenticated
+            or current_user.is_admin
+        ):
+            return None
+        grant = ios_install_serializer().dumps({"user": current_user.id})
+        manifest = base_url + url_for("ios_install_manifest", grant=grant)
+        return "itms-services://?" + urlencode(
+            {"action": "download-manifest", "url": manifest}
+        )
+
+    def windows_agent_buildable():
+        if sys.platform != "win32":
+            return False
+        try:
+            import PyInstaller  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    def repository_file(relative, contains=None):
+        """True when a source file exists in this checkout (and contains text)."""
+        path = project_dir.parent / relative
+        try:
+            if not path.is_file():
+                return False
+            return contains is None or contains in path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+
+    def apple_build_progress(platform_key, published):
+        """Honest progress checklist for the Apple cards, derived from this checkout."""
+        workflow = repository_file(".github/workflows/build-apple-agents.yml", "runs-on: macos-")
+        if platform_key == "macos":
+            steps = [
+                ("macOS agent: specs + secure enrollment",
+                 repository_file("device_monitoring_prototype/device_agent_unix.py", "class MacCollector")),
+                (".app + .dmg packaging script", repository_file("agents/macos/build_macos.sh", "hdiutil create")),
+                ("Cloud Mac build + real enrollment test (GitHub Actions)", workflow),
+                ("Developer ID signing + notarization", published),
+                ("Published .dmg on this server", published),
+            ]
+        else:
+            steps = [
+                ("Native SwiftUI app: specs + secure enrollment",
+                 repository_file("agents/ios/Sources/EnrollmentClient.swift", "URLSession")),
+                ("XCTest suite incl. backend enrollment", repository_file(
+                    "agents/ios/Tests/DevMonitorAgentTests.swift", "BackendEnrollmentTests")),
+                ("Cloud Mac build + simulator test (GitHub Actions)", workflow),
+                ("Apple Developer Program signing", published),
+                ("TestFlight link or signed .ipa published", published),
+            ]
+        progress = [{"label": label, "done": bool(done)} for label, done in steps]
+        build_ready = all(step["done"] for step in progress[:3])
+        return progress, build_ready
+
+    def download_platform_cards():
+        android = agent_package_details("android")
+        macos = agent_package_details("macos")
+        ipa = agent_package_details("ios")
+        ios_store_url = ios_distribution_url()
+        ios_ota = ios_over_the_air_link()
+        ios_store_label = "TestFlight" if "testflight" in ios_store_url else "App Store"
+        cards = [
+            {
+                "key": "windows",
+                "name": "Windows",
+                "icon": "bi-windows",
+                "formats": [".exe"],
+                "requirement": "Windows 10 or 11, 64-bit",
+                "available": windows_agent_buildable(),
+                "kind": "per_user",
+                "action": url_for("download_windows_agent"),
+                "button_label": "Download .exe",
+                "file_hint": "Built for your account · single use",
+                "pending_label": ".exe unavailable",
+                "pending": "The Windows agent can only be built on a Windows server.",
+            },
+            {
+                "key": "android",
+                "name": "Android",
+                "icon": "bi-android2",
+                "formats": [".apk"],
+                "requirement": "Android 8.0 or later",
+                "available": bool(android) and "error" not in android,
+                "kind": "package",
+                "action": url_for("download_agent_package", platform_key="android"),
+                "button_label": "Download .apk",
+                "details": android,
+                "file_hint": "Install, then tap “Link this device”",
+                "pending_label": ".apk not published",
+                "pending": "The signed APK has not been published to this server yet.",
+            },
+            {
+                "key": "macos",
+                "name": "macOS",
+                "icon": "bi-apple",
+                "formats": [".dmg"],
+                "requirement": "macOS 12 Monterey or later",
+                "available": bool(macos) and "error" not in macos,
+                "kind": "package",
+                "action": url_for("download_agent_package", platform_key="macos"),
+                "button_label": "Download .dmg",
+                "details": macos,
+                "file_hint": "Open the .dmg, drag the app to Applications, then click “Link this device”",
+                "pending_label": ".dmg build pending",
+                "pending": (
+                    "Build it with the “Apple agents” GitHub Actions workflow, "
+                    "then publish the .dmg to this server."
+                ),
+            },
+            {
+                "key": "linux",
+                "name": "Linux",
+                "icon": "bi-ubuntu",
+                "formats": [".deb", ".tar.gz"],
+                "requirement": "Debian, Ubuntu & derivatives · Python 3.8+",
+                "available": True,
+                "kind": "per_user",
+                "action": url_for("download_linux_agent", package_format="deb"),
+                "button_label": "Download .deb",
+                "alternate": {
+                    "label": "Other distributions (.tar.gz)",
+                    "action": url_for("download_linux_agent", package_format="tar.gz"),
+                },
+                "file_hint": "Built for your account · single use",
+                "pending_label": "",
+                "pending": "",
+            },
+            {
+                "key": "ios",
+                "name": "iOS",
+                "icon": "bi-apple",
+                "formats": [".ipa", "TestFlight"],
+                "requirement": "iOS 16 or later · iPhone & iPad",
+                "available": bool(ios_store_url or ios_ota),
+                "kind": "ios",
+                "action": ios_store_url,
+                "button_label": f"Get on {ios_store_label}",
+                "ota": (
+                    {
+                        "href": ios_ota,
+                        "label": "Install .ipa",
+                        "note": (
+                            "Enterprise build" if ipa.get("distribution") == "enterprise"
+                            else "Ad Hoc build · registered devices only"
+                        ),
+                    }
+                    if ios_ota else None
+                ),
+                "details": ipa,
+                "file_hint": "Install, then tap “Link this device”",
+                "pending_label": ".ipa build pending",
+                "pending": (
+                    "The app builds and is tested in the cloud; installing it on iPhones "
+                    "needs Apple Developer Program signing."
+                ),
+            },
+        ]
+        for card in cards:
+            if card["key"] in {"macos", "ios"}:
+                card["progress"], card["build_ready"] = apple_build_progress(
+                    card["key"], card["available"]
+                )
+            details = card.get("details")
+            if details and "error" in details:
+                card["problem"] = (
+                    "A published package failed verification and is not offered: "
+                    + details["error"]
+                )
+            if card["key"] == "ios" and details and "error" not in details and not ios_ota:
+                if details["distribution"] in {"app-store", "development"}:
+                    card["problem"] = (
+                        f"The published .ipa is a {details['distribution']} build; it can only be "
+                        "installed through TestFlight/App Store or Xcode, not from this website."
+                    )
+                elif not (agent_public_base_url() or "").startswith("https://"):
+                    card["problem"] = "Over-the-air .ipa installs require the site to use HTTPS."
+        return cards
+
+    def serve_per_user_agent(build, *, mimetype, download_name, label):
+        """Build a token-bound agent for the signed-in owner and send it."""
+        wants_json = request.accept_mimetypes.best == "application/json"
+
+        def failure(message, status):
+            if wants_json:
+                return api_error(message, status)
+            flash(message, "danger")
+            return redirect(url_for("download_page"))
+
+        if current_user.is_admin:
+            return failure("Device registration is only available to standard users.", 403)
+        base_url = agent_public_base_url()
+        if base_url is None:
+            return failure(
+                f"Set PUBLIC_BASE_URL to a reachable HTTPS origin before downloading the {label}.",
+                503,
+            )
+        try:
+            token, _expires_at = issue_direct_agent_download_token(current_user)
+        except ValidationError as error:
+            return failure(str(error), 403)
+        submission_url = f"{base_url}{url_for('submit_agent_enrollment')}"
+        try:
+            package_bytes = build(token, submission_url)
+        except (DeviceAgentBuildError, LinuxPackageError):
+            app.logger.exception("Could not build the %s (direct download).", label)
+            return failure(
+                f"The {label} could not be prepared. Please retry or contact the system administrator.",
+                503,
+            )
+        response = send_file(
+            io.BytesIO(package_bytes),
+            mimetype=mimetype,
+            as_attachment=True,
+            download_name=download_name,
+            max_age=0,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    @app.get("/download")
+    @login_required
+    def download_page():
+        return render_template(
+            "download.html",
+            active_page="download",
+            platforms=download_platform_cards(),
+        )
+
+    @app.post("/device-agent/windows.exe")
+    @login_required
+    def download_windows_agent():
+        """Download the token-bound Windows Device Agent directly (no QR step)."""
+        return serve_per_user_agent(
+            build_agent_executable,
+            mimetype="application/vnd.microsoft.portable-executable",
+            download_name="devmonitor-device-agent.exe",
+            label="Windows Device Agent",
+        )
+
+    @app.post("/device-agent/linux/<package_format>")
+    @login_required
+    def download_linux_agent(package_format):
+        """Download the token-bound Linux agent as a .deb or portable .tar.gz."""
+        formats = {
+            "deb": (
+                build_deb,
+                "application/vnd.debian.binary-package",
+                f"devmonitor-agent_{LINUX_PACKAGE_VERSION}_all.deb",
+            ),
+            "tar.gz": (
+                build_portable_archive,
+                "application/gzip",
+                "devmonitor-agent-linux.tar.gz",
+            ),
+        }
+        if package_format not in formats:
+            abort(404)
+        build, mimetype, download_name = formats[package_format]
+        return serve_per_user_agent(
+            build, mimetype=mimetype, download_name=download_name, label="Linux Device Agent"
+        )
+
+    @app.get("/downloads/<platform_key>")
+    @login_required
+    def download_agent_package(platform_key):
+        """Serve a published, verified app package; never a placeholder."""
+        if platform_key not in {"android", "macos"}:
+            abort(404)
+        path = agent_package_path(platform_key)
+        if path is None or valid_package(platform_key) is None:
+            flash("That package is not available yet.", "warning")
+            return redirect(url_for("download_page"))
+        package = AGENT_PACKAGES[platform_key]
+        response = send_file(
+            path,
+            mimetype=package["mimetype"],
+            as_attachment=True,
+            download_name=package["filename"],
+            max_age=0,
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    def ios_install_grant_is_valid(grant):
+        try:
+            data = ios_install_serializer().loads(grant, max_age=IOS_INSTALL_LINK_SECONDS)
+        except (BadSignature, SignatureExpired):
+            return False
+        user = db.session.get(User, data.get("user")) if isinstance(data, dict) else None
+        return bool(user and user.is_active and not user.is_admin)
+
+    @app.get("/downloads/ios/<grant>/manifest.plist")
+    def ios_install_manifest(grant):
+        """Over-the-air install manifest requested by iOS (no browser cookies)."""
+        ipa = valid_package("ios")
+        base_url = agent_public_base_url()
+        if (
+            not ios_install_grant_is_valid(grant)
+            or not ipa
+            or not ipa.get("over_the_air")
+            or not (base_url or "").startswith("https://")
+        ):
+            abort(404)
+        manifest = {
+            "items": [
+                {
+                    "assets": [
+                        {
+                            "kind": "software-package",
+                            "url": base_url + url_for("ios_install_package", grant=grant),
+                        }
+                    ],
+                    "metadata": {
+                        "bundle-identifier": ipa["bundle_id"],
+                        "bundle-version": ipa["version"],
+                        "kind": "software",
+                        "title": ipa["title"],
+                    },
+                }
+            ]
+        }
+        response = app.response_class(plistlib.dumps(manifest), mimetype="application/xml")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/downloads/ios/<grant>/DevMonitor-Agent.ipa")
+    def ios_install_package(grant):
+        ipa = valid_package("ios")
+        if not ios_install_grant_is_valid(grant) or not ipa or not ipa.get("over_the_air"):
+            abort(404)
+        response = send_file(
+            agent_package_path("ios"),
+            mimetype=AGENT_PACKAGES["ios"]["mimetype"],
+            as_attachment=True,
+            download_name=AGENT_PACKAGES["ios"]["filename"],
+            max_age=0,
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @app.post("/api/device-link")
+    @login_required
+    def create_device_link():
+        """Hand a one-use registration token to an installed DevMonitor app."""
+        if current_user.is_admin:
+            return api_error("Device registration is only available to standard users.", 403)
+        base_url = agent_public_base_url()
+        if base_url is None:
+            return api_error(
+                "Set PUBLIC_BASE_URL to a reachable HTTPS origin before linking a device.", 503
+            )
+        try:
+            token, expires_at = issue_direct_agent_download_token(current_user, channel="link")
+        except ValidationError as error:
+            return api_error(error, 403)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        response = jsonify(
+            link=f"devmonitor://enroll?{urlencode({'server': base_url, 'token': token})}",
+            expires_at=expires_at.isoformat(),
+        )
+        response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.post("/api/device-agent/enroll")
@@ -2036,7 +2540,7 @@ def create_app(test_config=None):
         refresh_stale_device_statuses()
         if not current_user.is_admin and not verified_device_count(current_user.id):
             return api_error(
-                "Verify a device with the QR registration workflow to access the dashboard.",
+                "Download the Windows Device Agent and verify a device to access the dashboard.",
                 403,
             )
         query = Device.query.filter(
@@ -2083,6 +2587,7 @@ def create_app(test_config=None):
         response = jsonify(
             verified=count > 0,
             verified_devices=count,
+            pending_enrollment=None if count else pending_agent_enrollment(current_user),
             scan_status="Completed" if latest_device else "Pending",
             registration_status="Registered" if latest_device else "Pending",
             latest_device=(

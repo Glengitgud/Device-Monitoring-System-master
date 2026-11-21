@@ -45,9 +45,10 @@
             </div>
             {% if not current_user.is_admin %}
             <div class="col-md-2 text-center">
-                <button class="btn btn-outline-primary" id="generateDeviceQrBtn" type="button">
-                    <i class="bi bi-qr-code me-1"></i>Generate QR Code
-                </button>
+                <a class="btn btn-outline-primary" id="openAppDownloadsBtn"
+                   href="{{ url_for('download_page') }}">
+                    <i class="bi bi-download me-1"></i>Download Agent
+                </a>
             </div>
             <!-- Add Device Button -->
             <div class="col-md-3 text-end">
@@ -79,27 +80,6 @@
     </div>
 </div>
 
-{% if not current_user.is_admin %}
-<div class="modal fade" id="deviceRegistrationQrModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Register a Device with QR Code</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"
-                        aria-label="Close"></button>
-            </div>
-            <div class="modal-body text-center">
-                {% include "_device_registration_qr_panel.html" %}
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
-                    Close
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-{% endif %}
 
 <!-- ======================================================
      DEVICE MODAL (Add / Edit / View)
@@ -146,6 +126,8 @@
                                 <option value="Laptop">Laptop</option>
                                 <option value="Server">Server</option>
                                 <option value="Workstation">Workstation</option>
+                                <option value="Phone">Phone</option>
+                                <option value="Tablet">Tablet</option>
                             </select>
                             <div class="invalid-feedback">Please select a device type.</div>
                         </div>

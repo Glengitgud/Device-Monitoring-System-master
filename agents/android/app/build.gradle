@@ -1,0 +1,58 @@
+plugins {
+    id "com.android.application"
+}
+
+// Release signing keys never live in the repository. By default they are read
+// from ~/.devmonitor/android-keystore.properties (see agents/README.md).
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = file(
+    System.getenv("DEVMONITOR_KEYSTORE_PROPERTIES")
+        ?: "${System.getProperty("user.home")}/.devmonitor/android-keystore.properties"
+)
+def hasReleaseKey = keystorePropertiesFile.exists()
+if (hasReleaseKey) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
+android {
+    namespace "com.devmonitor.agent"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.devmonitor.agent"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        if (hasReleaseKey) {
+            release {
+                storeFile file(keystoreProperties["storeFile"])
+                storePassword keystoreProperties["storePassword"]
+                keyAlias keystoreProperties["keyAlias"]
+                keyPassword keystoreProperties["keyPassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (hasReleaseKey) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError true
+        checkReleaseBuilds true
+    }
+}

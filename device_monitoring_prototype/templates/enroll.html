@@ -39,7 +39,7 @@
                         </button>
                     </form>
                 {% else %}
-                    <p>Scan confirmed the one-time registration link. Verify the account
+                    <p>Your one-time download link is valid. Verify the account
                        before requesting the standalone Windows EXE agent.</p>
                     <form method="post"
                           action="{{ url_for('verify_device_enrollment', token=request.view_args.token) }}">
@@ -50,12 +50,12 @@
                     </form>
                 {% endif %}
             {% else %}
-                <p>Sign in and generate a new QR code to register a device.</p>
+                <p>Sign in and select <strong>Download</strong> on the Windows card to get a new link.</p>
             {% endif %}
             <p class="small mt-3">
                 The standalone Windows EXE requires no Python installation or manual
                 configuration. It displays detected specifications and waits for your
-                approval before submitting anything. The one-use registration link
+                approval before submitting anything. The one-use download link
                 expires after 30 minutes.
             </p>
         </section>

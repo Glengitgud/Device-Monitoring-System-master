@@ -1,4 +1,5 @@
 import os
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -796,6 +797,155 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(protected_admin.status_code, 400)
 
+    def _download_cards(self):
+        html = self.client.get("/download").get_data(as_text=True)
+        cards = re.findall(
+            r'<li class="dl-card (is-available|is-pending)"\s+'
+            r'data-platform="([a-z]+)">(.*?)</div>\s*</li>',
+            html,
+            re.S,
+        )
+        return html, {platform: (state, body) for state, platform, body in cards}
+
+    def test_download_panel_offers_only_the_real_windows_package(self):
+        csrf = self.register_and_login()
+        self.app.config["AGENT_PACKAGES_DIR"] = str(Path(self.id()).with_suffix(".missing"))
+        self.app.config["IOS_DISTRIBUTION_URL"] = ""
+        for path in ("/device-verification", "/download"):
+            page = self.client.get(path)
+            self.assertEqual(page.status_code, 200)
+            for marker in (
+                "deviceQrCard",
+                "deviceRegistrationQrImage",
+                "createDeviceQrBtn",
+                "deviceRegistrationProgress",
+                "Generate Verification QR",
+                "Scan",
+            ):
+                with self.subTest(path=path, marker=marker):
+                    self.assertNotIn(marker, page.get_data(as_text=True))
+        html, by_platform = self._download_cards()
+        self.assertEqual(
+            list(by_platform), ["windows", "android", "macos", "linux", "ios"]
+        )
+        windows_state, windows_body = by_platform.pop("windows")
+        self.assertEqual(windows_state, "is-available")
+        self.assertIn('id="downloadWindowsAgentBtn"', windows_body)
+        self.assertIn('action="/device-agent/windows.exe"', windows_body)
+        self.assertIn('name="csrf_token"', windows_body)
+        self.assertNotIn("disabled", windows_body)
+        linux_state, linux_body = by_platform.pop("linux")
+        self.assertEqual(linux_state, "is-available")
+        self.assertIn('action="/device-agent/linux/deb"', linux_body)
+        self.assertIn('action="/device-agent/linux/tar.gz"', linux_body)
+        self.assertIn('<span class="dl-format">.exe</span>', windows_body)
+        self.assertIn("Download .exe", windows_body)
+        self.assertIn("Download .deb", linux_body)
+        # Without a published package or store link these stay pending, with a
+        # label naming the exact package type that is missing.
+        pending_labels = {
+            "android": ".apk not published",
+            "macos": ".dmg build pending",
+            "ios": ".ipa build pending",
+        }
+        for platform, (state, body) in by_platform.items():
+            with self.subTest(platform=platform):
+                self.assertEqual(state, "is-pending")
+                self.assertIn(pending_labels[platform], body)
+                self.assertIn("disabled", body)
+                self.assertNotIn("href=", body)
+                self.assertNotIn("<form", body)
+        self.assertEqual(self.client.get("/downloads/android").status_code, 302)
+        self.assertEqual(self.client.get("/downloads/macos").status_code, 302)
+        self.assertEqual(self.client.get("/downloads/ios").status_code, 404)
+
+        # Without CSRF the direct download is refused and nothing is built.
+        with patch("device_monitoring_prototype.app.build_agent_executable") as build:
+            refused = self.client.post("/device-agent/windows.exe")
+        self.assertEqual(refused.status_code, 400)
+        build.assert_not_called()
+
+        # One click: the signed-in owner receives the token-bound EXE directly.
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            return_value=b"MZwindows-agent",
+        ) as build:
+            download = self.client.post(
+                "/device-agent/windows.exe",
+                data={"csrf_token": csrf},
+                headers={"Accept": "application/json"},
+            )
+        self.assertEqual(download.status_code, 200, download.get_data(as_text=True))
+        self.assertEqual(download.data, b"MZwindows-agent")
+        self.assertEqual(
+            download.mimetype, "application/vnd.microsoft.portable-executable"
+        )
+        self.assertIn(
+            "devmonitor-device-agent.exe", download.headers["Content-Disposition"]
+        )
+        self.assertEqual(download.headers["Cache-Control"], "no-store")
+        token = build.call_args.args[0]
+        self.assertTrue(build.call_args.args[1].endswith("/api/device-agent/enroll"))
+        status = self.client.get(f"/api/device-registration-tokens/{token}/status")
+        self.assertEqual(status.json["status"], "download_confirmed")
+        with self.app.app_context():
+            stored = DeviceRegistrationToken.query.filter_by(
+                token_hash=hashlib.sha256(token.encode("ascii")).hexdigest()
+            ).one()
+            self.assertIsNotNone(stored.verified_at)
+            self.assertIsNone(stored.used_at)
+
+        # The agent submits with its embedded token, which unlocks the dashboard.
+        self.assertEqual(self.client.get("/dashboard").status_code, 302)
+        agent_payload = {
+                "name": "Direct download PC",
+                "device_type": "Desktop",
+                "specifications": {
+                    "cpu_name": "Test CPU",
+                    "cpu_cores": 4,
+                    "ram_capacity_bytes": 8 * 1024**3,
+                    "ram_usage_bytes": 3 * 1024**3,
+                    "storage_devices": [
+                        {"name": "C:", "total_bytes": 256, "available_bytes": 128}
+                    ],
+                    "storage_total_bytes": 256,
+                    "storage_available_bytes": 128,
+                    "gpu_information": ["Test GPU"],
+                    "motherboard_brand": "Test Board",
+                    "operating_system_name": "Windows 11",
+                    "operating_system_version": "10.0.26100",
+                    "network_adapters": ["Ethernet"],
+                    "ip_addresses": ["192.0.2.21"],
+                },
+        }
+        enrolled = self.app.test_client().post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json=agent_payload,
+        )
+        self.assertEqual(enrolled.status_code, 201, enrolled.get_data(as_text=True))
+        self.assertEqual(self.client.get("/dashboard").status_code, 200)
+        # The token is one-use: replaying the same valid submission is refused.
+        reused = self.app.test_client().post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json=agent_payload,
+        )
+        self.assertEqual(reused.status_code, 401)
+
+        # Build failures come back as a readable JSON error, not a broken file.
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            side_effect=DeviceAgentBuildError("packaging failed"),
+        ):
+            failed = self.client.post(
+                "/device-agent/windows.exe",
+                data={"csrf_token": csrf},
+                headers={"Accept": "application/json"},
+            )
+        self.assertEqual(failed.status_code, 503)
+        self.assertIn("could not be prepared", failed.json["error"])
+
     def test_all_standard_user_pages_and_apis_render(self):
         csrf = self.register_and_login()
         self.assertEqual(self.client.get("/dashboard").status_code, 302)
@@ -809,11 +959,15 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         verification_page = self.client.get("/device-verification")
         self.assertIn(b"deviceVerificationPending", verification_page.data)
-        self.assertIn(b"createDeviceQrBtn", verification_page.data)
+        self.assertIn(b'id="linkThisDeviceBtn"', verification_page.data)
+        self.assertNotIn(b"createDeviceQrBtn", verification_page.data)
+        self.assertEqual(self.client.get("/download").status_code, 200)
         self.complete_qr_enrollment(csrf)
         devices_page = self.client.get("/devices")
         self.assertEqual(devices_page.status_code, 200)
-        self.assertIn(b'id="generateDeviceQrBtn"', devices_page.data)
+        self.assertIn(b'id="openAppDownloadsBtn"', devices_page.data)
+        self.assertIn(b'href="/download"', devices_page.data)
+        self.assertNotIn(b'id="appDownloadsModal"', devices_page.data)
         self.assertIn(b'id="addDeviceBtn"', devices_page.data)
         self.assertIn(b'href="/device-verification"', devices_page.data)
         self.assertIn(b'id="deviceStatusFilter"', devices_page.data)
@@ -921,6 +1075,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             {
                 "verified": True,
                 "verified_devices": 1,
+                "pending_enrollment": None,
                 "scan_status": "Completed",
                 "registration_status": "Registered",
                 "latest_device": {
@@ -2221,6 +2376,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertNotIn(b' id="addDeviceBtn"', devices_page.data)
         self.assertNotIn(b"Register a Device with QR Code", devices_page.data)
         self.assertNotIn(b"deviceRegistrationQrModal", devices_page.data)
+        self.assertNotIn(b"appDownloadsModal", devices_page.data)
+        self.assertNotIn(b"downloadWindowsAgentBtn", devices_page.data)
         qr_request = self.client.post(
             "/api/device-registration-tokens",
             headers={"X-CSRF-Token": token},
@@ -2803,9 +2960,11 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(background.get("fill"), "#ffffff")
         self.assertEqual(qr_pattern.get("fill"), "#111827")
         devices_page = self.client.get("/device-verification")
-        self.assertIn(b"qr-code-card", devices_page.data)
-        self.assertIn(b"deviceQrExpiryCard", devices_page.data)
-        self.assertIn(b' id="createDeviceQrBtn"', devices_page.data)
+        self.assertIn(b' id="linkThisDeviceBtn"', devices_page.data)
+        self.assertNotIn(b"qr-code-card", devices_page.data)
+        download_page = self.client.get("/download")
+        self.assertIn(b"dl-grid", download_page.data)
+        self.assertIn(b' id="downloadWindowsAgentBtn"', download_page.data)
         first_token = first.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         second_token = second.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         self.assertNotEqual(first_token, second_token)
