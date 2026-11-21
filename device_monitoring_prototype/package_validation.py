@@ -59,6 +59,25 @@ def validate_dmg(path):
     return {}
 
 
+def validate_exe(path):
+    """Windows program: an "MZ" header pointing at a 64-bit "PE" image header."""
+    try:
+        with open(path, "rb") as program:
+            header = program.read(64)
+            if len(header) < 64 or not header.startswith(b"MZ"):
+                raise PackageValidationError("The file is not a Windows program (.exe).")
+            pe_offset = int.from_bytes(header[60:64], "little")
+            program.seek(pe_offset)
+            pe_header = program.read(6)
+    except OSError as error:
+        raise PackageValidationError("The EXE could not be read.") from error
+    if not pe_header.startswith(b"PE\0\0"):
+        raise PackageValidationError("The file is not a Windows program (.exe).")
+    if int.from_bytes(pe_header[4:6], "little") != 0x8664:
+        raise PackageValidationError("The EXE is not built for 64-bit Windows.")
+    return {}
+
+
 def _embedded_plist(data):
     """A .mobileprovision is a CMS envelope around a readable XML plist."""
     start = data.find(b"<?xml")

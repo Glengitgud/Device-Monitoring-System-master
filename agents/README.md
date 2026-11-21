@@ -8,7 +8,7 @@ the token, and links the device to the token owner's account.
 
 | Platform | Package | How the token arrives | Source | Built & verified here? |
 |---|---|---|---|---|
-| Windows 10/11 x64 | `.exe` (PyInstaller) | Embedded per download | `device_monitoring_prototype/device_agent.py` | Yes |
+| Windows 10/11 x64 | `.exe` (PyInstaller) | Embedded per download on a Windows host; otherwise the published generic `.exe` uses "Link this device" | `device_monitoring_prototype/device_agent.py` | Yes |
 | Linux | `.deb` + portable `.tar.gz` | Embedded per download | `device_monitoring_prototype/device_agent_unix.py`, `linux_package.py` | Built + protocol-tested; not yet run on a real Linux machine |
 | Android 8+ | signed `.apk` | "Link this device" (`devmonitor://enroll?...`) | `agents/android` | Built, signed, lint-clean, protocol-tested on JVM; not yet installed on a phone |
 | macOS 12+ | `.dmg` with `.app` | "Link this device" | `device_agent_unix.py` + `agents/macos` | **No** – needs a Mac |
@@ -18,6 +18,33 @@ Published packages are served from `device_monitoring_prototype/agent_packages/`
 (git-ignored). A card on the Downloads page becomes available only when its
 file exists there (or, for iOS, when `IOS_DISTRIBUTION_URL` is a TestFlight or
 App Store link), so the website never offers a placeholder.
+
+### Hosts without a disk or Windows (Vercel): publish to a GitHub Release
+
+`.github/workflows/publish-agents.yml` ("Publish agents") builds the Windows
+`.exe`, the signed Android `.apk` and the macOS `.dmg` on GitHub-hosted
+machines, checks each with the validators in `package_validation.py`, and
+uploads them with `agents-manifest.json` to the `agents-latest` release. It runs
+when agent code changes on `master`, or from the **Actions** tab (*Run workflow*).
+
+Point the website at it (for example in Vercel's environment variables):
+
+```
+AGENT_RELEASE_URL=https://github.com/OWNER/REPO/releases/download/agents-latest
+```
+
+A package in `agent_packages/` still takes priority. The release copy is used
+only when no local file exists, and the card appears only when the manifest
+lists it. On a non-Windows host the Windows card offers the generic `.exe`:
+it contains no token, registers the `devmonitor://` link handler for the
+current user on first run, and enrolls with the one-use link from
+*Link this device* (or a pasted link), like the Android and macOS apps.
+
+The Android job needs the release signing key as repository secrets
+(*Settings → Secrets and variables → Actions*): `ANDROID_KEYSTORE_BASE64`
+(the `.jks` file, base64), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+`ANDROID_KEY_PASSWORD`. Without them the job is skipped and nothing is
+published for Android. iOS is not published by this workflow (see below).
 
 Phones and other computers cannot reach `127.0.0.1`. Set `PUBLIC_BASE_URL` to an
 HTTPS address that the device can reach (a deployment, or a tunnel such as

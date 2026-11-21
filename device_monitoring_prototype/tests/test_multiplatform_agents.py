@@ -468,9 +468,11 @@ class DownloadHubIntegrationTest(unittest.TestCase):
         self.app.config["IOS_DISTRIBUTION_URL"] = "https://evil.example/app.ipa"
         self.assertEqual(self._download_cards()[1]["ios"][0], "is-pending")
         # Only known package names can ever be served (no path traversal).
-        for probe in ("/downloads/ios", "/downloads/windows", "/downloads/app.py"):
+        for probe in ("/downloads/ios", "/downloads/linux", "/downloads/app.py"):
             with self.subTest(probe=probe):
                 self.assertEqual(self.client.get(probe).status_code, 404)
+        # Windows has no published package here, so it falls back to the page.
+        self.assertEqual(self.client.get("/downloads/windows").status_code, 302)
         traversal = self.client.get("/downloads/..%2Fapp.py")
         self.assertNotEqual(traversal.status_code, 200)
         self.assertNotIn(b"def create_app", traversal.data)
@@ -582,6 +584,209 @@ class DownloadHubIntegrationTest(unittest.TestCase):
             self.client.post("/device-agent/linux/deb", data={"csrf_token": csrf},
                              headers={"Accept": "application/json"}).status_code, 403
         )
+
+
+RELEASE_URL = "https://github.com/example/devmonitor/releases/download/agents-latest"
+
+
+def release_manifest(**packages):
+    defaults = {
+        "windows": "DevMonitor-Agent-Windows.exe",
+        "android": "devmonitor-agent.apk",
+        "macos": "DevMonitor-Agent.dmg",
+    }
+    return {
+        "packages": {
+            key: {"filename": defaults[key], "sha256": "ab" * 32, "size": 5 * 1024 * 1024,
+                  "version": "1.0.0", **(overrides or {})}
+            for key, overrides in packages.items()
+        }
+    }
+
+
+class ReleaseHostedPackagesTest(unittest.TestCase):
+    """Packages published to a GitHub Release (hosts without a disk, e.g. Vercel)."""
+
+    register_and_login = base_tests.DatabaseIntegrationTest.register_and_login
+    _download_cards = base_tests.DatabaseIntegrationTest._download_cards
+
+    def setUp(self):
+        self.packages = tempfile.TemporaryDirectory()
+        self._make_app()
+        self.manifest = release_manifest(windows=None, android=None, macos=None)
+        self.fetches = []
+        opener = patch("device_monitoring_prototype.app.urllib.request.urlopen", self._urlopen)
+        opener.start()
+        self.addCleanup(opener.stop)
+        # Behave like a Linux host (Vercel), where the per-user .exe cannot be built.
+        linux = patch("device_monitoring_prototype.app.sys.platform", "linux")
+        linux.start()
+        self.addCleanup(linux.stop)
+
+    def tearDown(self):
+        with self.app.app_context():
+            db.session.remove()
+            db.drop_all()
+        self.packages.cleanup()
+
+    def _make_app(self):
+        """A fresh app (and so an empty manifest cache) with a new in-memory database."""
+        self.app = create_app({
+            "TESTING": True,
+            "SECRET_KEY": "integration-test-secret",
+            "SQLALCHEMY_DATABASE_URI": "sqlite://",
+            "MAIL_SERVER": None,
+            "AGENT_PACKAGES_DIR": self.packages.name,
+            "IOS_DISTRIBUTION_URL": "",
+            "AGENT_RELEASE_URL": RELEASE_URL,
+        })
+        self.client = self.app.test_client()
+        with self.app.app_context():
+            db.create_all()
+            db.session.add_all([Role(name="Administrator"), Role(name="User")])
+            db.session.commit()
+
+    def _urlopen(self, request, timeout):
+        self.fetches.append(request.full_url)
+        if isinstance(self.manifest, Exception):
+            raise self.manifest
+        body = self.manifest if isinstance(self.manifest, bytes) else json.dumps(self.manifest).encode()
+        return io.BytesIO(body)
+
+    def test_release_packages_enable_cards_and_redirect_downloads(self):
+        self.register_and_login()
+        _html, cards = self._download_cards()
+        for platform, label in (("windows", ".exe"), ("android", ".apk"), ("macos", ".dmg")):
+            with self.subTest(platform=platform):
+                state, body = cards[platform]
+                self.assertEqual(state, "is-available")
+                self.assertIn(f'href="/downloads/{platform}"', body)
+                self.assertIn(f"Download {label}", body)
+                self.assertIn("5.0 MB", body)
+        self.assertIn("Link this device", cards["windows"][1])
+        self.assertEqual(self.fetches, [f"{RELEASE_URL}/agents-manifest.json"])
+        for platform, filename in (
+            ("windows", "DevMonitor-Agent-Windows.exe"),
+            ("android", "devmonitor-agent.apk"),
+            ("macos", "DevMonitor-Agent.dmg"),
+        ):
+            with self.subTest(download=platform):
+                response = self.client.get(f"/downloads/{platform}")
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.headers["Location"], f"{RELEASE_URL}/{filename}")
+        # The manifest is cached instead of being fetched on every page view.
+        self.assertEqual(len(self.fetches), 1)
+
+    def test_a_local_package_takes_priority_over_the_release(self):
+        self.register_and_login()
+        Path(self.packages.name, "devmonitor-agent.apk").write_bytes(make_apk())
+        served = self.client.get("/downloads/android")
+        self.assertEqual(served.status_code, 200)
+        self.assertEqual(served.mimetype, "application/vnd.android.package-archive")
+        served.close()
+
+    def test_missing_or_untrustworthy_release_entries_are_not_offered(self):
+        self.register_and_login()
+        self.manifest = release_manifest(
+            windows={"filename": "../evil.exe"},
+            android={"sha256": "not-a-hash"},
+        )
+        _html, cards = self._download_cards()
+        for platform in ("windows", "android", "macos"):
+            with self.subTest(platform=platform):
+                self.assertEqual(cards[platform][0], "is-pending")
+                self.assertEqual(self.client.get(f"/downloads/{platform}").status_code, 302)
+                self.assertNotIn(
+                    "github.com",
+                    self.client.get(f"/downloads/{platform}").headers["Location"],
+                )
+
+    def test_an_unreachable_or_broken_release_leaves_cards_pending(self):
+        for failure in (
+            urllib.error.URLError("offline"),
+            TimeoutError("slow"),
+            b"not json",
+            b'{"packages": []}',
+            b"{" + b" " * (64 * 1024) + b"}",
+        ):
+            with self.subTest(failure=repr(failure)[:40]):
+                self.tearDown()
+                self.packages = tempfile.TemporaryDirectory()
+                self._make_app()
+                self.manifest = failure
+                self.fetches.clear()
+                self.register_and_login()
+                _html, cards = self._download_cards()
+                for platform in ("windows", "android", "macos"):
+                    self.assertEqual(cards[platform][0], "is-pending")
+                # A failure is cached briefly, so pages do not wait on every view.
+                self._download_cards()
+                self.assertEqual(len(self.fetches), 1)
+
+    def test_only_https_release_urls_are_used(self):
+        self.register_and_login()
+        self.app.config["AGENT_RELEASE_URL"] = "http://insecure.example/releases"
+        _html, cards = self._download_cards()
+        self.assertEqual(cards["android"][0], "is-pending")
+        self.assertEqual(self.fetches, [])
+
+
+class WindowsAgentLinkTest(unittest.TestCase):
+    """The generic Windows build enrolls with a "Link this device" link."""
+
+    def setUp(self):
+        from device_monitoring_prototype import device_agent
+
+        self.agent = device_agent
+
+    def test_valid_links_give_the_enroll_and_dashboard_urls(self):
+        link = "devmonitor://enroll?" + urllib.parse.urlencode(
+            {"server": "https://monitor.example.com", "token": TOKEN}
+        )
+        self.assertEqual(
+            self.agent.parse_enrollment_link(f'"{link}"'),
+            (
+                "https://monitor.example.com/api/device-agent/enroll",
+                TOKEN,
+                "https://monitor.example.com/dashboard",
+            ),
+        )
+        local = "devmonitor://enroll?server=http%3A%2F%2Flocalhost%3A5000&token=" + TOKEN
+        self.assertEqual(
+            self.agent.parse_enrollment_link(local)[0],
+            "http://localhost:5000/api/device-agent/enroll",
+        )
+
+    def test_unsafe_or_incomplete_links_are_rejected(self):
+        for link in (
+            "",
+            "https://monitor.example.com",
+            "devmonitor://other?server=https%3A%2F%2Fm.example&token=" + TOKEN,
+            "devmonitor://enroll?server=http%3A%2F%2Fevil.example&token=" + TOKEN,
+            "devmonitor://enroll?server=https%3A%2F%2Fu%3Ap%40m.example&token=" + TOKEN,
+            "devmonitor://enroll?server=https%3A%2F%2Fm.example%2Fpath&token=" + TOKEN,
+            "devmonitor://enroll?server=https%3A%2F%2Fm.example&token=short",
+        ):
+            with self.subTest(link=link), self.assertRaises(ValueError):
+                self.agent.parse_enrollment_link(link)
+
+    def test_placeholders_are_not_treated_as_embedded_values(self):
+        self.assertEqual(self.agent._embedded("__REGISTRATION" + "_TOKEN__"), "")
+        self.assertEqual(self.agent._embedded(TOKEN), TOKEN)
+
+    def test_generic_build_without_a_link_stops_before_collecting(self):
+        with patch.object(self.agent, "collect_specifications") as collect, \
+                patch.object(self.agent, "configure_logging", return_value=None), \
+                patch.object(self.agent, "_show_log_location"), \
+                patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(self.agent.main(["--yes"]), 2)
+        collect.assert_not_called()
+        self.assertIn("Link this device", stderr.getvalue())
+
+    def test_per_download_builds_still_embed_their_token(self):
+        source = Path(self.agent.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count('"__REGISTRATION_TOKEN__"'), 1)
+        self.assertEqual(source.count('"__SUBMISSION_URL__"'), 1)
 
 
 if __name__ == "__main__":

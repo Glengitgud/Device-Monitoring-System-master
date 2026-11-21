@@ -1,5 +1,15 @@
-"""Windows inventory agent template; server injects one-time enrollment credentials."""
+"""Windows inventory agent.
 
+Two builds come from this file:
+
+* Per-download: a Windows server injects a one-use registration token below.
+* Generic (published by CI): no token inside. It registers the ``devmonitor://``
+  link handler for the current user and enrolls with the one-use
+  ``devmonitor://enroll?server=...&token=...`` link from "Link this device",
+  passed on the command line or pasted when asked.
+"""
+
+import argparse
 import ipaddress
 import ctypes
 import ctypes.wintypes
@@ -16,7 +26,7 @@ import sys
 import tempfile
 from datetime import datetime
 import urllib.error
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 import urllib.request
 import webbrowser
 
@@ -28,6 +38,11 @@ SUBMISSION_URL = "__SUBMISSION_URL__"
 SCAN_RUN_ID = "__SCAN_RUN_ID__"
 SCAN_TOKEN = "__SCAN_TOKEN__"
 DASHBOARD_URL = "__DASHBOARD_URL__"
+AGENT_VERSION = "1.0.0"
+LINK_SCHEME = "devmonitor"
+ENROLL_PATH = "/api/device-agent/enroll"
+TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{40,64}")
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 UNAVAILABLE = "Unavailable"
 LOGGER = logging.getLogger("devmonitor.device_agent")
 LOG_PATH = None
@@ -1170,12 +1185,143 @@ def display_value(key, value):
     return str(value)
 
 
-def main():
+def _embedded(value):
+    """A value injected by the server, or "" while it is still a placeholder."""
+    return "" if value.startswith("__") and value.endswith("__") else value
+
+
+def parse_enrollment_link(link):
+    """Return (submission_url, token, dashboard_url) from a devmonitor://enroll link."""
+    parsed = urlsplit((link or "").strip().strip('"'))
+    if parsed.scheme != LINK_SCHEME or (parsed.netloc or parsed.path.strip("/")) != "enroll":
+        raise ValueError("That is not a DevMonitor registration link.")
+    query = parse_qs(parsed.query)
+    server = urlsplit((query.get("server") or [""])[0])
+    if (
+        server.scheme not in {"http", "https"}
+        or not server.hostname
+        or server.username
+        or server.password
+        or server.query
+        or server.fragment
+        or server.path not in {"", "/"}
+    ):
+        raise ValueError("The registration link does not contain a valid server address.")
+    if server.scheme != "https" and server.hostname not in LOCAL_HOSTS:
+        raise ValueError("For your security the DevMonitor server must use HTTPS.")
+    token = (query.get("token") or [""])[0]
+    if not TOKEN_PATTERN.fullmatch(token):
+        raise ValueError(
+            "The registration link is incomplete. Create a new link on the website."
+        )
+    origin = f"{server.scheme}://{server.netloc}"
+    return origin + ENROLL_PATH, token, origin + "/dashboard"
+
+
+def register_link_handler():
+    """Open devmonitor:// links with this program (current user only, no admin rights)."""
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return False
+    try:
+        import winreg
+
+        command = f'"{sys.executable}" "%1"'
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{LINK_SCHEME}") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:DevMonitor Agent")
+            winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
+        with winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER, rf"Software\Classes\{LINK_SCHEME}\shell\open\command"
+        ) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, command)
+    except OSError:
+        LOGGER.warning("Could not register the devmonitor:// link handler.", exc_info=True)
+        return False
+    LOGGER.info("Registered the devmonitor:// link handler for %s.", sys.executable)
+    return True
+
+
+def resolve_link_enrollment(link, *, interactive):
+    """Use the link argument, or ask for one; returns the parsed link or None."""
+    if not link and interactive:
+        print(
+            "\nTo link this computer to your DevMonitor account:\n"
+            "  1. Sign in on the DevMonitor website on this computer.\n"
+            "  2. Open \"Link a Device\" and click \"Link this device\".\n"
+            "     This agent opens by itself. If it does not, copy the link shown\n"
+            "     on the page and paste it below.\n"
+        )
+        try:
+            link = input("Registration link (devmonitor://enroll?...): ").strip()
+        except EOFError:
+            link = ""
+    if not link:
+        print(
+            "No registration link was provided. Click \"Link this device\" on the "
+            "DevMonitor website to link this computer.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        return parse_enrollment_link(link)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return None
+
+
+def _guess_device_type():
+    try:
+        return "Laptop" if psutil.sensors_battery() is not None else "Desktop"
+    except (AttributeError, NotImplementedError, OSError, RuntimeError):
+        return "Desktop"
+
+
+def _parse_arguments(argv):
+    parser = argparse.ArgumentParser(description="Register this computer with DevMonitor.")
+    parser.add_argument("link", nargs="?", help="devmonitor://enroll link from the website")
+    parser.add_argument("--yes", action="store_true", help="submit without prompting")
+    parser.add_argument("--name", help="device name to use with --yes")
+    parser.add_argument("--device-type", choices=["Desktop", "Laptop"], help="used with --yes")
+    parser.add_argument("--version", action="version", version=AGENT_VERSION)
+    parser.add_argument(
+        "--print-specs",
+        action="store_true",
+        help="print the detected specifications as JSON and exit (nothing is sent)",
+    )
+    args, _unknown = parser.parse_known_args(argv)
+    return args
+
+
+def main(argv=None):
+    global REGISTRATION_TOKEN, SUBMISSION_URL, DASHBOARD_URL
+
+    args = _parse_arguments(sys.argv[1:] if argv is None else argv)
     log_path = configure_logging()
+    if args.print_specs:
+        try:
+            print(json.dumps(
+                {"device_type": _guess_device_type(), "specifications": collect_specifications()},
+                indent=2,
+                default=str,
+            ))
+        except RuntimeError as error:
+            print(f"Could not collect device information: {error}", file=sys.stderr)
+            return 1
+        return 0
     scanner_mode = (
         SCAN_RUN_ID not in {"__SCAN_RUN_ID__", ""}
         or "/api/device-agent/scans/" in SUBMISSION_URL
     )
+    linked_with_link = not scanner_mode and not _embedded(REGISTRATION_TOKEN)
+    if linked_with_link:
+        # Generic build: the one-use token comes from a "Link this device" link.
+        register_link_handler()
+        interactive = sys.stdin is not None and sys.stdin.isatty() and not args.yes
+        enrollment = resolve_link_enrollment(args.link, interactive=interactive)
+        if enrollment is None:
+            _show_log_location(log_path)
+            return 2
+        SUBMISSION_URL, REGISTRATION_TOKEN, DASHBOARD_URL = enrollment
+        LOGGER.info("Using a registration link for %s.", SUBMISSION_URL)
     try:
         specifications = collect_specifications()
     except RuntimeError as error:
@@ -1199,19 +1345,25 @@ def main():
                 value = UNAVAILABLE
             print(f"  {label}: {display_value(key, value)}")
         _show_log_location(log_path)
-        name = input(f"\nDevice name for DevMonitor [{platform.node()}]: ").strip()
-        name = name or platform.node()
+        if args.yes:
+            name = (args.name or platform.node() or "").strip()
+            device_type = args.device_type or _guess_device_type()
+        else:
+            name = input(f"\nDevice name for DevMonitor [{platform.node()}]: ").strip()
+            name = name or platform.node()
         if not name or len(name) > 120:
             print("Enter a device name between 1 and 120 characters.", file=sys.stderr)
             return 1
-        while True:
+        while not args.yes:
             device_type = input("Device type (Desktop/Laptop): ").strip().title()
             if device_type in {"Desktop", "Laptop"}:
                 break
             print("Choose Desktop or Laptop.")
 
         print("\nOnly the specifications listed above and your device name/type will be sent.")
-        answer = input("Submit this device to your DevMonitor account? Type yes to confirm: ")
+        answer = "yes" if args.yes else input(
+            "Submit this device to your DevMonitor account? Type yes to confirm: "
+        )
         if answer.strip().casefold() not in {"yes", "y"}:
             LOGGER.info("Submission cancelled at the confirmation prompt; nothing was sent.")
             print("Submission cancelled; no device was registered.")
@@ -1261,7 +1413,13 @@ def main():
             message = json.loads(message).get("error") or message
         except (ValueError, AttributeError):
             pass
-        if error.code == 401 and not scanner_mode:
+        if error.code == 401 and linked_with_link:
+            print(
+                "Submission failed: this registration link has expired or was already used.\n"
+                "Click \"Link this device\" on the DevMonitor website to get a new one.",
+                file=sys.stderr,
+            )
+        elif error.code == 401 and not scanner_mode:
             print(
                 "Submission failed: this download has expired or was already used.\n"
                 "Download the agent again from the DevMonitor website (Downloads page) "
@@ -1303,6 +1461,8 @@ def main():
     else:
         LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
         print(f"Device Registered Successfully (Device ID: {result['device_id']}).")
+        if args.yes:
+            return 0
         try:
             show_registration_success()
         except (ImportError, OSError, RuntimeError) as error:
@@ -1325,5 +1485,6 @@ def _pause_before_closing():
 
 if __name__ == "__main__":
     exit_code = main()
-    _pause_before_closing()
+    if "--yes" not in sys.argv[1:] and "--print-specs" not in sys.argv[1:]:
+        _pause_before_closing()
     raise SystemExit(exit_code)

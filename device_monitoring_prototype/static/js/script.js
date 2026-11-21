@@ -503,9 +503,11 @@ function updatePendingEnrollmentNotice(pending) {
 
 function initDeviceVerificationPage() {
     initLinkDeviceButton();
-    // Windows and Linux agents carry their own token; the app-link button is for phones/Macs.
-    if (['windows', 'linux'].includes(detectClientPlatform())) {
-        const desktopNotice = document.getElementById('desktopAgentNotice');
+    // Downloads built on the server carry their own token (Linux, and Windows when the
+    // site runs on Windows); everything else is linked with the app-link button.
+    const desktopNotice = document.getElementById('desktopAgentNotice');
+    const prelinked = (desktopNotice?.dataset.prelinkedPlatforms || 'windows linux').split(' ');
+    if (prelinked.includes(detectClientPlatform())) {
         if (desktopNotice) desktopNotice.hidden = false;
         document.getElementById('linkThisDeviceBtn')?.classList.replace('btn-primary', 'btn-outline-light');
     }

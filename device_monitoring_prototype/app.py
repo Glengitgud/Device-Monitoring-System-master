@@ -5,6 +5,9 @@ import re
 import secrets
 import ssl
 import sys
+import time
+import urllib.error
+import urllib.request
 import uuid
 import base64
 import hashlib
@@ -51,6 +54,7 @@ from device_monitoring_prototype.package_validation import (
     inspect_ipa,
     validate_apk,
     validate_dmg,
+    validate_exe,
 )
 from device_monitoring_prototype.linux_package import (
     PACKAGE_VERSION as LINUX_PACKAGE_VERSION,
@@ -310,9 +314,18 @@ def create_app(test_config=None):
         or str(project_dir / "agent_packages"),
         # Public TestFlight or App Store link for the iOS app, once published.
         IOS_DISTRIBUTION_URL=os.environ.get("IOS_DISTRIBUTION_URL", "").strip(),
+        # HTTPS folder holding prebuilt packages plus agents-manifest.json, e.g. a GitHub
+        # Release: https://github.com/OWNER/REPO/releases/download/agents-latest
+        # Used when a package is not in AGENT_PACKAGES_DIR (hosts without a disk, such as Vercel).
+        AGENT_RELEASE_URL=os.environ.get("AGENT_RELEASE_URL", "").strip().rstrip("/"),
     )
     if test_config:
         app.config.update(test_config)
+    if not str(app.config.get("SQLALCHEMY_DATABASE_URI", "")).startswith("mysql"):
+        # The TLS options are PyMySQL arguments; other drivers (SQLite in tests) reject them.
+        engine_options = dict(app.config.get("SQLALCHEMY_ENGINE_OPTIONS") or {})
+        engine_options.pop("connect_args", None)
+        app.config["SQLALCHEMY_ENGINE_OPTIONS"] = engine_options
     if not os.environ.get("SECRET_KEY") and not app.testing:
         app.logger.warning("SECRET_KEY is unset; configure a persistent random secret in production.")
 
@@ -1076,6 +1089,8 @@ def create_app(test_config=None):
             active_page="device-verification",
             verified_device_count=count,
             pending_enrollment=None if count else pending_agent_enrollment(current_user),
+            # Only a Windows host builds .exe files that are already linked to the account.
+            windows_prelinked=windows_agent_buildable(),
         )
 
     @app.get("/dashboard")
@@ -1525,6 +1540,12 @@ def create_app(test_config=None):
     # Device Agent downloads (all platforms)
     # ------------------------------------------------------------------
     AGENT_PACKAGES = {
+        "windows": {
+            # Generic build that is linked with "Link this device" (no embedded token).
+            "filename": "DevMonitor-Agent-Windows.exe",
+            "mimetype": "application/vnd.microsoft.portable-executable",
+            "validate": validate_exe,
+        },
         "android": {
             "filename": "devmonitor-agent.apk",
             "mimetype": "application/vnd.android.package-archive",
@@ -1547,6 +1568,15 @@ def create_app(test_config=None):
     )
     IOS_INSTALL_LINK_SECONDS = 15 * 60
     package_cache = {}
+    # Packages that may be served from AGENT_RELEASE_URL. iOS is excluded: an .ipa
+    # can only be installed through TestFlight/App Store or a signed manifest.
+    RELEASE_PLATFORMS = {"windows", "android", "macos"}
+    RELEASE_MANIFEST_NAME = "agents-manifest.json"
+    RELEASE_MANIFEST_TIMEOUT = 4
+    RELEASE_MANIFEST_MAX_BYTES = 64 * 1024
+    RELEASE_MANIFEST_TTL = 5 * 60
+    RELEASE_MANIFEST_RETRY = 60
+    release_manifest_cache = {}
 
     def agent_public_base_url():
         """Origin that agents submit to, or None when it is not safely reachable."""
@@ -1584,7 +1614,7 @@ def create_app(test_config=None):
         """
         path = agent_package_path(platform_key)
         if path is None:
-            return None
+            return release_package_details(platform_key)
         stat = path.stat()
         cache_key = (platform_key, str(path), stat.st_mtime_ns, stat.st_size)
         if cache_key not in package_cache:
@@ -1612,6 +1642,69 @@ def create_app(test_config=None):
     def valid_package(platform_key):
         details = agent_package_details(platform_key)
         return details if details and "error" not in details else None
+
+    def agent_release_url():
+        url = app.config.get("AGENT_RELEASE_URL") or ""
+        return url if url.startswith("https://") else ""
+
+    def fetch_release_manifest():
+        """agents-manifest.json from AGENT_RELEASE_URL, cached; None when unreachable.
+
+        The release workflow validates each package with the checks in
+        package_validation.py before listing it, so only verified builds appear here.
+        """
+        base_url = agent_release_url()
+        if not base_url:
+            return None
+        now = time.monotonic()
+        cached = release_manifest_cache.get(base_url)
+        if cached and cached["expires"] > now:
+            return cached["manifest"]
+        manifest = None
+        try:
+            request_ = urllib.request.Request(
+                f"{base_url}/{RELEASE_MANIFEST_NAME}",
+                headers={"User-Agent": "DevMonitor-Server", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(request_, timeout=RELEASE_MANIFEST_TIMEOUT) as response:
+                body = response.read(RELEASE_MANIFEST_MAX_BYTES + 1)
+            if len(body) > RELEASE_MANIFEST_MAX_BYTES:
+                raise ValueError("The release manifest is too large.")
+            manifest = json.loads(body.decode("utf-8"))
+            if not isinstance(manifest, dict) or not isinstance(manifest.get("packages"), dict):
+                raise ValueError("The release manifest has no package list.")
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            app.logger.warning("Agent release manifest unavailable (%s): %s", base_url, error)
+            manifest = None
+        release_manifest_cache[base_url] = {
+            "manifest": manifest,
+            "expires": now + (RELEASE_MANIFEST_TTL if manifest else RELEASE_MANIFEST_RETRY),
+        }
+        return manifest
+
+    def release_package_details(platform_key):
+        """Details of a package published to AGENT_RELEASE_URL, or None."""
+        if platform_key not in RELEASE_PLATFORMS:
+            return None
+        manifest = fetch_release_manifest()
+        entry = (manifest or {}).get("packages", {}).get(platform_key)
+        filename = AGENT_PACKAGES[platform_key]["filename"]
+        if not isinstance(entry, dict) or entry.get("filename") != filename:
+            return None
+        sha256 = str(entry.get("sha256") or "").lower()
+        size = entry.get("size")
+        if not re.fullmatch(r"[0-9a-f]{64}", sha256) or not isinstance(size, int) or size <= 0:
+            app.logger.warning("Agent release manifest entry for %s is malformed.", platform_key)
+            return None
+        return {
+            "sha256": sha256,
+            "size_mb": (
+                f"{size / 1024 / 1024:.1f} MB" if size >= 1024 * 1024
+                else f"{max(1, round(size / 1024))} KB"
+            ),
+            "version": str(entry.get("version") or ""),
+            "remote_url": f"{agent_release_url()}/{quote(filename)}",
+        }
 
     def ios_distribution_url():
         url = app.config.get("IOS_DISTRIBUTION_URL") or ""
@@ -1691,6 +1784,24 @@ def create_app(test_config=None):
         ios_store_url = ios_distribution_url()
         ios_ota = ios_over_the_air_link()
         ios_store_label = "TestFlight" if "testflight" in ios_store_url else "App Store"
+        if windows_agent_buildable():
+            # A Windows host builds a copy that is already linked to the account.
+            windows_card = {
+                "available": True,
+                "kind": "per_user",
+                "action": url_for("download_windows_agent"),
+                "file_hint": "Built for your account · single use",
+            }
+        else:
+            # Elsewhere (e.g. Vercel) offer the published generic build.
+            windows = agent_package_details("windows")
+            windows_card = {
+                "available": bool(windows) and "error" not in windows,
+                "kind": "package",
+                "action": url_for("download_agent_package", platform_key="windows"),
+                "details": windows,
+                "file_hint": "Run it once, then click “Link this device”",
+            }
         cards = [
             {
                 "key": "windows",
@@ -1698,13 +1809,13 @@ def create_app(test_config=None):
                 "icon": "bi-windows",
                 "formats": [".exe"],
                 "requirement": "Windows 10 or 11, 64-bit",
-                "available": windows_agent_buildable(),
-                "kind": "per_user",
-                "action": url_for("download_windows_agent"),
                 "button_label": "Download .exe",
-                "file_hint": "Built for your account · single use",
-                "pending_label": ".exe unavailable",
-                "pending": "The Windows agent can only be built on a Windows server.",
+                "pending_label": ".exe not published",
+                "pending": (
+                    "Publish the Windows agent with the “Publish agents” GitHub Actions "
+                    "workflow, or run the website on a Windows server."
+                ),
+                **windows_card,
             },
             {
                 "key": "android",
@@ -1898,12 +2009,16 @@ def create_app(test_config=None):
     @login_required
     def download_agent_package(platform_key):
         """Serve a published, verified app package; never a placeholder."""
-        if platform_key not in {"android", "macos"}:
+        if platform_key not in {"windows", "android", "macos"}:
             abort(404)
-        path = agent_package_path(platform_key)
-        if path is None or valid_package(platform_key) is None:
+        details = valid_package(platform_key)
+        if details is None:
             flash("That package is not available yet.", "warning")
             return redirect(url_for("download_page"))
+        path = agent_package_path(platform_key)
+        if path is None:
+            # Published to AGENT_RELEASE_URL; the file host serves the download.
+            return redirect(details["remote_url"])
         package = AGENT_PACKAGES[platform_key]
         response = send_file(
             path,

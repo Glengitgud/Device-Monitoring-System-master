@@ -28,7 +28,8 @@
             </span>
         </div>
 
-        <div id="desktopAgentNotice" class="alert alert-secondary" hidden>
+        <div id="desktopAgentNotice" class="alert alert-secondary" hidden
+             data-prelinked-platforms="{{ 'windows linux' if windows_prelinked else 'linux' }}">
             <i class="bi bi-pc-display me-1" aria-hidden="true"></i>
             <strong>On this computer you don't need the button below.</strong>
             Download the agent from <a href="{{ url_for('download_page') }}" class="alert-link">Downloads</a>,
@@ -40,7 +41,8 @@
                 <span class="link-card-icon" aria-hidden="true"><i class="bi bi-link-45deg"></i></span>
                 <h2 class="link-card-title">Link this device</h2>
                 <p class="link-card-text">
-                    For the <strong>Android, macOS and iOS apps</strong>: open this page
+                    For the <strong>{{ 'Android, macOS and iOS apps' if windows_prelinked else 'Windows, Android, macOS and iOS apps' }}</strong>:
+                    install and open the app once, then open this page
                     <strong>on that device</strong> and tap the button. The app opens,
                     shows what it detected, and asks you to approve.
                 </p>
@@ -60,9 +62,10 @@
                 </div>
                 <hr class="link-card-divider">
                 <p class="link-card-text mb-0">
-                    <i class="bi bi-windows me-1" aria-hidden="true"></i>
+                    {% if windows_prelinked %}<i class="bi bi-windows me-1" aria-hidden="true"></i>{% endif %}
                     <i class="bi bi-ubuntu me-1" aria-hidden="true"></i>
-                    Windows and Linux downloads are already linked to your account; just run them.
+                    {{ 'Windows and Linux downloads are' if windows_prelinked else 'Linux downloads are' }}
+                    already linked to your account; just run them.
                     <a href="{{ url_for('download_page') }}" class="ms-1">Go to downloads</a>
                 </p>
             </div>

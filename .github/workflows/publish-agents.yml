@@ -1,0 +1,262 @@
+# Builds the DevMonitor agents on GitHub-hosted machines and publishes them to the
+# "agents-latest" GitHub Release, together with agents-manifest.json.
+#
+# The website offers these downloads when AGENT_RELEASE_URL points at the release:
+#   AGENT_RELEASE_URL=https://github.com/OWNER/REPO/releases/download/agents-latest
+# (needed on hosts without a disk or a Windows build machine, such as Vercel).
+#
+#   * Windows: generic .exe, linked with "Link this device"; enrolls this runner end-to-end.
+#   * Android: signed .apk. Needs the repository secrets ANDROID_KEYSTORE_BASE64,
+#              ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD;
+#              without them the Android job is skipped and any published .apk is kept.
+#   * macOS:   universal .dmg, ad-hoc signed (users choose "Open Anyway" once) unless the
+#              Developer ID secrets of the Apple agents workflow are added.
+#   * iOS:     not published here. iPhones only install apps from the App Store/TestFlight or
+#              signed Ad Hoc builds, which need the Apple Developer Program (see agents/README.md).
+#
+# Each package is checked with the server's own validators before it is listed.
+name: Publish agents
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - "agents/android/**"
+      - "agents/macos/**"
+      - "device_monitoring_prototype/device_agent.py"
+      - "device_monitoring_prototype/device_agent_unix.py"
+      - "device_monitoring_prototype/package_validation.py"
+      - ".github/workflows/publish-agents.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-agents
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: agents-latest
+
+jobs:
+  windows:
+    name: Windows agent (.exe) - build + end-to-end enrollment
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: device_monitoring_prototype/requirements.txt
+
+      - name: Install requirements
+        run: python -m pip install -r device_monitoring_prototype/requirements.txt
+
+      - name: Build the generic agent
+        run: |
+          python -m PyInstaller --onefile --console --clean --noconfirm \
+            --name DevMonitor-Agent-Windows --distpath dist \
+            --workpath "$RUNNER_TEMP/pyi-work" --specpath "$RUNNER_TEMP/pyi-spec" \
+            device_monitoring_prototype/device_agent.py
+          python -c "from device_monitoring_prototype.package_validation import validate_exe; validate_exe('dist/DevMonitor-Agent-Windows.exe'); print('valid 64-bit EXE')"
+
+      - name: Agent collects valid specifications on real Windows
+        run: |
+          dist/DevMonitor-Agent-Windows.exe --print-specs > windows-specs.json
+          python agents/ci/ci_backend.py validate-specs windows-specs.json
+
+      - name: End-to-end - the packaged agent enrolls this PC with a real backend
+        run: |
+          python agents/ci/ci_backend.py serve --db "$RUNNER_TEMP/windows-ci.db" --port 5077 \
+            --link-file "$RUNNER_TEMP/links.txt" > "$RUNNER_TEMP/backend.log" 2>&1 &
+          for i in $(seq 60); do [ -s "$RUNNER_TEMP/links.txt" ] && break; sleep 1; done
+          LINK="$(head -n 1 "$RUNNER_TEMP/links.txt" | tr -d '\r')"
+          dist/DevMonitor-Agent-Windows.exe --yes --name "CI Windows" --device-type Desktop "$LINK"
+          python agents/ci/ci_backend.py check --db "$RUNNER_TEMP/windows-ci.db" \
+            --expect-type Desktop --expect-os Windows
+          if dist/DevMonitor-Agent-Windows.exe --yes --name "CI replay" "$LINK"; then
+            echo "A used registration link was accepted twice" >&2; exit 1
+          fi
+
+      - name: Backend log
+        if: always()
+        run: cat "$RUNNER_TEMP/backend.log" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-windows
+          path: dist/DevMonitor-Agent-Windows.exe
+          if-no-files-found: error
+
+  android:
+    name: Android agent (.apk) - signed release build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HAS_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+    steps:
+      - name: Signing key missing
+        if: env.HAS_KEY != 'true'
+        run: |
+          echo "::warning title=Android not built::Add the ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD repository secrets to publish the .apk."
+
+      - uses: actions/checkout@v4
+        if: env.HAS_KEY == 'true'
+
+      - uses: actions/setup-java@v4
+        if: env.HAS_KEY == 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: actions/setup-python@v5
+        if: env.HAS_KEY == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Restore the release signing key
+        if: env.HAS_KEY == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          {
+            echo "storeFile=$RUNNER_TEMP/release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > "$RUNNER_TEMP/android-keystore.properties"
+          echo "DEVMONITOR_KEYSTORE_PROPERTIES=$RUNNER_TEMP/android-keystore.properties" >> "$GITHUB_ENV"
+
+      - name: Build the signed APK
+        if: env.HAS_KEY == 'true'
+        working-directory: agents/android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/devmonitor-agent.apk"
+
+      - name: Verify the APK is signed
+        if: env.HAS_KEY == 'true'
+        run: |
+          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs dist/devmonitor-agent.apk | head -n 3
+          python -c "from device_monitoring_prototype.package_validation import validate_apk; validate_apk('dist/devmonitor-agent.apk'); print('valid signed APK')"
+
+      - name: Remove the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks" "$RUNNER_TEMP/android-keystore.properties"
+
+      - uses: actions/upload-artifact@v4
+        if: env.HAS_KEY == 'true'
+        with:
+          name: agent-android
+          path: dist/devmonitor-agent.apk
+          if-no-files-found: error
+
+  macos:
+    name: macOS agent (.dmg) - universal build
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      PY_UNIVERSAL_VERSION: "3.12.8"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install python.org universal2 Python (for an Intel + Apple silicon app)
+        run: |
+          curl -fsSLo python.pkg "https://www.python.org/ftp/python/${PY_UNIVERSAL_VERSION}/python-${PY_UNIVERSAL_VERSION}-macos11.pkg"
+          sudo installer -pkg python.pkg -target /
+
+      - name: Build "DevMonitor Agent.app" and DevMonitor-Agent.dmg
+        env:
+          TARGET_ARCH: universal2
+          PYTHON: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3
+        run: bash agents/macos/build_macos.sh
+
+      - name: Verify the DMG
+        run: |
+          hdiutil attach agents/macos/dist/DevMonitor-Agent.dmg -mountpoint "$RUNNER_TEMP/dmg" -nobrowse -readonly
+          "$RUNNER_TEMP/dmg/DevMonitor Agent.app/Contents/MacOS/DevMonitor Agent" --version
+          hdiutil detach "$RUNNER_TEMP/dmg"
+          python -c "from device_monitoring_prototype.package_validation import validate_dmg; validate_dmg('agents/macos/dist/DevMonitor-Agent.dmg'); print('valid DMG')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-macos
+          path: agents/macos/dist/DevMonitor-Agent.dmg
+          if-no-files-found: error
+
+  publish:
+    name: Publish to the agents-latest release
+    needs: [windows, android, macos]
+    # Publish whatever built successfully; a failed or skipped platform keeps its last release.
+    if: ${{ !cancelled() && (needs.windows.result == 'success' || needs.android.result == 'success' || needs.macos.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-*
+          path: packages
+          merge-multiple: true
+
+      - name: Create the release if it does not exist
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --title "DevMonitor agents (latest builds)" --latest=false \
+            --notes "Built automatically by the Publish agents workflow. The DevMonitor website links to these files; download them from your DevMonitor Downloads page."
+
+      - name: Write agents-manifest.json (keeps entries for platforms not rebuilt)
+        run: |
+          gh release download "$RELEASE_TAG" --pattern agents-manifest.json --dir previous 2>/dev/null || true
+          python3 - <<'EOF'
+          import hashlib, json, os
+          from pathlib import Path
+          files = {
+              "windows": "DevMonitor-Agent-Windows.exe",
+              "android": "devmonitor-agent.apk",
+              "macos": "DevMonitor-Agent.dmg",
+          }
+          previous = Path("previous/agents-manifest.json")
+          manifest = json.loads(previous.read_text()) if previous.is_file() else {}
+          packages = manifest.get("packages") if isinstance(manifest.get("packages"), dict) else {}
+          for platform, filename in files.items():
+              path = Path("packages") / filename
+              if not path.is_file():
+                  continue
+              data = path.read_bytes()
+              packages[platform] = {
+                  "filename": filename,
+                  "sha256": hashlib.sha256(data).hexdigest(),
+                  "size": len(data),
+                  "version": "1.0.0",
+                  "commit": os.environ["GITHUB_SHA"],
+              }
+          Path("packages/agents-manifest.json").write_text(
+              json.dumps({"packages": packages}, indent=2) + "\n"
+          )
+          print(json.dumps(packages, indent=2))
+          EOF
+
+      - name: Upload to the release
+        run: gh release upload "$RELEASE_TAG" packages/* --clobber
