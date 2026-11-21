@@ -39,7 +39,7 @@ concurrency:
 jobs:
   macos-dmg:
     name: macOS agent (.dmg) - build + end-to-end enrollment
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
     env:
       PY_UNIVERSAL_VERSION: "3.12.8"
@@ -148,7 +148,7 @@ jobs:
 
   ios-app:
     name: iOS app - build + simulator tests (incl. backend enrollment)
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -225,7 +225,7 @@ jobs:
     name: iOS signed distribution (${{ inputs.ios_distribution }})
     needs: ios-app
     if: github.event_name == 'workflow_dispatch' && inputs.ios_distribution != 'none'
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
     env:
       TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

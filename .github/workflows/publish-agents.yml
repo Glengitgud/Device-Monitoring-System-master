@@ -167,7 +167,7 @@ jobs:
 
   macos:
     name: macOS agent (.dmg) - universal build
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
     env:
       PY_UNIVERSAL_VERSION: "3.12.8"
