@@ -50,6 +50,35 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         buildInterface();
         handleIntent(getIntent());
+        // First launch without a link: let the signed-in website hand one back.
+        if (savedInstanceState == null && link == null && linkOpenUrl() != null) {
+            openWebsiteToLink();
+        }
+    }
+
+    /** SERVER_URL/device-link/open when this build knows its website, else null. */
+    private static String linkOpenUrl() {
+        if (BuildConfig.SERVER_URL == null || BuildConfig.SERVER_URL.isEmpty()) {
+            return null;
+        }
+        try {
+            return EnrollmentLink.validateServer(BuildConfig.SERVER_URL) + "/device-link/open";
+        } catch (EnrollmentException error) {
+            return null;
+        }
+    }
+
+    private void openWebsiteToLink() {
+        String url = linkOpenUrl();
+        if (url == null) {
+            return;
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                .addCategory(Intent.CATEGORY_BROWSABLE));
+        } catch (ActivityNotFoundException error) {
+            setStatus("No browser is available. Paste the link from the website instead.", true);
+        }
     }
 
     @Override
@@ -77,15 +106,27 @@ public class MainActivity extends Activity {
     private void showLinkPrompt(String error) {
         link = null;
         specs = null;
-        subtitle.setText("On this device, open the DevMonitor website, sign in, go to "
-            + "“Link a Device” and tap “Link this device”. "
-            + "You can also paste the link here.");
+        boolean knowsWebsite = linkOpenUrl() != null;
+        subtitle.setText(knowsWebsite
+            ? "Link this device to your DevMonitor account: tap the button, sign in on the "
+                + "website if asked, and you come straight back here. "
+                + "You can also paste a link from the website."
+            : "On this device, open the DevMonitor website, sign in, go to "
+                + "“Link a Device” and tap “Link this device”. "
+                + "You can also paste the link here.");
         linkInput.setVisibility(View.VISIBLE);
         details.setVisibility(View.GONE);
         nameInput.setVisibility(View.GONE);
-        primary.setText("Continue");
+        primary.setText(knowsWebsite ? "Link with my account" : "Continue");
         primary.setEnabled(true);
-        primary.setOnClickListener(view -> useLink(linkInput.getText().toString()));
+        primary.setOnClickListener(view -> {
+            String pasted = linkInput.getText().toString().trim();
+            if (pasted.isEmpty() && knowsWebsite) {
+                openWebsiteToLink();
+            } else {
+                useLink(pasted);
+            }
+        });
         setStatus(error, true);
     }
 

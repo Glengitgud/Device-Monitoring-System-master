@@ -24,6 +24,14 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0.0"
+        // Website the published app links through (set by the release workflow with
+        // -PdevmonitorServerUrl=https://...). Empty: the user pastes or taps a link instead.
+        def serverUrl = (project.findProperty("devmonitorServerUrl") ?: "").toString()
+        buildConfigField "String", "SERVER_URL", "\"${serverUrl.replace('\\', '').replace('"', '')}\""
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     signingConfigs {

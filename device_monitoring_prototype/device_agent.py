@@ -38,6 +38,10 @@ SUBMISSION_URL = "__SUBMISSION_URL__"
 SCAN_RUN_ID = "__SCAN_RUN_ID__"
 SCAN_TOKEN = "__SCAN_TOKEN__"
 DASHBOARD_URL = "__DASHBOARD_URL__"
+# Website of the published generic build (set by the release workflow). When the
+# agent has no link it opens SERVER_URL/device-link/open, which links it automatically.
+SERVER_URL = "__SERVER_URL__"
+LINK_OPEN_PATH = "/device-link/open"
 AGENT_VERSION = "1.0.0"
 LINK_SCHEME = "devmonitor"
 ENROLL_PATH = "/api/device-agent/enroll"
@@ -1190,13 +1194,9 @@ def _embedded(value):
     return "" if value.startswith("__") and value.endswith("__") else value
 
 
-def parse_enrollment_link(link):
-    """Return (submission_url, token, dashboard_url) from a devmonitor://enroll link."""
-    parsed = urlsplit((link or "").strip().strip('"'))
-    if parsed.scheme != LINK_SCHEME or (parsed.netloc or parsed.path.strip("/")) != "enroll":
-        raise ValueError("That is not a DevMonitor registration link.")
-    query = parse_qs(parsed.query)
-    server = urlsplit((query.get("server") or [""])[0])
+def server_origin(url):
+    """The https:// (or local http://) origin of a DevMonitor server, else ValueError."""
+    server = urlsplit(url or "")
     if (
         server.scheme not in {"http", "https"}
         or not server.hostname
@@ -1209,13 +1209,45 @@ def parse_enrollment_link(link):
         raise ValueError("The registration link does not contain a valid server address.")
     if server.scheme != "https" and server.hostname not in LOCAL_HOSTS:
         raise ValueError("For your security the DevMonitor server must use HTTPS.")
+    return f"{server.scheme}://{server.netloc}"
+
+
+def parse_enrollment_link(link):
+    """Return (submission_url, token, dashboard_url) from a devmonitor://enroll link."""
+    parsed = urlsplit((link or "").strip().strip('"'))
+    if parsed.scheme != LINK_SCHEME or (parsed.netloc or parsed.path.strip("/")) != "enroll":
+        raise ValueError("That is not a DevMonitor registration link.")
+    query = parse_qs(parsed.query)
+    origin = server_origin((query.get("server") or [""])[0])
     token = (query.get("token") or [""])[0]
     if not TOKEN_PATTERN.fullmatch(token):
         raise ValueError(
             "The registration link is incomplete. Create a new link on the website."
         )
-    origin = f"{server.scheme}://{server.netloc}"
     return origin + ENROLL_PATH, token, origin + "/dashboard"
+
+
+def link_open_url():
+    """SERVER_URL/device-link/open for a build that knows its website, else ""."""
+    try:
+        return server_origin(_embedded(SERVER_URL)) + LINK_OPEN_PATH if _embedded(SERVER_URL) else ""
+    except ValueError:
+        LOGGER.warning("The built-in DevMonitor website address is invalid.")
+        return ""
+
+
+def open_website_to_link():
+    """Ask the signed-in website for a link; it reopens this program with it."""
+    url = link_open_url()
+    if not url:
+        return False
+    try:
+        opened = webbrowser.open(url, new=2)
+    except (OSError, webbrowser.Error):
+        LOGGER.warning("Could not open the browser at %s.", url, exc_info=True)
+        return False
+    LOGGER.info("Opened %s to link this computer (opened=%s).", url, opened)
+    return bool(opened)
 
 
 def register_link_handler():
@@ -1243,13 +1275,22 @@ def register_link_handler():
 def resolve_link_enrollment(link, *, interactive):
     """Use the link argument, or ask for one; returns the parsed link or None."""
     if not link and interactive:
-        print(
-            "\nTo link this computer to your DevMonitor account:\n"
-            "  1. Sign in on the DevMonitor website on this computer.\n"
-            "  2. Open \"Link a Device\" and click \"Link this device\".\n"
-            "     This agent opens by itself. If it does not, copy the link shown\n"
-            "     on the page and paste it below.\n"
-        )
+        if open_website_to_link():
+            print(
+                "\nLinking this computer to your DevMonitor account...\n"
+                "  Your browser is opening the DevMonitor website. Sign in if asked.\n"
+                "  When the browser asks to open \"DevMonitor Agent\", choose Open:\n"
+                "  a new window then shows your device details. You can close this one.\n"
+                "\n  Nothing happened? Paste the link shown on the website below.\n"
+            )
+        else:
+            print(
+                "\nTo link this computer to your DevMonitor account:\n"
+                "  1. Sign in on the DevMonitor website on this computer.\n"
+                "  2. Open \"Link a Device\" and click \"Link this device\".\n"
+                "     This agent opens by itself. If it does not, copy the link shown\n"
+                "     on the page and paste it below.\n"
+            )
         try:
             link = input("Registration link (devmonitor://enroll?...): ").strip()
         except EOFError:

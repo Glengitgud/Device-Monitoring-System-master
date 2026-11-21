@@ -154,6 +154,7 @@ function initSidebar() {
 function getCurrentPage() {
     const path = window.location.pathname;
     if (path === '/download') return 'download';
+    if (path === '/device-link/open') return 'device-link-open';
     if (path.includes('device-verification')) return 'device-verification';
     if (path.includes('archived-devices')) return 'archived-devices';
     if (path.includes('dashboard')) return 'dashboard';
@@ -499,6 +500,26 @@ function updatePendingEnrollmentNotice(pending) {
         + 'submitted a device yet. Run it, review the details and type yes (or tap Register '
         + `in the app). It stays valid until ${time(pending.expires_at)}. This page updates by itself.`;
     notice.hidden = false;
+}
+
+// Opened by an installed app that is not linked yet: hand the one-use link straight
+// back to it. The button and copy box remain in case the browser blocks the hand-off.
+function initDeviceLinkOpenPage() {
+    const button = document.getElementById('openDeviceLinkBtn');
+    const link = button?.dataset.deviceLink;
+    if (link && link.startsWith('devmonitor://enroll?')) {
+        window.setTimeout(() => { window.location.href = link; }, 300);
+    }
+    document.getElementById('copyOpenDeviceLinkBtn')?.addEventListener('click', async () => {
+        const value = document.getElementById('openDeviceLinkValue');
+        try {
+            await navigator.clipboard.writeText(value.value);
+            showToast('Link copied.');
+        } catch (error) {
+            value.select();
+            showToast('Select the link and copy it manually.', 'warning');
+        }
+    });
 }
 
 function initDeviceVerificationPage() {
@@ -1279,6 +1300,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (page === 'devices') initDevicesPage();
     if (page === 'device-verification') initDeviceVerificationPage();
+    if (page === 'device-link-open') initDeviceLinkOpenPage();
     if (page === 'download') initDownloadPage();
     if (page === 'archived-devices') initArchivedDevicesPage();
     if (page === 'admin') initAdminPage();

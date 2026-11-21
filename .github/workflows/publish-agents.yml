@@ -38,6 +38,9 @@ concurrency:
 
 env:
   RELEASE_TAG: agents-latest
+  # Website the apps open to link themselves on first launch (/device-link/open).
+  # Override with the repository variable DEVMONITOR_SERVER_URL (Settings -> Variables).
+  DEVMONITOR_SERVER_URL: ${{ vars.DEVMONITOR_SERVER_URL || 'https://device-monitoring-system-master.vercel.app' }}
 
 jobs:
   windows:
@@ -61,6 +64,7 @@ jobs:
 
       - name: Build the generic agent
         run: |
+          python agents/ci/set_server_url.py device_monitoring_prototype/device_agent.py "$DEVMONITOR_SERVER_URL"
           python -m PyInstaller --onefile --console --clean --noconfirm \
             --name DevMonitor-Agent-Windows --distpath dist \
             --workpath "$RUNNER_TEMP/pyi-work" --specpath "$RUNNER_TEMP/pyi-spec" \
@@ -144,7 +148,9 @@ jobs:
         working-directory: agents/android
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease
+          ./gradlew --no-daemon assembleRelease -PdevmonitorServerUrl="$DEVMONITOR_SERVER_URL"
+          grep -q "SERVER_URL = \"$DEVMONITOR_SERVER_URL\"" \
+            app/build/generated/source/buildConfig/release/com/devmonitor/agent/BuildConfig.java
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/devmonitor-agent.apk"
 
@@ -187,7 +193,9 @@ jobs:
         env:
           TARGET_ARCH: universal2
           PYTHON: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3
-        run: bash agents/macos/build_macos.sh
+        run: |
+          python agents/ci/set_server_url.py device_monitoring_prototype/device_agent_unix.py "$DEVMONITOR_SERVER_URL"
+          bash agents/macos/build_macos.sh
 
       - name: Verify the DMG
         run: |

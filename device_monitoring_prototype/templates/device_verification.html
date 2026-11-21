@@ -28,6 +28,31 @@
             </span>
         </div>
 
+        {% if not verified_device_count %}
+        {# First device: download, open, approve. The app links itself through
+           /device-link/open, so no "Link this device" button is needed here. #}
+        <div class="content-card link-card mb-4" id="firstDeviceCard">
+            <div class="content-card-body">
+                <span class="link-card-icon" aria-hidden="true"><i class="bi bi-cloud-arrow-down"></i></span>
+                <h2 class="link-card-title">Link your first device</h2>
+                <ol class="link-card-text text-start mb-3">
+                    <li>
+                        <a href="{{ url_for('download_page') }}">Download the DevMonitor app</a>
+                        for the device you are using.
+                    </li>
+                    <li>
+                        Open the app. It opens this website in your browser and links itself to
+                        your account. If the browser asks to open <strong>DevMonitor Agent</strong>,
+                        choose <strong>Open</strong>.
+                    </li>
+                    <li>Review what the app detected and approve it. This page then opens your dashboard.</li>
+                </ol>
+                <a class="btn btn-primary btn-lg" href="{{ url_for('download_page') }}" id="firstDeviceDownloadBtn">
+                    <i class="bi bi-download me-1" aria-hidden="true"></i>Go to downloads
+                </a>
+            </div>
+        </div>
+        {% else %}
         <div id="desktopAgentNotice" class="alert alert-secondary" hidden
              data-prelinked-platforms="{{ 'windows linux' if windows_prelinked else 'linux' }}">
             <i class="bi bi-pc-display me-1" aria-hidden="true"></i>
@@ -39,12 +64,11 @@
         <div class="content-card link-card mb-4">
             <div class="content-card-body">
                 <span class="link-card-icon" aria-hidden="true"><i class="bi bi-link-45deg"></i></span>
-                <h2 class="link-card-title">Link this device</h2>
+                <h2 class="link-card-title">Add another device</h2>
                 <p class="link-card-text">
-                    For the <strong>{{ 'Android, macOS and iOS apps' if windows_prelinked else 'Windows, Android, macOS and iOS apps' }}</strong>:
-                    install and open the app once, then open this page
-                    <strong>on that device</strong> and tap the button. The app opens,
-                    shows what it detected, and asks you to approve.
+                    Opening the DevMonitor app on a new device links it automatically.
+                    You can also open this page <strong>on that device</strong> and tap the
+                    button: the app opens, shows what it detected, and asks you to approve.
                 </p>
                 <button type="button" class="btn btn-primary btn-lg" id="linkThisDeviceBtn">
                     <span class="spinner-border spinner-border-sm me-1 d-none" aria-hidden="true"></span>
@@ -70,6 +94,7 @@
                 </p>
             </div>
         </div>
+        {% endif %}
         <p id="deviceVerificationPending"
            class="text-center small link-card-note {{ 'd-none' if verified_device_count else '' }}">
             <i class="bi bi-info-circle me-1" aria-hidden="true"></i>

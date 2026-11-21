@@ -28,6 +28,10 @@ from pathlib import Path
 
 REGISTRATION_TOKEN = "__REGISTRATION_TOKEN__"
 SUBMISSION_URL = "__SUBMISSION_URL__"
+# Website of the published macOS app (set by the release workflow). Without a link the
+# app opens SERVER_URL/device-link/open, which hands it a link automatically.
+SERVER_URL = "__SERVER_URL__"
+LINK_OPEN_PATH = "/device-link/open"
 AGENT_VERSION = "1.0.0"
 UNAVAILABLE = "Unavailable"
 LINK_SCHEME = "devmonitor"
@@ -97,6 +101,17 @@ def parse_enrollment_link(link):
     if not TOKEN_PATTERN.fullmatch(token):
         raise AgentError("The registration link is incomplete. Create a new link on the website.")
     return server + ENROLL_PATH, token
+
+
+def link_open_url():
+    """SERVER_URL/device-link/open for a build that knows its website, else ""."""
+    server = _embedded(SERVER_URL)
+    if not server:
+        return ""
+    try:
+        return validate_server_url(server) + LINK_OPEN_PATH
+    except AgentError:
+        return ""
 
 
 def embedded_enrollment():
@@ -568,14 +583,32 @@ def run_gui(enrollment, collector):  # pragma: no cover - needs a display
 
     link_frame = ttk.Frame(frame)
     link_var = tk.StringVar()
+    website = link_open_url()
+
+    def open_website():
+        import webbrowser
+
+        try:
+            webbrowser.open(website, new=2)
+        except webbrowser.Error:
+            status.set("Could not open the browser. Paste the link from the website instead.")
+
     ttk.Label(
         link_frame,
         wraplength=480,
         text=(
+            "Linking this Mac to your DevMonitor account: your browser opens the "
+            "DevMonitor website (sign in if asked). When it asks to open DevMonitor "
+            "Agent, choose Open. Nothing happened? Paste the link shown on the website:"
+            if website else
             "Open the DevMonitor website on this computer, go to Device Verification "
             "and click “Link this device”. You can also paste the link here:"
         ),
     ).pack(anchor="w", pady=(8, 4))
+    if website:
+        ttk.Button(link_frame, text="Open the DevMonitor website", command=open_website).pack(
+            anchor="w", pady=(0, 6)
+        )
     ttk.Entry(link_frame, textvariable=link_var).pack(fill="x")
 
     details = tk.Text(frame, height=13, width=64, wrap="word", relief="flat")
@@ -623,10 +656,31 @@ def run_gui(enrollment, collector):  # pragma: no cover - needs a display
         button.configure(text="Close", command=root.destroy)
         button.state(["!disabled"])
 
+    def receive_link(*urls):
+        """macOS delivers devmonitor:// links to the running app as an Apple event."""
+        if state["enrollment"] is not None or state["specifications"] is not None:
+            return
+        for url in urls:
+            try:
+                state["enrollment"] = parse_enrollment_link(url)
+            except AgentError as error:
+                status.set(str(error))
+                continue
+            button.configure(text="Register this device")
+            show_details()
+            root.deiconify()
+            root.lift()
+            return
+
+    if sys.platform == "darwin":
+        root.createcommand("::tk::mac::LaunchURL", receive_link)
+
     button.configure(command=register)
     if enrollment is None:
         link_frame.pack(fill="x")
         button.configure(text="Continue")
+        if website:
+            root.after(400, open_website)
     else:
         show_details()
     button.pack(anchor="e", pady=(12, 0))

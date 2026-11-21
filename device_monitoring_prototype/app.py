@@ -430,6 +430,7 @@ def create_app(test_config=None):
                 "download_agent_package",
                 "download_page",
                 "create_device_link",
+                "open_device_link",
                 "submit_agent_enrollment",
             }
         ):
@@ -2087,28 +2088,58 @@ def create_app(test_config=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-    @app.post("/api/device-link")
-    @login_required
-    def create_device_link():
-        """Hand a one-use registration token to an installed DevMonitor app."""
+    def issue_device_link():
+        """(link, expires_at) for a one-use devmonitor://enroll link, or (error, status)."""
         if current_user.is_admin:
-            return api_error("Device registration is only available to standard users.", 403)
+            return None, ("Device registration is only available to standard users.", 403)
         base_url = agent_public_base_url()
         if base_url is None:
-            return api_error(
+            return None, (
                 "Set PUBLIC_BASE_URL to a reachable HTTPS origin before linking a device.", 503
             )
         try:
             token, expires_at = issue_direct_agent_download_token(current_user, channel="link")
         except ValidationError as error:
-            return api_error(error, 403)
+            return None, (str(error), 403)
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        response = jsonify(
-            link=f"devmonitor://enroll?{urlencode({'server': base_url, 'token': token})}",
-            expires_at=expires_at.isoformat(),
-        )
+        link = f"devmonitor://enroll?{urlencode({'server': base_url, 'token': token})}"
+        return (link, expires_at), None
+
+    @app.post("/api/device-link")
+    @login_required
+    def create_device_link():
+        """Hand a one-use registration token to an installed DevMonitor app."""
+        issued, failure = issue_device_link()
+        if failure:
+            return api_error(*failure)
+        link, expires_at = issued
+        response = jsonify(link=link, expires_at=expires_at.isoformat())
         response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/device-link/open")
+    @login_required
+    def open_device_link():
+        """Opened by an installed app that is not linked yet.
+
+        The signed-in user gets a fresh one-use link that is handed straight back to
+        the app (devmonitor://enroll?...), so the first device needs no extra button.
+        Signed-out users sign in first and return here.
+        """
+        issued, failure = issue_device_link()
+        link = issued[0] if issued else None
+        response = app.make_response((
+            render_template(
+                "device_link_open.html",
+                active_page="device-verification",
+                link=link,
+                error=failure[0] if failure else None,
+            ),
+            200 if issued else failure[1],
+        ))
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
     @app.post("/api/device-agent/enroll")

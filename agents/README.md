@@ -33,6 +33,16 @@ Point the website at it (for example in Vercel's environment variables):
 AGENT_RELEASE_URL=https://github.com/OWNER/REPO/releases/download/agents-latest
 ```
 
+**First launch links automatically.** The workflow writes the website address
+(`DEVMONITOR_SERVER_URL`, a repository variable; it defaults to the Vercel
+deployment) into the Windows, macOS and Android builds. Opened without a link,
+an app opens `https://<site>/device-link/open` in the browser. A signed-in user
+(or one who signs in there) gets a fresh one-use link that the page hands
+straight back to the app (`devmonitor://enroll?...`; the browser asks once to
+open DevMonitor Agent). First-time users therefore never need the "Link this
+device" button; the Link a Device page shows it only once an account already
+has a device ("Add another device").
+
 A package in `agent_packages/` still takes priority. The release copy is used
 only when no local file exists, and the card appears only when the manifest
 lists it. On a non-Windows host the Windows card offers the generic `.exe`:

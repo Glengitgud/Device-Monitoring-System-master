@@ -250,7 +250,9 @@ class DashboardAccessTest(unittest.TestCase):
         self.assertIn("expires_at", pending)
         page = self.client.get("/device-verification").get_data(as_text=True)
         self.assertNotRegex(page, r'id="pendingEnrollmentNotice"[^>]*\bhidden\b')
-        self.assertIn('id="desktopAgentNotice"', page)
+        # First device: download-and-open steps instead of the "Link this device" button.
+        self.assertIn('id="firstDeviceCard"', page)
+        self.assertNotIn('id="linkThisDeviceBtn"', page)
         self.assertEqual(self.enroll(token).status_code, 201)
         status = self.status()
         self.assertTrue(status["verified"])

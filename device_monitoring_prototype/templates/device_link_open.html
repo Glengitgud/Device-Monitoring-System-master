@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}Linking your device - Device Monitoring System{% endblock %}
+{% block page_title %}Link a Device{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-xxl-6 col-xl-7 col-lg-9">
+        <div class="content-card link-card">
+            <div class="content-card-body">
+                <span class="link-card-icon" aria-hidden="true"><i class="bi bi-link-45deg"></i></span>
+                {% if link %}
+                <h2 class="link-card-title">Returning to the DevMonitor app…</h2>
+                <p class="link-card-text">
+                    Your account is linked to the app you just opened. If your browser asks
+                    to open <strong>DevMonitor Agent</strong>, choose <strong>Open</strong>.
+                    The app then shows what it detected and asks you to approve.
+                </p>
+                <a id="openDeviceLinkBtn" class="btn btn-primary btn-lg" href="{{ link }}"
+                   data-device-link="{{ link }}">
+                    <i class="bi bi-box-arrow-up-right me-1" aria-hidden="true"></i>Open DevMonitor Agent
+                </a>
+                <div class="link-card-fallback mt-3">
+                    <label for="openDeviceLinkValue" class="form-label small">
+                        Nothing happened? Copy this one-use link into the app
+                        (it expires in 30 minutes):
+                    </label>
+                    <div class="input-group input-group-sm">
+                        <input id="openDeviceLinkValue" class="form-control" value="{{ link }}" readonly>
+                        <button class="btn btn-outline-secondary" type="button" id="copyOpenDeviceLinkBtn">Copy</button>
+                    </div>
+                </div>
+                <p class="link-card-text mt-3 mb-0">
+                    After you approve in the app, <a href="{{ url_for('device_verification') }}">return here</a>
+                    to open your dashboard.
+                </p>
+                {% else %}
+                <h2 class="link-card-title">This device could not be linked</h2>
+                <p class="link-card-text" role="alert">{{ error }}</p>
+                <a class="btn btn-outline-light" href="{{ url_for('device_verification') }}">Back to Link a Device</a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

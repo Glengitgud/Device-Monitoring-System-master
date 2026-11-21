@@ -584,9 +584,112 @@ class DownloadHubIntegrationTest(unittest.TestCase):
             self.client.post("/device-agent/linux/deb", data={"csrf_token": csrf},
                              headers={"Accept": "application/json"}).status_code, 403
         )
+        opened = self.client.get("/device-link/open")
+        self.assertEqual(opened.status_code, 403)
+        self.assertNotIn("devmonitor://enroll", opened.get_data(as_text=True))
+
+    def test_an_app_opening_the_site_gets_a_link_without_any_button(self):
+        # Signed out: sign in first, then come back to the same page.
+        signed_out = self.client.get("/device-link/open")
+        self.assertEqual(signed_out.status_code, 302)
+        self.assertIn("/login?next=", signed_out.headers["Location"])
+        self.assertIn("device-link", urllib.parse.unquote(signed_out.headers["Location"]))
+        self.register_and_login()
+        page = self.client.get("/device-link/open")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.headers["Cache-Control"], "no-store")
+        html = page.get_data(as_text=True)
+        link = re.search(r'data-device-link="([^"]+)"', html).group(1).replace("&amp;", "&")
+        self.assertTrue(link.startswith("devmonitor://enroll?server="))
+        # The link is a real one-use enrollment for this account.
+        enrollment = agent.parse_enrollment_link(link)
+        laptop = {
+            "cpu_name": "Apple M2", "cpu_cores": 8,
+            "ram_capacity_bytes": 16 * GIB, "ram_usage_bytes": 9 * GIB,
+            "storage_devices": [{"name": "Macintosh HD", "total_bytes": 512 * GIB, "available_bytes": 200 * GIB}],
+            "storage_total_bytes": 512 * GIB, "storage_available_bytes": 200 * GIB,
+            "gpu_information": ["Apple M2"], "motherboard_brand": "Apple Mac14,2",
+            "operating_system_name": "macOS", "operating_system_version": "15.1",
+            "network_adapters": ["en0"], "ip_addresses": ["192.168.1.20"],
+        }
+        payload = {"name": "MacBook Air", "device_type": "Laptop", "specifications": laptop}
+        result = agent.submit_registration(*enrollment, payload, opener=self._flask_opener())
+        with self.app.app_context():
+            self.assertEqual(db.session.get(Device, result["device_id"]).device_name, "MacBook Air")
+        with self.assertRaises(agent.AgentError):
+            agent.submit_registration(*enrollment, payload, opener=self._flask_opener())
+
+    def test_first_device_page_has_no_link_button_but_later_devices_do(self):
+        csrf = self.register_and_login()
+        first = self.client.get("/device-verification").get_data(as_text=True)
+        self.assertIn('id="firstDeviceCard"', first)
+        self.assertIn("Link your first device", first)
+        self.assertNotIn('id="linkThisDeviceBtn"', first)
+        link = self.client.post("/api/device-link", headers={"X-CSRF-Token": csrf}).json["link"]
+        agent.submit_registration(
+            *agent.parse_enrollment_link(link),
+            {"name": "First PC", "device_type": "Desktop", "specifications": {
+                "cpu_name": "Intel Core i5", "cpu_cores": 4,
+                "ram_capacity_bytes": 8 * GIB, "ram_usage_bytes": 3 * GIB,
+                "storage_devices": [{"name": "C:", "total_bytes": 256 * GIB, "available_bytes": 100 * GIB}],
+                "storage_total_bytes": 256 * GIB, "storage_available_bytes": 100 * GIB,
+                "gpu_information": ["Intel UHD"], "motherboard_brand": "ASUS",
+                "operating_system_name": "Windows 11", "operating_system_version": "10.0.26100",
+                "network_adapters": ["Ethernet"], "ip_addresses": ["192.0.2.10"],
+            }},
+            opener=self._flask_opener(),
+        )
+        later = self.client.get("/device-verification").get_data(as_text=True)
+        self.assertNotIn('id="firstDeviceCard"', later)
+        self.assertIn('id="linkThisDeviceBtn"', later)
+        self.assertIn("Add another device", later)
 
 
-RELEASE_URL = "https://github.com/example/devmonitor/releases/download/agents-latest"
+class ReleaseServerUrlTest(unittest.TestCase):
+    """agents/ci/set_server_url.py and the agents' "open the website" address."""
+
+    def setUp(self):
+        import importlib.util
+
+        script = Path(__file__).resolve().parents[2] / "agents" / "ci" / "set_server_url.py"
+        spec = importlib.util.spec_from_file_location("set_server_url", script)
+        self.tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.tool)
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
+    def _copy(self, name):
+        source = Path(__file__).resolve().parents[1] / name
+        target = Path(self.directory.name, name)
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        return target
+
+    def test_the_address_is_written_once_and_used_by_both_agents(self):
+        for name in ("device_agent.py", "device_agent_unix.py"):
+            with self.subTest(agent=name):
+                path = self._copy(name)
+                self.tool.main(str(path), "https://monitor.example.com/")
+                module = load_agent_source(path.read_bytes())
+                self.assertEqual(module.SERVER_URL, "https://monitor.example.com")
+                self.assertEqual(module.link_open_url(), "https://monitor.example.com/device-link/open")
+                with self.assertRaises(SystemExit):
+                    self.tool.main(str(path), "https://monitor.example.com")  # already set
+
+    def test_only_https_origins_are_accepted(self):
+        path = self._copy("device_agent_unix.py")
+        for url in ("http://monitor.example.com", "https://monitor.example.com/path",
+                    "https://u:p@monitor.example.com", "monitor.example.com", ""):
+            with self.subTest(url=url), self.assertRaises(SystemExit):
+                self.tool.main(str(path), url)
+
+    def test_unconfigured_builds_do_not_open_a_website(self):
+        from device_monitoring_prototype import device_agent
+
+        self.assertEqual(agent.link_open_url(), "")
+        self.assertEqual(device_agent.link_open_url(), "")
+
+
+RELEASE_URL ="https://github.com/example/devmonitor/releases/download/agents-latest"
 
 
 def release_manifest(**packages):
@@ -782,6 +885,28 @@ class WindowsAgentLinkTest(unittest.TestCase):
             self.assertEqual(self.agent.main(["--yes"]), 2)
         collect.assert_not_called()
         self.assertIn("Link this device", stderr.getvalue())
+
+    def test_without_a_link_the_agent_opens_the_website_and_accepts_the_link(self):
+        link = "devmonitor://enroll?" + urllib.parse.urlencode(
+            {"server": "https://monitor.example.com", "token": TOKEN}
+        )
+        with patch.object(self.agent, "SERVER_URL", "https://monitor.example.com"), \
+                patch.object(self.agent.webbrowser, "open", return_value=True) as browser, \
+                patch.object(self.agent, "input", create=True, return_value=link), \
+                patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            enrollment = self.agent.resolve_link_enrollment(None, interactive=True)
+        browser.assert_called_once_with("https://monitor.example.com/device-link/open", new=2)
+        self.assertIn("Your browser is opening the DevMonitor website", stdout.getvalue())
+        self.assertEqual(enrollment[1], TOKEN)
+
+    def test_an_unconfigured_build_asks_for_the_link_instead(self):
+        with patch.object(self.agent.webbrowser, "open") as browser, \
+                patch.object(self.agent, "input", create=True, return_value=""), \
+                patch("sys.stdout", new_callable=io.StringIO) as stdout, \
+                patch("sys.stderr", new_callable=io.StringIO):
+            self.assertIsNone(self.agent.resolve_link_enrollment(None, interactive=True))
+        browser.assert_not_called()
+        self.assertIn("Link this device", stdout.getvalue())
 
     def test_per_download_builds_still_embed_their_token(self):
         source = Path(self.agent.__file__).read_text(encoding="utf-8")
