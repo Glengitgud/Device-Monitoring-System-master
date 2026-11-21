@@ -1413,6 +1413,127 @@ class DatabaseIntegrationTest(unittest.TestCase):
         secret = base64.b32encode(b"12345678901234567890").decode("ascii").rstrip("=")
         self.assertEqual(totp_counter(secret, "287082", now=59), 1)
 
+    def test_totp_accepts_one_step_of_clock_drift_and_rejects_others(self):
+        secret = base64.b32encode(b"12345678901234567890").decode("ascii").rstrip("=")
+        now = 1_000_000 * 30 + 15
+        current = int(now // 30)
+        for drift in (-1, 0, 1):
+            with self.subTest(drift=drift):
+                code = _totp_code(secret, current + drift)
+                self.assertEqual(totp_counter(secret, code, now=now), current + drift)
+        accepted = {_totp_code(secret, current + drift) for drift in (-1, 0, 1)}
+        for drift in (-3, -2, 2, 3):
+            code = _totp_code(secret, current + drift)
+            if code not in accepted:
+                with self.subTest(drift=drift):
+                    self.assertIsNone(totp_counter(secret, code, now=now))
+        for malformed in ("", "12345", "1234567", "abcdef", None):
+            self.assertIsNone(totp_counter(secret, malformed, now=now))
+
+    def _start_verified_registration(self, registration):
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            started = self.client.post("/api/registration/start", data=registration)
+        self.assertEqual(started.status_code, 200, started.get_data(as_text=True))
+        verified = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": registration["csrf_token"], "code": send_email.call_args.args[1]},
+        )
+        self.assertEqual(verified.status_code, 200, verified.get_data(as_text=True))
+        with self.client.session_transaction() as session:
+            challenge_id = session["registration_challenge_id"]
+        with self.app.app_context():
+            challenge = db.session.get(RegistrationChallenge, challenge_id)
+            secret = decrypt_totp_secret(challenge.totp_secret_encrypted)
+        return challenge_id, secret
+
+    @staticmethod
+    def _wrong_code(secret):
+        counter = int(time.time() // 30)
+        valid = {_totp_code(secret, counter + drift) for drift in (-2, -1, 0, 1, 2)}
+        return next(f"{n:06d}" for n in range(1_000_000) if f"{n:06d}" not in valid)
+
+    def test_registration_totp_lockout_restarts_with_new_secret_and_accepts_valid_code(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        registration = {
+            "csrf_token": csrf,
+            "full_name": "Locked Out",
+            "email": "lockout@example.com",
+            "username": "lockout_user",
+            "password": "LockOut1!",
+            "confirm_password": "LockOut1!",
+        }
+        first_id, first_secret = self._start_verified_registration(registration)
+        wrong = self._wrong_code(first_secret)
+        for attempt in range(1, 5):
+            rejected = self.client.post(
+                "/api/registration/verify-authenticator",
+                data={"csrf_token": csrf, "code": wrong},
+            )
+            self.assertEqual(rejected.status_code, 400)
+            self.assertNotIn("restart", rejected.json)
+            self.assertIn(f"{5 - attempt} attempt", rejected.json["error"])
+        locked = self.client.post(
+            "/api/registration/verify-authenticator",
+            data={"csrf_token": csrf, "code": wrong},
+        )
+        self.assertEqual(locked.status_code, 400)
+        self.assertTrue(locked.json["restart"])
+        self.assertIn("Too many incorrect authenticator codes", locked.json["error"])
+        with self.client.session_transaction() as session:
+            self.assertNotIn("registration_challenge_id", session)
+        with self.app.app_context():
+            closed = db.session.get(RegistrationChallenge, first_id)
+            self.assertLessEqual(closed.expires_at, utcnow())
+            self.assertIsNone(closed.totp_secret_encrypted)
+            self.assertIsNone(closed.password_hash)
+            self.assertIsNone(User.query.filter_by(username="lockout_user").one_or_none())
+        self.assertFalse(self.client.get("/api/registration/status").json["active"])
+
+        # Starting again with the same details must create a fresh challenge.
+        second_id, second_secret = self._start_verified_registration(registration)
+        self.assertNotEqual(second_id, first_id)
+        self.assertNotEqual(second_secret, first_secret)
+        accepted = self.client.post(
+            "/api/registration/verify-authenticator",
+            data={"csrf_token": csrf, "code": _totp_code(second_secret, int(time.time() // 30))},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.get_data(as_text=True))
+        with self.app.app_context():
+            user = User.query.filter_by(username="lockout_user").one()
+            self.assertTrue(user.totp_enabled)
+            self.assertEqual(decrypt_totp_secret(user.totp_secret_encrypted), second_secret)
+
+    def test_previously_locked_open_challenge_is_not_resumed(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        registration = {
+            "csrf_token": csrf,
+            "full_name": "Legacy Locked",
+            "email": "legacy-locked@example.com",
+            "username": "legacy_locked",
+            "password": "LegacyLock1!",
+            "confirm_password": "LegacyLock1!",
+        }
+        locked_id, secret = self._start_verified_registration(registration)
+        with self.app.app_context():
+            # Simulates a challenge locked before this fix: still open, counter at the limit.
+            challenge = db.session.get(RegistrationChallenge, locked_id)
+            challenge.totp_attempts = 5
+            db.session.commit()
+        self.assertFalse(self.client.get("/api/registration/status").json["active"])
+        with self.client.session_transaction() as session:
+            session["registration_challenge_id"] = locked_id
+        new_id, new_secret = self._start_verified_registration(registration)
+        self.assertNotEqual(new_id, locked_id)
+        self.assertNotEqual(new_secret, secret)
+        with self.app.app_context():
+            self.assertLessEqual(
+                db.session.get(RegistrationChallenge, locked_id).expires_at, utcnow()
+            )
+
     def test_email_sender_uses_tls_and_delivers_the_verification_code(self):
         with self.app.app_context():
             self.app.config.update(

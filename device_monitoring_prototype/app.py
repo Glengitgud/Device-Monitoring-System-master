@@ -55,7 +55,9 @@ from sqlalchemy import (
 from sqlalchemy.exc import SQLAlchemyError
 from device_monitoring_prototype.authentication import (
     EMAIL_RESEND_INTERVAL,
+    MAX_VERIFICATION_ATTEMPTS,
     EmailDeliveryError,
+    RegistrationRestartRequired,
     cancel_registration,
     check_smtp_connection,
     complete_registration,
@@ -852,9 +854,11 @@ def create_app(test_config=None):
             response = jsonify(active=False)
             response.headers["Cache-Control"] = "no-store"
             return response
-        if challenge.completed_at is not None or challenge.expires_at <= datetime.now(
-            timezone.utc
-        ).replace(tzinfo=None):
+        if (
+            challenge.completed_at is not None
+            or challenge.expires_at <= datetime.now(timezone.utc).replace(tzinfo=None)
+            or challenge.totp_attempts >= MAX_VERIFICATION_ATTEMPTS
+        ):
             session.pop("registration_challenge_id", None)
             response = jsonify(active=False)
             response.headers["Cache-Control"] = "no-store"
@@ -915,6 +919,9 @@ def create_app(test_config=None):
             qr_code = verify_email_code(
                 registration_challenge(), request.form.get("code", "")
             )
+        except RegistrationRestartRequired as error:
+            session.pop("registration_challenge_id", None)
+            return jsonify(error=str(error), restart=True), 400
         except ValidationError as error:
             app.logger.warning(
                 "Registration email verification request rejected (challenge_id=%s): %s",
@@ -933,6 +940,14 @@ def create_app(test_config=None):
             challenge = registration_challenge()
             verify_registration_totp(challenge, request.form.get("code", ""))
             user = complete_registration(challenge)
+        except RegistrationRestartRequired as error:
+            app.logger.warning(
+                "Registration completion requires restart (challenge_id=%s): %s",
+                session.get("registration_challenge_id"),
+                error,
+            )
+            session.pop("registration_challenge_id", None)
+            return jsonify(error=str(error), restart=True), 400
         except ValidationError as error:
             app.logger.warning(
                 "Registration completion rejected (challenge_id=%s): %s",

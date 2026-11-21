@@ -44,6 +44,14 @@ MAX_VERIFICATION_ATTEMPTS = 5
 EMAIL_CODE_PATTERN = re.compile(r"[0-9]{6}")
 USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_.-]{3,64}")
 TOTP_PERIOD_SECONDS = 30
+# RFC 6238 recommends accepting at most one time step of drift either way.
+# Registration and sign-in share this window so an enrolled authenticator that
+# passes registration also passes sign-in.
+TOTP_VALID_WINDOW_STEPS = 1
+
+
+class RegistrationRestartRequired(ValidationError):
+    """Raised when a pending registration is closed and must be started again."""
 
 
 class EmailDeliveryError(RuntimeError):
@@ -316,6 +324,7 @@ def start_registration(data, existing_challenge=None):
             and existing_challenge.email == email
             and existing_challenge.display_name == full_name
             and existing_challenge.password_hash
+            and existing_challenge.totp_attempts < MAX_VERIFICATION_ATTEMPTS
             and verify_password(password, existing_challenge.password_hash)
         ):
             return existing_challenge
@@ -381,7 +390,7 @@ def _ensure_challenge_is_open(challenge):
     if challenge.completed_at is not None:
         raise ValidationError("This registration has already been completed. Please sign in.")
     if challenge.expires_at <= utcnow():
-        raise ValidationError("This registration has expired. Please start again.")
+        raise RegistrationRestartRequired("This registration has expired. Please start again.")
 
 
 def resend_email_code(challenge):
@@ -534,7 +543,9 @@ def totp_counter(secret, code, now=None):
     except (ValueError, TypeError):
         return None
     current = int((now if now is not None else time.time()) // TOTP_PERIOD_SECONDS)
-    for counter in (current - 1, current, current + 1):
+    for counter in range(
+        current - TOTP_VALID_WINDOW_STEPS, current + TOTP_VALID_WINDOW_STEPS + 1
+    ):
         if counter < 0:
             continue
         digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
@@ -546,6 +557,24 @@ def totp_counter(secret, code, now=None):
     return None
 
 
+def _close_locked_registration(challenge):
+    """Invalidate a challenge that exhausted its authenticator attempts.
+
+    The challenge used to stay open with its attempt counter at the limit, so
+    reloading the page or resubmitting the same details resumed it and every
+    later code (even a valid one) was refused. Closing it lets the next
+    sign-up submission create a fresh challenge with a new secret.
+    """
+    cancel_registration(challenge)
+    current_app.logger.warning(
+        "Registration closed after too many authenticator attempts (challenge_id=%s).",
+        challenge.id,
+    )
+    raise RegistrationRestartRequired(
+        "Too many incorrect authenticator codes. Start registration again."
+    )
+
+
 def verify_registration_totp(challenge, code):
     _ensure_challenge_is_open(challenge)
     if challenge.email_verified_at is None or not challenge.totp_secret_encrypted:
@@ -553,7 +582,7 @@ def verify_registration_totp(challenge, code):
     if challenge.totp_verified_at is not None:
         raise ValidationError("The authenticator code has already been verified.")
     if challenge.totp_attempts >= MAX_VERIFICATION_ATTEMPTS:
-        raise ValidationError("Too many incorrect authenticator codes. Start registration again.")
+        _close_locked_registration(challenge)
     secret = decrypt_totp_secret(challenge.totp_secret_encrypted)
     counter = totp_counter(secret, code)
     if counter is None or (
@@ -567,8 +596,13 @@ def verify_registration_totp(challenge, code):
             challenge.totp_attempts,
         )
         if challenge.totp_attempts >= MAX_VERIFICATION_ATTEMPTS:
-            raise ValidationError("Too many incorrect authenticator codes. Start registration again.")
-        raise ValidationError("That authenticator code is invalid or expired. Please try again.")
+            _close_locked_registration(challenge)
+        remaining = MAX_VERIFICATION_ATTEMPTS - challenge.totp_attempts
+        raise ValidationError(
+            "That authenticator code is invalid or expired. Make sure your phone's date "
+            "and time are set automatically, then enter the newest code shown for "
+            f"DevMonitor. {remaining} attempt{'s' if remaining != 1 else ''} remaining."
+        )
     challenge.totp_last_counter = counter
     challenge.totp_verified_at = utcnow()
 

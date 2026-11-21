@@ -296,9 +296,29 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         const result = await response.json();
         if (!response.ok) {
-            throw new Error(result.error || 'Verification could not be completed.');
+            const error = new Error(result.error || 'Verification could not be completed.');
+            error.restart = Boolean(result.restart);
+            throw error;
         }
         return result;
+    }
+
+    function resetClosedRegistration(message) {
+        activeRegistration = null;
+        window.clearInterval(resendTimer);
+        emailStage.hidden = true;
+        authenticatorStage.hidden = true;
+        document.getElementById('authenticatorQrCode').removeAttribute('src');
+        document.getElementById('authenticatorVerificationCode').value = '';
+        document.getElementById('emailVerificationCode').value = '';
+        document.getElementById('registrationDialogTitle').textContent =
+            'Start registration again';
+        setDialogStatus(
+            `${message} Select "Back to sign up", re-enter your password, and submit `
+            + 'the form to receive a new code. Remove the old DevMonitor entry from '
+            + 'Google Authenticator before scanning the new QR code.',
+            'error'
+        );
     }
 
     async function withLoading(button, message, operation) {
@@ -447,6 +467,10 @@ document.addEventListener('DOMContentLoaded', () => {
             showRegistrationState(state, result.message);
             document.getElementById('authenticatorVerificationCode').focus();
         } catch (error) {
+            if (error.restart) {
+                resetClosedRegistration(error.message);
+                return;
+            }
             setDialogStatus(error.message, 'error');
         }
     });
@@ -487,7 +511,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     window.location.assign(result.redirect_url);
                 }, 1200);
             } catch (error) {
+                if (error.restart) {
+                    resetClosedRegistration(error.message);
+                    return;
+                }
                 setDialogStatus(error.message, 'error');
+                const codeInput = document.getElementById('authenticatorVerificationCode');
+                codeInput.value = '';
+                codeInput.focus();
             }
         }
     );
