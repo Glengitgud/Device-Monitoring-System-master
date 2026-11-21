@@ -79,6 +79,45 @@ Administrator verification is session-bound to the signed-in user and is not an 
 
 Email example: `exampletesting@gmail.com` becomes `e*********g****.com`. Masking is produced during server serialization and is not restored or exposed by frontend state.
 
+## Device Registration Navigation Validation
+
+| Check | Result |
+|---|---|
+| My Devices Register Device link | The standard-user button now links directly to `/device-verification`. |
+| Device Verification | Existing QR, token, confirmation, agent download, scan, registration, and dashboard routes remain unchanged. |
+| Navigation labels | The add/register action no longer opens the legacy manual device modal. |
+| Regression | Existing device list, detail, archive, restore, scan, and dashboard workflows remain covered. |
+
+## Device Specification UI Validation
+
+The Detected Device Specifications view no longer displays `Installed Network Adapters`. Server-rendered fields and browser detail rendering were both updated. Network adapter collection and database persistence remain unchanged so registration and monitoring behavior is not affected. CPU, RAM, storage, GPU, motherboard, operating system, IP, MAC, status, and health information remain available.
+
+## Registration and Specification User Acceptance Testing
+
+1. Sign in as a standard user and open My Devices.
+2. Select Register Device and confirm navigation to Device Verification.
+3. Generate or reuse the registration flow, download the scanner, complete a scan, and confirm redirect/dashboard behavior.
+4. Open a registered device's Detected Device Specifications view.
+5. Confirm Installed Network Adapters is absent and all remaining specification fields render correctly.
+
+## Device Diagnostics Removal and Workflow Consolidation
+
+| Area | Validation |
+|---|---|
+| Legacy diagnostics routes | `/api/device-agent/diagnostics/<run_id>` and `/api/devices/<id>/diagnostics` aliases are removed. Scanner submission remains available only through scanner routes. |
+| Scanner UI | My Devices no longer renders a repeated Device Scan button or scanner modal. Scanner activity remains part of the verification and registration workflow. |
+| Reports and navigation | Diagnostic/download/navigation labels and status polling components are removed; saved scanner results remain shown as Device Scan Results. |
+| Database | Existing scanner run and check tables remain intact for database integrity and historical results. |
+| User acceptance | Register a device through verification, run the approved scanner, confirm saved results and dashboard navigation. |
+
+## System Cleanup and Regression Testing
+
+- No diagnostic EXE download or diagnostics `/diagnostics` route remains.
+- No Device Scan action remains in device cards or My Devices modals.
+- Browser detail views and specifications retain inventory and scanner health fields without diagnostics navigation.
+- The full regression suite must confirm registration, scanner submission, dashboard, and database history still pass.
+- Final automated regression: 61 tests passed after diagnostics UI, route, modal, and module cleanup.
+
 ## User Acceptance Testing
 
 Recommended acceptance pass:

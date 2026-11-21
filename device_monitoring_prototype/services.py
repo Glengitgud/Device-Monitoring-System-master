@@ -16,8 +16,6 @@ from device_monitoring_prototype.models import (
     ActivityLog,
     Device,
     DeviceRegistrationToken,
-    DiagnosticCheck,
-    DiagnosticRun,
     DeviceSpecification,
     Log,
     NetworkRecord,
@@ -622,27 +620,3 @@ def soft_delete_device(device):
     _log("device.deleted", "device", device.id)
     db.session.commit()
 
-
-def record_diagnostic(device, user):
-    run = DiagnosticRun(
-        device=device,
-        initiated_by=user,
-        status="completed",
-        summary="Prototype scan recorded; hardware checks are not implemented.",
-        detected_problem=None,
-        recommendation="Install and configure an endpoint agent to run real diagnostics.",
-    )
-    run.checks.append(
-        DiagnosticCheck(
-            check_name="Prototype scan",
-            category="system",
-            status="skipped",
-            result_summary="No diagnostic checks were run.",
-        )
-    )
-    db.session.add(run)
-    db.session.flush()
-    _log_device_event(device, "Diagnostic history recorded")
-    _log("diagnostic.recorded", "diagnostic_run", run.id)
-    db.session.commit()
-    return run

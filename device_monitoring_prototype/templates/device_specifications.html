@@ -45,12 +45,9 @@
     </div>
 </div>
 
-<div class="content-card mb-4" id="health-report">
+<div class="content-card mb-4" id="scanner-results">
     <div class="content-card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
-        <h6 class="mb-0"><i class="bi bi-heart-pulse me-2"></i>Device Health &amp; Diagnosis (Device Scan Results)</h6>
-        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('devices') }}">
-            Diagnose this device
-        </a>
+        <h6 class="mb-0"><i class="bi bi-heart-pulse me-2"></i>Device Scan Results</h6>
     </div>
     <div class="content-card-body">
         {% set latest = diagnostic_history|selectattr('status', 'equalto', 'completed')|first %}
@@ -148,7 +145,7 @@
                 endpoint assessment; unavailable sensors and unsupported checks are identified in the report.
             </p>
         {% else %}
-            <p class="text-muted mb-0">No completed endpoint diagnosis is available yet. Run Device Scan from My Devices to generate one.</p>
+            <p class="text-muted mb-0">No completed Device Scanner results are available yet.</p>
         {% endif %}
     </div>
 </div>

@@ -647,7 +647,7 @@ def _assessment_check(
 
 def collect_health_report(specifications):
     """Assess observable Windows signals; do not infer unavailable hardware states."""
-    LOGGER.info("Starting one-time endpoint health and diagnostics assessment.")
+    LOGGER.info("Starting one-time endpoint health assessment.")
     cpu_usage = None
     try:
         cpu_usage = float(psutil.cpu_percent(interval=0.25))

@@ -810,6 +810,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
         devices_page = self.client.get("/devices")
         self.assertEqual(devices_page.status_code, 200)
         self.assertIn(b'id="generateDeviceQrBtn"', devices_page.data)
+        self.assertIn(b'id="addDeviceBtn"', devices_page.data)
+        self.assertIn(b'href="/device-verification"', devices_page.data)
         self.assertIn(b'id="deviceStatusFilter"', devices_page.data)
         self.assertEqual(self.client.get("/archived-devices").status_code, 200)
         static_response = self.client.get("/static/css/style.css")
@@ -943,7 +945,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
                     device=device,
                     initiated_by=device.owner,
                     status="completed",
-                    summary="Legacy diagnostic without health scores.",
+                    summary="Legacy scanner result without health scores.",
                     recommendation="No health score data was stored.",
                 )
             )
@@ -957,7 +959,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             specification_page.get_data(as_text=True),
         )
         self.assertIn(b"Verification CPU", specification_page.data)
-        self.assertIn(b"Device Health &amp; Diagnosis", specification_page.data)
+        self.assertIn(b"Device Scan Results", specification_page.data)
         self.assertIn(b"Device Scan History", specification_page.data)
         self.assertIn(b"Not assessed", specification_page.data)
 
@@ -1636,10 +1638,10 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn("attachment", response.headers["Content-Disposition"])
         self.assertEqual(build_agent.call_args.kwargs["mode"], "scanner")
         history = self.client.get(f"/api/devices/{device_id}/history")
-        self.assertEqual(len(history.json["diagnostics"]), 1)
+        self.assertEqual(len(history.json["scanner_runs"]), 1)
         self.assertEqual(len(history.json["network"]), 1)
         self.assertEqual(len(history.json["logs"]), 2)
-        run = history.json["diagnostics"][0]
+        run = history.json["scanner_runs"][0]
         self.assertEqual(run["status"], "running")
         self.assertIsNone(run["scores"]["overall"])
         run_id = int(response.headers["X-Scan-Run-ID"])
@@ -1745,14 +1747,14 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b"Excellent", specifications_page.data)
         self.assertIn(b"192.0.2.10", specifications_page.data)
         retry_response = self.client.post(
-            f"/api/device-agent/diagnostics/{run_id}",
+            f"/api/device-agent/scans/{run_id}",
             headers={"Authorization": "Bearer " + scan_token},
             json={"report": report},
         )
         self.assertEqual(retry_response.status_code, 400)
         history = self.client.get(f"/api/devices/{device_id}/history")
         saved_report = next(
-            item for item in history.json["diagnostics"] if item["id"] == run_id
+            item for item in history.json["scanner_runs"] if item["id"] == run_id
         )
         self.assertEqual(saved_report["status"], "completed")
         self.assertEqual(saved_report["scores"]["overall"], 100)
@@ -2592,6 +2594,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertIn(b"Example Board", specifications_page.data)
         self.assertIn(b"MAC Address", specifications_page.data)
         self.assertIn(b"02:1A:2B:3C:4D:5E", specifications_page.data)
+        self.assertNotIn(b"Installed Network Adapters", specifications_page.data)
         self.assertIn(b"Device registered with QR-based agent", specifications_page.data)
         with self.app.app_context():
             device = db.session.get(Device, device_id)

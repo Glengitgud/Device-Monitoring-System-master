@@ -307,9 +307,6 @@ function renderDevicesCards() {
                     onclick="openDeviceModal('view', ${device.id})"><i class="bi bi-eye"></i></button>
                 <button class="btn btn-sm btn-outline-primary" title="Edit" aria-label="Edit device"
                     onclick="openDeviceModal('edit', ${device.id})"><i class="bi bi-pencil"></i></button>
-                <button class="btn btn-sm btn-outline-success" title="Scan device"
-                    aria-label="Scan device"
-                    onclick="scanDevice(${device.id})"><i class="bi bi-search"></i></button>
                 <button class="btn btn-sm btn-outline-danger" title="Archive" aria-label="Archive device"
                     onclick="confirmDeleteDevice(${device.id})"><i class="bi bi-archive"></i></button>
                 ${isAdministrator ? `<button class="btn btn-sm btn-outline-danger" title="Soft delete"
@@ -611,7 +608,6 @@ function renderDeviceDetails(device) {
             ['Motherboard Brand', specification.motherboard_brand || specification.motherboard_model],
             ['Operating System Name', specification.operating_system_name || device.operating_system],
             ['Operating System Version', specification.operating_system_version],
-            ['Installed Network Adapters', specification.network_adapters],
             ['IP Addresses', specification.ip_addresses || [device.ip_address]],
         ]) + `<p class="mt-3 mb-0"><a class="btn btn-sm btn-outline-primary"
              href="/devices/${encodeURIComponent(device.id || selectedDeviceId)}/specifications">
@@ -654,7 +650,6 @@ function renderDeviceDetails(device) {
             ['Motherboard Brand', specification.motherboard_brand || specification.motherboard_model],
             ['Operating System Name', specification.operating_system_name],
             ['Specification OS Version', specification.operating_system_version],
-            ['Installed Network Adapters', specification.network_adapters],
             ['IP Addresses', specification.ip_addresses],
             ['Collected At', specification.collected_at],
         ]),
@@ -679,7 +674,7 @@ function renderDeviceDetails(device) {
                 ['Observed At', observation.observed_at],
             ]),
         ])),
-        section('Device Scan History', (device.diagnostics || []).flatMap(run => [
+        section('Device Scan History', (device.scanner_runs || []).flatMap(run => [
             ['Run ID', run.id], ['Device ID', run.device_id],
             ['Initiated By ID', run.initiated_by_user_id],
             ['Initiated By', run.initiated_by?.full_name || run.initiated_by?.username],
@@ -937,50 +932,6 @@ async function softDeleteDevice(deviceId) {
     }
 }
 
-async function scanDevice(deviceId) {
-    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('scanModal'));
-    document.getElementById('scanProgress').classList.remove('d-none');
-    document.getElementById('scanDownloadInstructions').classList.add('d-none');
-    document.getElementById('scanResults').classList.add('d-none');
-    document.getElementById('scanProgressText').textContent =
-        'Preparing the Device Scanner...';
-    document.getElementById('scanRunStatus').textContent =
-        'Waiting for the Device Scanner to run and submit results...';
-    document.getElementById('scanRetryBtn').classList.add('d-none');
-    modal.show();
-    try {
-        const response = await fetch(`/api/devices/${deviceId}/scan`, {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'X-CSRF-Token': csrfToken() }
-        });
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({}));
-            throw new Error(error.error || `Request failed (${response.status}).`);
-        }
-        const runId = response.headers.get('X-Scan-Run-ID');
-        if (!runId) throw new Error('The server did not identify this device scan.');
-        const download = document.createElement('a');
-        const objectUrl = URL.createObjectURL(await response.blob());
-        download.href = objectUrl;
-        download.download = 'devmonitor-device-scanner.exe';
-        document.body.appendChild(download);
-        download.click();
-        download.remove();
-        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-        document.getElementById('scanProgress').classList.add('d-none');
-        document.getElementById('scanDownloadInstructions').classList.remove('d-none');
-        await pollDeviceScan(deviceId, runId);
-    } catch (error) {
-        showToast(error.message, 'danger');
-        document.getElementById('scanProgress').classList.add('d-none');
-        document.getElementById('scanDownloadInstructions').classList.add('d-none');
-        document.getElementById('scanResultsBody').innerHTML =
-            `<div class="alert alert-danger" role="alert">${escapeHTML(error.message)}</div>`;
-        document.getElementById('scanResults').classList.remove('d-none');
-    }
-}
-
 function healthColor(score) {
     if (score == null) return '#64748b';
     if (score >= 80) return '#16a34a';
@@ -1010,117 +961,6 @@ function renderHealthGauge(label, score) {
         <div class="health-gauge-label">${escapeHTML(label)}</div>
         <div class="health-gauge-status" style="color:${color}">${healthLabel(value)}</div>
     </div>`;
-}
-
-function renderDeviceScanReport(report) {
-    const scores = report.scores || {};
-    const components = scores.components || {};
-    const gauges = [
-        ['Overall health', scores.overall],
-        ['Hardware', scores.hardware],
-        ['Software', scores.software],
-        ['Drivers', scores.drivers],
-        ['CPU', components.cpu],
-        ['RAM', components.ram],
-        ['Storage', components.storage],
-        ['GPU', components.gpu],
-        ['Network', components.network],
-        ['Operating system', components.operating_system]
-    ];
-    const issues = (report.issues || []).map(issue => `
-        <article class="diagnostic-issue diagnostic-issue-${escapeHTML(issue.severity)}">
-            <div class="d-flex flex-wrap justify-content-between gap-2">
-                <h6 class="mb-1">${escapeHTML(issue.title)}</h6>
-                <span class="severity-label">${escapeHTML(issue.severity)}</span>
-            </div>
-            <p class="mb-2">${escapeHTML(issue.description)}</p>
-            <p class="small mb-1"><strong>Possible cause:</strong> ${escapeHTML(issue.root_cause)}</p>
-            <p class="small mb-2"><strong>Suggested action:</strong> ${escapeHTML(issue.recommendation)}</p>
-            <details><summary>Step-by-step troubleshooting</summary>
-                <ol class="mb-0 mt-2">${(issue.steps || []).map(step => `<li>${escapeHTML(step)}</li>`).join('')}</ol>
-            </details>
-        </article>`).join('');
-    const checks = (report.checks || [])
-        .filter(check => check.name !== 'Overall scores')
-        .map(check => `<li class="diagnostic-check">
-            <strong>${escapeHTML(check.name)}</strong>
-            <span class="badge text-bg-${check.status === 'passed' ? 'success' : check.status === 'skipped' ? 'secondary' : 'warning'}">
-                ${escapeHTML(check.status)}
-            </span>
-            <div>${escapeHTML(check.summary)}</div>
-            ${check.details?.limitations ? `<small>${escapeHTML(check.details.limitations)}</small>` : ''}
-        </li>`).join('');
-    const score = Number.isInteger(scores.overall) ? `${scores.overall}%` : 'Not available';
-    return `<section class="diagnostic-report">
-        <div class="alert alert-success" role="status">
-            <strong>Device scan complete.</strong> ${escapeHTML(report.summary || '')}
-        </div>
-        <h6 class="mb-3">Device Health Summary <span class="text-muted">Overall: ${score}</span></h6>
-        <div class="health-gauge-grid">${gauges.map(([label, value]) => renderHealthGauge(label, value)).join('')}</div>
-        <h6 class="mt-4">Recommended actions and issues requiring attention</h6>
-        ${issues || '<p class="text-success">No issues requiring attention were identified by the supported checks.</p>'}
-        <details class="mt-3"><summary>Scan checks and limitations</summary>
-            <ul class="diagnostic-check-list mt-2">${checks}</ul>
-        </details>
-        ${report.finished_at ? `<p class="small text-muted mt-3 mb-0">Saved ${escapeHTML(new Date(report.finished_at).toLocaleString())}</p>` : ''}
-    </section>`;
-}
-
-async function pollDeviceScan(deviceId, runId) {
-    const status = document.getElementById('scanRunStatus');
-    const retryButton = document.getElementById('scanRetryBtn');
-    retryButton.classList.add('d-none');
-    for (let attempt = 0; attempt < 240; attempt += 1) {
-        await new Promise(resolve => window.setTimeout(resolve, 2500));
-        let report;
-        try {
-            report = await api(
-                `/api/devices/${deviceId}/scans/${runId}`,
-                { cache: 'no-store' }
-            );
-        } catch (error) {
-            if (error.message === 'Your session has expired.') return;
-            const clientError = error.message.match(/Request failed \((4\d\d)\)/);
-            if (clientError) {
-                document.getElementById('scanDownloadInstructions').classList.add('d-none');
-                document.getElementById('scanResultsBody').innerHTML =
-                    `<div class="alert alert-danger" role="alert">${escapeHTML(error.message)}</div>`;
-                document.getElementById('scanResults').classList.remove('d-none');
-                return;
-            }
-            status.textContent =
-                'The server is temporarily unreachable. Retrying the report check automatically...';
-            continue;
-        }
-        if (report.status === 'completed') {
-            document.getElementById('scanDownloadInstructions').classList.add('d-none');
-            document.getElementById('scanResultsBody').innerHTML = renderDeviceScanReport(report);
-            document.getElementById('scanResults').classList.remove('d-none');
-            await Promise.allSettled([
-                refreshDevices(),
-                initDashboard(false),
-                api(`/api/devices/${deviceId}/history`, { cache: 'no-store' }),
-            ]);
-            showToast('Device scan complete. Results are now available in DevMonitor.');
-            const scanModal = bootstrap.Modal.getInstance(document.getElementById('scanModal'));
-            scanModal?.hide();
-            showDeviceScanSuccess(deviceId);
-            return;
-        }
-        if (report.status === 'failed') {
-            document.getElementById('scanDownloadInstructions').classList.add('d-none');
-            document.getElementById('scanResultsBody').innerHTML =
-                `<div class="alert alert-danger" role="alert">${escapeHTML(report.summary || 'The device scan failed.')}</div>`;
-            document.getElementById('scanResults').classList.remove('d-none');
-            return;
-        }
-        status.textContent =
-            'Waiting for the downloaded agent to run and submit the report...';
-    }
-    status.textContent =
-        'No report was received yet. If you approved submission in the agent, check again.';
-    retryButton.classList.remove('d-none');
-    retryButton.onclick = () => pollDeviceScan(deviceId, runId);
 }
 
 async function refreshUsers() {

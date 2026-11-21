@@ -51,10 +51,10 @@
             </div>
             <!-- Add Device Button -->
             <div class="col-md-3 text-end">
-                <button class="btn btn-primary" id="addDeviceBtn"
-                        onclick="openDeviceModal('add')">
+                <a class="btn btn-primary" id="addDeviceBtn"
+                   href="{{ url_for('device_verification') }}">
                     <i class="bi bi-plus-circle me-1"></i>Register Device
-                </button>
+                </a>
             </div>
             {% endif %}
         </div>
@@ -211,57 +211,6 @@
         </div>
     </div>
 </div>
-
-<!-- The one-time Device Scanner runs on the endpoint and submits results to the website. -->
-<div class="modal fade" id="scanModal" tabindex="-1" aria-hidden="true"
-     data-bs-backdrop="static">
-    <div class="modal-dialog modal-xl modal-dialog-scrollable">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">
-                    <i class="bi bi-search me-2"></i>Device Scan
-                </h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"
-                        id="scanCloseBtn"></button>
-            </div>
-            <div class="modal-body">
-                <!-- Scan Progress Section (shown during scan) -->
-                <div id="scanProgress" class="text-center">
-                    <div class="spinner-border text-primary mb-3" role="status">
-                        <span class="visually-hidden">Preparing the Device Scanner...</span>
-                    </div>
-                    <p class="fw-semibold" id="scanProgressText">
-                        Preparing the Device Scanner...
-                    </p>
-                    <p class="text-muted mb-0">
-                        Download and run the scanner on this device. It collects device
-                        information and health once, submits results to DevMonitor, and
-                        updates the website automatically.
-                    </p>
-                </div>
-                <div id="scanDownloadInstructions" class="alert alert-info d-none"
-                     role="status" aria-live="polite">
-                    <i class="bi bi-download me-2" aria-hidden="true"></i>
-                    Run the downloaded Device Scanner.
-                    <span id="scanRunStatus">Waiting for the agent...</span>
-                    <button type="button" class="btn btn-sm btn-outline-primary ms-2 d-none"
-                            id="scanRetryBtn">Check report again</button>
-                </div>
-                <div id="scanResults" class="d-none">
-                    <div id="scanResultsBody" aria-live="polite"></div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
-                    Close
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-{% include "_device_scan_success_modal.html" %}
-{% include "_device_scan_complete_modal.html" %}
 
 <!-- ======================================================
      DELETE DEVICE CONFIRMATION MODAL

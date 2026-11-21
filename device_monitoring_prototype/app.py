@@ -66,7 +66,7 @@ from device_monitoring_prototype.authentication import (
     verify_login_totp,
     verify_registration_totp,
 )
-from device_monitoring_prototype.diagnostics import (
+from device_monitoring_prototype.scanner import (
     REPORT_LIMIT_BYTES,
     DiagnosticValidationError,
     complete_diagnostic_run,
@@ -95,7 +95,6 @@ from device_monitoring_prototype.services import (
     create_device,
     create_user,
     deactivate_user,
-    record_diagnostic,
     find_valid_registration_token,
     issue_device_registration_token,
     hash_password,
@@ -1092,10 +1091,6 @@ def create_app(test_config=None):
                 ("Motherboard Brand", specification.motherboard_brand),
                 ("Operating System Name", specification.operating_system_name),
                 ("Operating System Version", specification.operating_system_version),
-                (
-                    "Installed Network Adapters",
-                    ", ".join(display_names(specification.network_adapters)),
-                ),
                 ("IP Address", ", ".join(display_names(specification.ip_addresses))),
             ] + fields
         registration_history = Log.query.filter_by(device_id=device.id).order_by(
@@ -1111,7 +1106,7 @@ def create_app(test_config=None):
                 )[:10]
             ]
             app.logger.debug(
-                "Device specifications and latest diagnostics retrieved "
+                "Device specifications and latest scanner results retrieved "
                 "(device_id=%s, diagnostic_run_id=%s).",
                 device_id,
                 diagnostic_history[0]["id"] if diagnostic_history else None,
@@ -1465,12 +1460,11 @@ def create_app(test_config=None):
         ), 201
 
     @app.post("/api/device-agent/scans/<int:run_id>")
-    @app.post("/api/device-agent/diagnostics/<int:run_id>")
     def submit_agent_scan(run_id):
         authorization = request.headers.get("Authorization", "")
         scheme, separator, token = authorization.partition(" ")
         if not separator or scheme.casefold() != "bearer":
-            return api_error("A valid diagnostic authorization is required.", 401)
+            return api_error("A valid scanner authorization is required.", 401)
         if request.content_length and request.content_length > REPORT_LIMIT_BYTES + 16_384:
             return api_error("The device scan exceeds the size limit.", 413)
         data = api_data()
@@ -1702,7 +1696,7 @@ def create_app(test_config=None):
                 }
                 for interface in device.network_interfaces
             ],
-            diagnostics=[
+            scanner_runs=[
                 {
                     "id": run.id,
                     "device_id": run.device_id,
@@ -1836,7 +1830,6 @@ def create_app(test_config=None):
         return "", 204
 
     @app.post("/api/devices/<int:device_id>/scan")
-    @app.post("/api/devices/<int:device_id>/diagnostics")
     @login_required
     def scan_device(device_id):
         device = db.get_or_404(Device, device_id)
@@ -1896,7 +1889,6 @@ def create_app(test_config=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Scan-Run-ID"] = str(run.id)
-        response.headers["X-Diagnostic-Run-ID"] = str(run.id)
         response.headers["X-Device-ID"] = str(device.id)
         response.headers["X-Device-Specifications-URL"] = url_for(
             "device_specifications", device_id=device.id
@@ -1904,7 +1896,6 @@ def create_app(test_config=None):
         return response
 
     @app.get("/api/devices/<int:device_id>/scans/<int:run_id>")
-    @app.get("/api/devices/<int:device_id>/diagnostics/<int:run_id>")
     @login_required
     def diagnostic_run_status(device_id, run_id):
         device = db.get_or_404(Device, device_id)
@@ -1928,7 +1919,7 @@ def create_app(test_config=None):
         device = db.get_or_404(Device, device_id)
         can_manage_device(device)
         response = jsonify(
-            diagnostics=[
+            scanner_runs=[
                 diagnostic_run_payload(run)
                 for run in sorted(
                     device.diagnostic_runs,
@@ -2149,8 +2140,6 @@ def create_app(test_config=None):
             "devices.read": "View authorized devices",
             "devices.write": "Register and update authorized devices",
             "users.manage": "Manage user accounts",
-            "diagnostics.read": "View diagnostic history",
-            "diagnostics.write": "Record diagnostic results",
         }
         permission_rows = {}
         for code, description in permissions.items():
@@ -2164,8 +2153,6 @@ def create_app(test_config=None):
         user_permissions = [
             permission_rows["devices.read"],
             permission_rows["devices.write"],
-            permission_rows["diagnostics.read"],
-            permission_rows["diagnostics.write"],
         ]
         for role, permissions_to_add in (
             (roles["Administrator"], administrator_permissions),
