@@ -384,9 +384,80 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!verificationDialog.open) verificationDialog.showModal();
     }
 
+    const resumeBanner = document.getElementById('registrationResumeBanner');
+
+    function showResumeBanner() {
+        if (!activeRegistration) {
+            resumeBanner.hidden = true;
+            return;
+        }
+        document.getElementById('registrationResumeEmail').textContent = activeRegistration.email;
+        resumeBanner.hidden = false;
+    }
+
+    async function fetchRegistrationStatus() {
+        const response = await fetch('/api/registration/status', {
+            headers: { Accept: 'application/json' },
+            cache: 'no-store',
+        });
+        if (!response.ok) throw new Error('Registration status could not be restored.');
+        return response.json();
+    }
+
+    // After a refresh, a closed tab or "Back to sign up", reopen the sign-up that is
+    // still in progress on the server: same email code, same authenticator QR code.
+    async function resumeRegistrationInProgress() {
+        let state;
+        try {
+            state = await fetchRegistrationStatus();
+        } catch (error) {
+            console.error(error);
+            return;
+        }
+        if (!state.active) {
+            activeRegistration = null;
+            showResumeBanner();
+            return;
+        }
+        for (const [field, input] of Object.entries({ full_name: fullName, email, username })) {
+            if (!input.value && typeof state[field] === 'string') input.value = state[field];
+        }
+        showRegistrationState(
+            state,
+            state.email_verified
+                ? 'Welcome back. Your email is already verified. If you already scanned this '
+                  + 'QR code, just enter the current code from Google Authenticator.'
+                : 'Welcome back. Enter the verification code we sent to your email.'
+        );
+        resumeBanner.hidden = true;
+    }
+
+    document.getElementById('resumeRegistrationBtn').addEventListener('click', () => {
+        resumeRegistrationInProgress();
+    });
+
+    document.getElementById('startOverRegistrationBtn').addEventListener('click', async event => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+            await postRegistration('/api/registration/cancel', new FormData());
+        } catch (error) {
+            console.error(error);
+        } finally {
+            button.disabled = false;
+        }
+        activeRegistration = null;
+        window.clearInterval(resendTimer);
+        clearSavedProfile();
+        showResumeBanner();
+        setRegistrationFormStatus();
+        fullName.focus();
+    });
+
     restoreProfile();
     updateProfileValidation();
     updatePasswordValidation();
+    resumeRegistrationInProgress();
 
     form.addEventListener('submit', async event => {
         event.preventDefault();
@@ -525,9 +596,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('closeRegistrationDialog').addEventListener('click', () => {
         verificationDialog.close();
-        form.querySelector('button[type="submit"]').focus();
     });
     verificationDialog.addEventListener('cancel', () => {
         window.clearInterval(resendTimer);
+    });
+    // Closing the window keeps the sign-up; the banner lets the user continue it.
+    verificationDialog.addEventListener('close', () => {
+        showResumeBanner();
+        if (!resumeBanner.hidden) document.getElementById('resumeRegistrationBtn').focus();
+        else form.querySelector('button[type="submit"]').focus();
     });
 });

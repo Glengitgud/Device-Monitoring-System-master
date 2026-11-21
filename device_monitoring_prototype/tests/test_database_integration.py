@@ -366,8 +366,16 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertNotIn("restoreRegistrationState", register_script)
         self.assertNotIn("registrationStatePromise", register_script)
         self.assertNotIn("form.reset()", register_script)
-        self.assertNotIn("/api/registration/cancel", register_script)
         self.assertNotIn("password: password.value", register_script)
+        # A refresh or closed window resumes the sign-up in progress (same email code and
+        # authenticator secret); nothing cancels it on unload.
+        self.assertIn("resumeRegistrationInProgress();", register_script)
+        self.assertIn('id="registrationResumeBanner"', response.get_data(as_text=True))
+        for unload_event in ("beforeunload", "pagehide", "unload'", "sendBeacon"):
+            self.assertNotIn(unload_event, register_script)
+        # The only cancel is the explicit "Cancel and start over" button.
+        self.assertEqual(register_script.count("/api/registration/cancel"), 1)
+        self.assertIn("startOverRegistrationBtn", register_script)
 
     def test_login_accepts_registered_email_and_rejects_unknown_email(self):
         csrf = self.register_and_login(

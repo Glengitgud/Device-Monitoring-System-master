@@ -99,6 +99,19 @@
                 </div>
                 <div id="registrationFormStatus" class="alert alert-danger"
                      role="alert" hidden></div>
+                <div id="registrationResumeBanner" class="alert alert-info" role="status" hidden>
+                    <p class="mb-2">
+                        You have a sign-up in progress for
+                        <strong id="registrationResumeEmail"></strong>.
+                        Your verification code and authenticator QR code are still valid.
+                    </p>
+                    <button id="resumeRegistrationBtn" type="button" class="btn btn-primary btn-sm">
+                        Continue verification
+                    </button>
+                    <button id="startOverRegistrationBtn" type="button" class="btn btn-link btn-sm">
+                        Cancel and start over
+                    </button>
+                </div>
                 <button type="submit" class="btn btn-primary w-100 login-btn">
                     <span class="spinner-border spinner-border-sm button-spinner me-1"
                           aria-hidden="true" hidden></span>

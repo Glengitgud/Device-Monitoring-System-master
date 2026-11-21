@@ -51,7 +51,8 @@ class WorkflowTest(unittest.TestCase):
     def test_jobs_run_on_github_hosted_macos(self):
         for name in ("macos-dmg", "ios-app", "ios-signed"):
             with self.subTest(job=name):
-                self.assertRegex(self.job(name), r"runs-on: macos-1\d")
+                # GitHub retires numbered images (macos-14 is gone), so accept -latest too.
+                self.assertRegex(self.job(name), r"runs-on: macos-(1\d|latest)\b")
         self.assertIn("permissions:\n  contents: read", self.text)
 
     def test_referenced_scripts_exist(self):
