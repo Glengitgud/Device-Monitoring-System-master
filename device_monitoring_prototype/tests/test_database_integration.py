@@ -1,4 +1,5 @@
 import os
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -796,6 +797,155 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(protected_admin.status_code, 400)
 
+    def _download_cards(self):
+        html = self.client.get("/download").get_data(as_text=True)
+        cards = re.findall(
+            r'<li class="dl-card (is-available|is-pending)"\s+'
+            r'data-platform="([a-z]+)">(.*?)</div>\s*</li>',
+            html,
+            re.S,
+        )
+        return html, {platform: (state, body) for state, platform, body in cards}
+
+    def test_download_panel_offers_only_the_real_windows_package(self):
+        csrf = self.register_and_login()
+        self.app.config["AGENT_PACKAGES_DIR"] = str(Path(self.id()).with_suffix(".missing"))
+        self.app.config["IOS_DISTRIBUTION_URL"] = ""
+        for path in ("/device-verification", "/download"):
+            page = self.client.get(path)
+            self.assertEqual(page.status_code, 200)
+            for marker in (
+                "deviceQrCard",
+                "deviceRegistrationQrImage",
+                "createDeviceQrBtn",
+                "deviceRegistrationProgress",
+                "Generate Verification QR",
+                "Scan",
+            ):
+                with self.subTest(path=path, marker=marker):
+                    self.assertNotIn(marker, page.get_data(as_text=True))
+        html, by_platform = self._download_cards()
+        self.assertEqual(
+            list(by_platform), ["windows", "android", "macos", "linux", "ios"]
+        )
+        windows_state, windows_body = by_platform.pop("windows")
+        self.assertEqual(windows_state, "is-available")
+        self.assertIn('id="downloadWindowsAgentBtn"', windows_body)
+        self.assertIn('action="/device-agent/windows.exe"', windows_body)
+        self.assertIn('name="csrf_token"', windows_body)
+        self.assertNotIn("disabled", windows_body)
+        linux_state, linux_body = by_platform.pop("linux")
+        self.assertEqual(linux_state, "is-available")
+        self.assertIn('action="/device-agent/linux/deb"', linux_body)
+        self.assertIn('action="/device-agent/linux/tar.gz"', linux_body)
+        self.assertIn('<span class="dl-format">.exe</span>', windows_body)
+        self.assertIn("Download .exe", windows_body)
+        self.assertIn("Download .deb", linux_body)
+        # Without a published package or store link these stay pending, with a
+        # label naming the exact package type that is missing.
+        pending_labels = {
+            "android": ".apk not published",
+            "macos": ".dmg build pending",
+            "ios": ".ipa build pending",
+        }
+        for platform, (state, body) in by_platform.items():
+            with self.subTest(platform=platform):
+                self.assertEqual(state, "is-pending")
+                self.assertIn(pending_labels[platform], body)
+                self.assertIn("disabled", body)
+                self.assertNotIn("href=", body)
+                self.assertNotIn("<form", body)
+        self.assertEqual(self.client.get("/downloads/android").status_code, 302)
+        self.assertEqual(self.client.get("/downloads/macos").status_code, 302)
+        self.assertEqual(self.client.get("/downloads/ios").status_code, 404)
+
+        # Without CSRF the direct download is refused and nothing is built.
+        with patch("device_monitoring_prototype.app.build_agent_executable") as build:
+            refused = self.client.post("/device-agent/windows.exe")
+        self.assertEqual(refused.status_code, 400)
+        build.assert_not_called()
+
+        # One click: the signed-in owner receives the token-bound EXE directly.
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            return_value=b"MZwindows-agent",
+        ) as build:
+            download = self.client.post(
+                "/device-agent/windows.exe",
+                data={"csrf_token": csrf},
+                headers={"Accept": "application/json"},
+            )
+        self.assertEqual(download.status_code, 200, download.get_data(as_text=True))
+        self.assertEqual(download.data, b"MZwindows-agent")
+        self.assertEqual(
+            download.mimetype, "application/vnd.microsoft.portable-executable"
+        )
+        self.assertIn(
+            "devmonitor-device-agent.exe", download.headers["Content-Disposition"]
+        )
+        self.assertEqual(download.headers["Cache-Control"], "no-store")
+        token = build.call_args.args[0]
+        self.assertTrue(build.call_args.args[1].endswith("/api/device-agent/enroll"))
+        status = self.client.get(f"/api/device-registration-tokens/{token}/status")
+        self.assertEqual(status.json["status"], "download_confirmed")
+        with self.app.app_context():
+            stored = DeviceRegistrationToken.query.filter_by(
+                token_hash=hashlib.sha256(token.encode("ascii")).hexdigest()
+            ).one()
+            self.assertIsNotNone(stored.verified_at)
+            self.assertIsNone(stored.used_at)
+
+        # The agent submits with its embedded token, which unlocks the dashboard.
+        self.assertEqual(self.client.get("/dashboard").status_code, 302)
+        agent_payload = {
+                "name": "Direct download PC",
+                "device_type": "Desktop",
+                "specifications": {
+                    "cpu_name": "Test CPU",
+                    "cpu_cores": 4,
+                    "ram_capacity_bytes": 8 * 1024**3,
+                    "ram_usage_bytes": 3 * 1024**3,
+                    "storage_devices": [
+                        {"name": "C:", "total_bytes": 256, "available_bytes": 128}
+                    ],
+                    "storage_total_bytes": 256,
+                    "storage_available_bytes": 128,
+                    "gpu_information": ["Test GPU"],
+                    "motherboard_brand": "Test Board",
+                    "operating_system_name": "Windows 11",
+                    "operating_system_version": "10.0.26100",
+                    "network_adapters": ["Ethernet"],
+                    "ip_addresses": ["192.0.2.21"],
+                },
+        }
+        enrolled = self.app.test_client().post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json=agent_payload,
+        )
+        self.assertEqual(enrolled.status_code, 201, enrolled.get_data(as_text=True))
+        self.assertEqual(self.client.get("/dashboard").status_code, 200)
+        # The token is one-use: replaying the same valid submission is refused.
+        reused = self.app.test_client().post(
+            "/api/device-agent/enroll",
+            headers={"Authorization": f"Bearer {token}"},
+            json=agent_payload,
+        )
+        self.assertEqual(reused.status_code, 401)
+
+        # Build failures come back as a readable JSON error, not a broken file.
+        with patch(
+            "device_monitoring_prototype.app.build_agent_executable",
+            side_effect=DeviceAgentBuildError("packaging failed"),
+        ):
+            failed = self.client.post(
+                "/device-agent/windows.exe",
+                data={"csrf_token": csrf},
+                headers={"Accept": "application/json"},
+            )
+        self.assertEqual(failed.status_code, 503)
+        self.assertIn("could not be prepared", failed.json["error"])
+
     def test_all_standard_user_pages_and_apis_render(self):
         csrf = self.register_and_login()
         self.assertEqual(self.client.get("/dashboard").status_code, 302)
@@ -809,11 +959,15 @@ class DatabaseIntegrationTest(unittest.TestCase):
         )
         verification_page = self.client.get("/device-verification")
         self.assertIn(b"deviceVerificationPending", verification_page.data)
-        self.assertIn(b"createDeviceQrBtn", verification_page.data)
+        self.assertIn(b'id="linkThisDeviceBtn"', verification_page.data)
+        self.assertNotIn(b"createDeviceQrBtn", verification_page.data)
+        self.assertEqual(self.client.get("/download").status_code, 200)
         self.complete_qr_enrollment(csrf)
         devices_page = self.client.get("/devices")
         self.assertEqual(devices_page.status_code, 200)
-        self.assertIn(b'id="generateDeviceQrBtn"', devices_page.data)
+        self.assertIn(b'id="openAppDownloadsBtn"', devices_page.data)
+        self.assertIn(b'href="/download"', devices_page.data)
+        self.assertNotIn(b'id="appDownloadsModal"', devices_page.data)
         self.assertIn(b'id="addDeviceBtn"', devices_page.data)
         self.assertIn(b'href="/device-verification"', devices_page.data)
         self.assertIn(b'id="deviceStatusFilter"', devices_page.data)
@@ -921,6 +1075,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             {
                 "verified": True,
                 "verified_devices": 1,
+                "pending_enrollment": None,
                 "scan_status": "Completed",
                 "registration_status": "Registered",
                 "latest_device": {
@@ -1412,6 +1567,127 @@ class DatabaseIntegrationTest(unittest.TestCase):
     def test_totp_uses_rfc6238_sha1_six_digit_code(self):
         secret = base64.b32encode(b"12345678901234567890").decode("ascii").rstrip("=")
         self.assertEqual(totp_counter(secret, "287082", now=59), 1)
+
+    def test_totp_accepts_one_step_of_clock_drift_and_rejects_others(self):
+        secret = base64.b32encode(b"12345678901234567890").decode("ascii").rstrip("=")
+        now = 1_000_000 * 30 + 15
+        current = int(now // 30)
+        for drift in (-1, 0, 1):
+            with self.subTest(drift=drift):
+                code = _totp_code(secret, current + drift)
+                self.assertEqual(totp_counter(secret, code, now=now), current + drift)
+        accepted = {_totp_code(secret, current + drift) for drift in (-1, 0, 1)}
+        for drift in (-3, -2, 2, 3):
+            code = _totp_code(secret, current + drift)
+            if code not in accepted:
+                with self.subTest(drift=drift):
+                    self.assertIsNone(totp_counter(secret, code, now=now))
+        for malformed in ("", "12345", "1234567", "abcdef", None):
+            self.assertIsNone(totp_counter(secret, malformed, now=now))
+
+    def _start_verified_registration(self, registration):
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            started = self.client.post("/api/registration/start", data=registration)
+        self.assertEqual(started.status_code, 200, started.get_data(as_text=True))
+        verified = self.client.post(
+            "/api/registration/verify-email",
+            data={"csrf_token": registration["csrf_token"], "code": send_email.call_args.args[1]},
+        )
+        self.assertEqual(verified.status_code, 200, verified.get_data(as_text=True))
+        with self.client.session_transaction() as session:
+            challenge_id = session["registration_challenge_id"]
+        with self.app.app_context():
+            challenge = db.session.get(RegistrationChallenge, challenge_id)
+            secret = decrypt_totp_secret(challenge.totp_secret_encrypted)
+        return challenge_id, secret
+
+    @staticmethod
+    def _wrong_code(secret):
+        counter = int(time.time() // 30)
+        valid = {_totp_code(secret, counter + drift) for drift in (-2, -1, 0, 1, 2)}
+        return next(f"{n:06d}" for n in range(1_000_000) if f"{n:06d}" not in valid)
+
+    def test_registration_totp_lockout_restarts_with_new_secret_and_accepts_valid_code(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        registration = {
+            "csrf_token": csrf,
+            "full_name": "Locked Out",
+            "email": "lockout@example.com",
+            "username": "lockout_user",
+            "password": "LockOut1!",
+            "confirm_password": "LockOut1!",
+        }
+        first_id, first_secret = self._start_verified_registration(registration)
+        wrong = self._wrong_code(first_secret)
+        for attempt in range(1, 5):
+            rejected = self.client.post(
+                "/api/registration/verify-authenticator",
+                data={"csrf_token": csrf, "code": wrong},
+            )
+            self.assertEqual(rejected.status_code, 400)
+            self.assertNotIn("restart", rejected.json)
+            self.assertIn(f"{5 - attempt} attempt", rejected.json["error"])
+        locked = self.client.post(
+            "/api/registration/verify-authenticator",
+            data={"csrf_token": csrf, "code": wrong},
+        )
+        self.assertEqual(locked.status_code, 400)
+        self.assertTrue(locked.json["restart"])
+        self.assertIn("Too many incorrect authenticator codes", locked.json["error"])
+        with self.client.session_transaction() as session:
+            self.assertNotIn("registration_challenge_id", session)
+        with self.app.app_context():
+            closed = db.session.get(RegistrationChallenge, first_id)
+            self.assertLessEqual(closed.expires_at, utcnow())
+            self.assertIsNone(closed.totp_secret_encrypted)
+            self.assertIsNone(closed.password_hash)
+            self.assertIsNone(User.query.filter_by(username="lockout_user").one_or_none())
+        self.assertFalse(self.client.get("/api/registration/status").json["active"])
+
+        # Starting again with the same details must create a fresh challenge.
+        second_id, second_secret = self._start_verified_registration(registration)
+        self.assertNotEqual(second_id, first_id)
+        self.assertNotEqual(second_secret, first_secret)
+        accepted = self.client.post(
+            "/api/registration/verify-authenticator",
+            data={"csrf_token": csrf, "code": _totp_code(second_secret, int(time.time() // 30))},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.get_data(as_text=True))
+        with self.app.app_context():
+            user = User.query.filter_by(username="lockout_user").one()
+            self.assertTrue(user.totp_enabled)
+            self.assertEqual(decrypt_totp_secret(user.totp_secret_encrypted), second_secret)
+
+    def test_previously_locked_open_challenge_is_not_resumed(self):
+        self.client.get("/register")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        registration = {
+            "csrf_token": csrf,
+            "full_name": "Legacy Locked",
+            "email": "legacy-locked@example.com",
+            "username": "legacy_locked",
+            "password": "LegacyLock1!",
+            "confirm_password": "LegacyLock1!",
+        }
+        locked_id, secret = self._start_verified_registration(registration)
+        with self.app.app_context():
+            # Simulates a challenge locked before this fix: still open, counter at the limit.
+            challenge = db.session.get(RegistrationChallenge, locked_id)
+            challenge.totp_attempts = 5
+            db.session.commit()
+        self.assertFalse(self.client.get("/api/registration/status").json["active"])
+        with self.client.session_transaction() as session:
+            session["registration_challenge_id"] = locked_id
+        new_id, new_secret = self._start_verified_registration(registration)
+        self.assertNotEqual(new_id, locked_id)
+        self.assertNotEqual(new_secret, secret)
+        with self.app.app_context():
+            self.assertLessEqual(
+                db.session.get(RegistrationChallenge, locked_id).expires_at, utcnow()
+            )
 
     def test_email_sender_uses_tls_and_delivers_the_verification_code(self):
         with self.app.app_context():
@@ -2100,6 +2376,8 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertNotIn(b' id="addDeviceBtn"', devices_page.data)
         self.assertNotIn(b"Register a Device with QR Code", devices_page.data)
         self.assertNotIn(b"deviceRegistrationQrModal", devices_page.data)
+        self.assertNotIn(b"appDownloadsModal", devices_page.data)
+        self.assertNotIn(b"downloadWindowsAgentBtn", devices_page.data)
         qr_request = self.client.post(
             "/api/device-registration-tokens",
             headers={"X-CSRF-Token": token},
@@ -2682,9 +2960,11 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(background.get("fill"), "#ffffff")
         self.assertEqual(qr_pattern.get("fill"), "#111827")
         devices_page = self.client.get("/device-verification")
-        self.assertIn(b"qr-code-card", devices_page.data)
-        self.assertIn(b"deviceQrExpiryCard", devices_page.data)
-        self.assertIn(b' id="createDeviceQrBtn"', devices_page.data)
+        self.assertIn(b' id="linkThisDeviceBtn"', devices_page.data)
+        self.assertNotIn(b"qr-code-card", devices_page.data)
+        download_page = self.client.get("/download")
+        self.assertIn(b"dl-grid", download_page.data)
+        self.assertIn(b' id="downloadWindowsAgentBtn"', download_page.data)
         first_token = first.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         second_token = second.json["enrollment_url"].rstrip("/").rsplit("/", 1)[-1]
         self.assertNotEqual(first_token, second_token)

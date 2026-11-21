@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+
+{% block title %}Download the DevMonitor Agent - Device Monitoring System{% endblock %}
+{% block page_title %}Downloads{% endblock %}
+
+{% block content %}
+<div class="dl-page">
+    <section class="dl-hero" aria-labelledby="dlHeroTitle">
+        <div class="dl-hero-copy">
+            <span class="dl-eyebrow"><i class="bi bi-cpu me-1" aria-hidden="true"></i>DevMonitor Agent {{ agent_version|default('1.0') }}</span>
+            <h1 id="dlHeroTitle" class="dl-hero-title">
+                One agent.<br><span class="dl-gradient-text">Every device you own.</span>
+            </h1>
+            <p class="dl-hero-lead">
+                Download the DevMonitor Agent for your operating system. It reads your
+                device&rsquo;s hardware and network details, shows you everything first,
+                and links the device to your account only after you approve.
+            </p>
+            <ul class="dl-trust" role="list">
+                <li><i class="bi bi-shield-lock" aria-hidden="true"></i>One-time secure enrollment</li>
+                <li><i class="bi bi-eye" aria-hidden="true"></i>You review before sending</li>
+                <li><i class="bi bi-qr-code-scan dl-strike" aria-hidden="true"></i>No QR code needed</li>
+            </ul>
+        </div>
+        <div class="dl-hero-art" aria-hidden="true">
+            <svg viewBox="0 0 320 240" class="dl-network" focusable="false">
+                <defs>
+                    <radialGradient id="dlCore" cx="50%" cy="50%" r="50%">
+                        <stop offset="0%" stop-color="#7aa2ff"/>
+                        <stop offset="100%" stop-color="#26408b"/>
+                    </radialGradient>
+                    <linearGradient id="dlLine" x1="0" x2="1">
+                        <stop offset="0%" stop-color="#7aa2ff" stop-opacity="0.15"/>
+                        <stop offset="100%" stop-color="#7aa2ff" stop-opacity="0.7"/>
+                    </linearGradient>
+                </defs>
+                <g stroke="url(#dlLine)" stroke-width="1.5" fill="none">
+                    <path d="M160 120 L48 52"/><path d="M160 120 L272 48"/>
+                    <path d="M160 120 L40 186"/><path d="M160 120 L280 190"/>
+                    <path d="M160 120 L160 20"/>
+                    <path class="dl-pulse" d="M160 120 L48 52"/>
+                    <path class="dl-pulse dl-pulse-2" d="M160 120 L280 190"/>
+                </g>
+                <circle cx="160" cy="120" r="34" fill="url(#dlCore)" opacity="0.95"/>
+                <circle cx="160" cy="120" r="48" fill="none" stroke="#7aa2ff" stroke-opacity="0.25"/>
+                <path d="M146 113h28v17h-28z M153 133h14" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                <g fill="#120636" stroke="#3458a8" stroke-width="1.5">
+                    <rect x="28" y="36" width="40" height="30" rx="5"/>
+                    <rect x="256" y="30" width="34" height="36" rx="5"/>
+                    <rect x="26" y="172" width="28" height="40" rx="6"/>
+                    <rect x="262" y="174" width="38" height="28" rx="5"/>
+                    <rect x="146" y="2" width="28" height="22" rx="4"/>
+                </g>
+                <g fill="#7aa2ff">
+                    <circle cx="48" cy="52" r="3"/><circle cx="272" cy="48" r="3"/>
+                    <circle cx="40" cy="190" r="3"/><circle cx="280" cy="188" r="3"/>
+                    <circle cx="160" cy="13" r="3"/>
+                </g>
+            </svg>
+        </div>
+    </section>
+
+    <section class="dl-platforms" aria-labelledby="dlPlatformsTitle">
+        <div class="dl-section-head">
+            <h2 id="dlPlatformsTitle" class="dl-section-title">Choose your platform</h2>
+            <p id="dlDetected" class="dl-detected" hidden></p>
+        </div>
+
+        <ul class="dl-grid" role="list">
+            {% for platform in platforms %}
+            {% set per_user_blocked = platform.kind == 'per_user' and current_user.is_admin %}
+            <li class="dl-card {{ 'is-available' if platform.available else 'is-pending' }}"
+                data-platform="{{ platform.key }}">
+                <span class="dl-recommended" hidden>Recommended for this device</span>
+                <div class="dl-card-top">
+                    <span class="dl-icon" aria-hidden="true"><i class="bi {{ platform.icon }}"></i></span>
+                    <span class="dl-status">
+                        {% if platform.available %}
+                            <i class="bi bi-circle-fill" aria-hidden="true"></i>Available
+                        {% elif platform.build_ready %}
+                            <i class="bi bi-tools" aria-hidden="true"></i>Build ready
+                        {% else %}
+                            <i class="bi bi-hourglass-split" aria-hidden="true"></i>In development
+                        {% endif %}
+                    </span>
+                </div>
+                <h3 class="dl-name">{{ platform.name }}</h3>
+                <p class="dl-req">{{ platform.requirement }}</p>
+                <div class="dl-formats" aria-label="Package types">
+                    {% for format in platform.formats %}<span class="dl-format">{{ format }}</span>{% endfor %}
+                </div>
+
+                <div class="dl-actions">
+                    {% if platform.problem %}
+                        <p class="dl-problem" role="note"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>{{ platform.problem }}</p>
+                    {% endif %}
+                    {% if not platform.available %}
+                        <button type="button" class="btn dl-btn dl-btn-pending" disabled aria-disabled="true">
+                            {{ platform.pending_label }}
+                        </button>
+                        <p class="dl-hint">{{ platform.pending }}</p>
+                        {% if platform.progress %}
+                        <ul class="dl-progress" aria-label="{{ platform.name }} build progress">
+                            {% for step in platform.progress %}
+                            <li class="{{ 'is-done' if step.done else 'is-open' }}">
+                                <i class="bi {{ 'bi-check-circle-fill' if step.done else 'bi-circle' }}" aria-hidden="true"></i>
+                                <span>{{ step.label }}</span>
+                                <span class="visually-hidden">{{ '(done)' if step.done else '(not yet)' }}</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                    {% elif per_user_blocked %}
+                        <button type="button" class="btn dl-btn dl-btn-pending" disabled aria-disabled="true">
+                            Standard accounts only
+                        </button>
+                        <p class="dl-hint">Administrators cannot register devices.</p>
+                    {% elif platform.kind == 'per_user' %}
+                        <form method="post" action="{{ platform.action }}" class="dl-form"
+                              data-agent-download data-platform="{{ platform.key }}"
+                              {% if platform.key == 'windows' %}id="downloadWindowsAgentForm"{% endif %}>
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="btn btn-primary dl-btn"
+                                    {% if platform.key == 'windows' %}id="downloadWindowsAgentBtn"{% else %}id="download{{ platform.name }}AgentBtn"{% endif %}>
+                                <span class="spinner-border spinner-border-sm d-none" aria-hidden="true"></span>
+                                <i class="bi bi-download" aria-hidden="true"></i>
+                                <span class="dl-btn-label">{{ platform.button_label }}</span>
+                            </button>
+                        </form>
+                        {% if platform.alternate %}
+                        <form method="post" action="{{ platform.alternate.action }}" class="dl-form"
+                              data-agent-download data-platform="{{ platform.key }}">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="btn btn-link dl-alt-link">
+                                <span class="spinner-border spinner-border-sm d-none" aria-hidden="true"></span>
+                                <span class="dl-btn-label">{{ platform.alternate.label }}</span>
+                            </button>
+                        </form>
+                        {% endif %}
+                        <p class="dl-hint">{{ platform.file_hint }}</p>
+                    {% elif platform.kind == 'package' %}
+                        <a class="btn btn-primary dl-btn" href="{{ platform.action }}" download
+                           id="download{{ platform.name }}AgentLink">
+                            <i class="bi bi-download" aria-hidden="true"></i>
+                            <span class="dl-btn-label">{{ platform.button_label }}</span>
+                        </a>
+                        <p class="dl-hint">
+                            {{ platform.file_hint }}<br>
+                            <span class="dl-meta">{{ platform.details.size_mb }} ·
+                                <abbr title="SHA-256 {{ platform.details.sha256 }}">SHA-256 {{ platform.details.sha256[:12] }}…</abbr></span>
+                        </p>
+                    {% else %}
+                        {% if platform.action %}
+                        <a class="btn btn-primary dl-btn" href="{{ platform.action }}"
+                           target="_blank" rel="noopener noreferrer" id="downloadIosAgentLink">
+                            <i class="bi bi-box-arrow-up-right" aria-hidden="true"></i>
+                            <span class="dl-btn-label">{{ platform.button_label }}</span>
+                        </a>
+                        {% endif %}
+                        {% if platform.ota %}
+                        <a class="btn {{ 'btn-outline-light' if platform.action else 'btn-primary' }} dl-btn"
+                           href="{{ platform.ota.href }}" id="installIosIpaLink">
+                            <i class="bi bi-phone" aria-hidden="true"></i>
+                            <span class="dl-btn-label">{{ platform.ota.label }}</span>
+                        </a>
+                        <p class="dl-hint">{{ platform.ota.note }} · v{{ platform.details.version }}</p>
+                        {% endif %}
+                        <p class="dl-hint">{{ platform.file_hint }}</p>
+                    {% endif %}
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        <p id="windowsDownloadStatus" class="dl-status-line" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="dl-steps" aria-labelledby="dlStepsTitle">
+        <h2 id="dlStepsTitle" class="visually-hidden">How it works</h2>
+        <div class="dl-step">
+            <span class="dl-step-icon" aria-hidden="true"><i class="bi bi-cloud-arrow-down"></i></span>
+            <div><strong>Download</strong><p>Pick your platform above.</p></div>
+        </div>
+        <div class="dl-step">
+            <span class="dl-step-icon" aria-hidden="true"><i class="bi bi-display"></i></span>
+            <div><strong>Review</strong><p>The agent lists what it detected. Nothing is sent yet.</p></div>
+        </div>
+        <div class="dl-step">
+            <span class="dl-step-icon" aria-hidden="true"><i class="bi bi-link-45deg"></i></span>
+            <div>
+                <strong>Link</strong>
+                <p>Approve to add the device. App users tap
+                {% if not current_user.is_admin %}<a href="{{ url_for('device_verification') }}">Link this device</a>{% else %}Link this device{% endif %}.</p>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}

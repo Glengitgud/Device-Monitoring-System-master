@@ -2,3 +2,6 @@
 .venv/
 __pycache__/
 *.py[cod]
+
+# Published app packages (APK/DMG) are build outputs, not source.
+agent_packages/

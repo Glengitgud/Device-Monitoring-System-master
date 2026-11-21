@@ -43,12 +43,19 @@
                     <span>My Devices</span>
                 </a>
             </li>
+            <li>
+                <a href="{{ url_for('download_page') }}" id="navDownloads"
+                   class="sidebar-link {% if active_page == 'download' %}active{% endif %}">
+                    <i class="bi bi-cloud-arrow-down"></i>
+                    <span>Downloads</span>
+                </a>
+            </li>
             {% if not current_user.is_admin %}
             <li>
                 <a href="{{ url_for('device_verification') }}" id="navDeviceVerification"
                    class="sidebar-link {% if active_page == 'device-verification' %}active{% endif %}">
-                    <i class="bi bi-shield-check"></i>
-                    <span>Device Verification</span>
+                    <i class="bi bi-link-45deg"></i>
+                    <span>Link a Device</span>
                 </a>
             </li>
             {% endif %}

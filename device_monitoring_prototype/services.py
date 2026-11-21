@@ -26,6 +26,10 @@ from device_monitoring_prototype.models import (
 from device_monitoring_prototype.system_info import collect_hardware, collect_network
 
 REGISTRATION_TOKEN_LIFETIME = timedelta(minutes=30)
+# A user may hold a few live direct-download/app-link tokens at once, so a
+# second download or a "Link this device" tap does not silently invalidate an
+# agent that was already downloaded. Older extras are revoked.
+MAX_PENDING_DIRECT_TOKENS = 5
 SPECIFICATION_KEYS = {
     "cpu_name",
     "ram_capacity_bytes",
@@ -42,6 +46,10 @@ SPECIFICATION_KEYS = {
     "ip_addresses",
 }
 OPTIONAL_SPECIFICATION_KEYS = {"mac_address"}
+# Types an enrollment agent may report (desktop agents and the mobile apps).
+AGENT_DEVICE_TYPES = {"Desktop", "Laptop", "Phone", "Tablet"}
+# Types a user may choose when adding or editing a device manually.
+MANUAL_DEVICE_TYPES = {"Desktop", "Laptop", "Server", "Workstation", "Phone", "Tablet", "Other"}
 EMAIL_PATTERN = re.compile(
     r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
     r"(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
@@ -252,7 +260,7 @@ def create_device(owner, data):
     hostname = _text(data, "hostname", limit=255) or name
     device_type = _required_text(data, "type", limit=64)
     operating_system = _required_text(data, "os", limit=120)
-    if device_type not in {"Desktop", "Laptop", "Server", "Workstation", "Other"}:
+    if device_type not in MANUAL_DEVICE_TYPES:
         raise ValidationError("Select a supported device type.")
     status = data.get("status", "unknown")
     status = status.strip().lower() if isinstance(status, str) else ""
@@ -280,17 +288,18 @@ def create_device(owner, data):
     return device
 
 
-def issue_device_registration_token(user):
+def issue_device_registration_token(user, *, revoke_unused=True):
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
-    DeviceRegistrationToken.query.filter_by(
-        user_id=user.id,
-        used_at=None,
-        revoked_at=None,
-    ).update(
-        {"revoked_at": now},
-        synchronize_session=False,
-    )
+    if revoke_unused:
+        DeviceRegistrationToken.query.filter_by(
+            user_id=user.id,
+            used_at=None,
+            revoked_at=None,
+        ).update(
+            {"revoked_at": now},
+            synchronize_session=False,
+        )
     registration = DeviceRegistrationToken(
         token_hash=hashlib.sha256(token.encode("ascii")).hexdigest(),
         user=user,
@@ -307,6 +316,70 @@ def issue_device_registration_token(user):
     )
     db.session.commit()
     return token, registration.expires_at
+
+
+def issue_direct_agent_download_token(user, *, channel="download"):
+    """Issue an owner-confirmed token for a per-user agent build or app link.
+
+    The QR flow confirmed the account and the download on a second device.
+    Here the owner requests the agent (or a "Link this device" hand-off to an
+    installed app) from their own authenticated, CSRF-protected session, so
+    both confirmations are recorded at once. The token keeps the same
+    one-use, hashed, short-lived guarantees.
+    """
+    if user.is_admin or user.status != "active":
+        raise ValidationError("Device registration is only available to active standard users.")
+    token, expires_at = issue_device_registration_token(user, revoke_unused=False)
+    registration = find_valid_registration_token(token)
+    now = datetime.now(timezone.utc)
+    registration.verified_at = now
+    registration.download_confirmed_at = now
+    pending = (
+        DeviceRegistrationToken.query.filter(
+            DeviceRegistrationToken.user_id == user.id,
+            DeviceRegistrationToken.used_at.is_(None),
+            DeviceRegistrationToken.revoked_at.is_(None),
+            DeviceRegistrationToken.id != registration.id,
+        )
+        .order_by(DeviceRegistrationToken.created_at.desc(), DeviceRegistrationToken.id.desc())
+        .all()
+    )
+    for older in pending[MAX_PENDING_DIRECT_TOKENS - 1:]:
+        older.revoked_at = now
+    db.session.add(
+        ActivityLog(
+            actor=user,
+            event_type=f"device.agent_direct_{channel}",
+            entity_type="device_registration_token",
+            entity_id=registration.id,
+        )
+    )
+    db.session.commit()
+    return token, expires_at
+
+
+def pending_agent_enrollment(user):
+    """Latest downloaded agent / app link that has not submitted a device yet."""
+    now = datetime.now(timezone.utc)
+    for registration in (
+        DeviceRegistrationToken.query.filter(
+            DeviceRegistrationToken.user_id == user.id,
+            DeviceRegistrationToken.used_at.is_(None),
+            DeviceRegistrationToken.revoked_at.is_(None),
+            DeviceRegistrationToken.download_confirmed_at.isnot(None),
+        )
+        .order_by(DeviceRegistrationToken.created_at.desc(), DeviceRegistrationToken.id.desc())
+        .limit(MAX_PENDING_DIRECT_TOKENS)
+    ):
+        expires_at = registration.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at > now:
+            prepared_at = registration.download_confirmed_at
+            if prepared_at.tzinfo is None:
+                prepared_at = prepared_at.replace(tzinfo=timezone.utc)
+            return {"prepared_at": prepared_at.isoformat(), "expires_at": expires_at.isoformat()}
+    return None
 
 
 def find_valid_registration_token(token):
@@ -466,8 +539,8 @@ def register_agent_device(token, data):
         raise ValidationError("Registration must contain a device name, type, and specifications.")
     name = _required_text(data, "name", limit=120)
     device_type = data.get("device_type")
-    if not isinstance(device_type, str) or device_type not in {"Desktop", "Laptop"}:
-        raise ValidationError("Device type must be Desktop or Laptop.")
+    if not isinstance(device_type, str) or device_type not in AGENT_DEVICE_TYPES:
+        raise ValidationError("Device type must be Desktop, Laptop, Phone, or Tablet.")
     specifications = validate_detected_specifications(data["specifications"])
 
     registration = find_valid_registration_token(token)
@@ -565,7 +638,7 @@ def update_device(device, data):
         device.hostname = _required_text(data, "hostname", limit=255)
     if "type" in data:
         device_type = _required_text(data, "type", limit=64)
-        if device_type not in {"Desktop", "Laptop", "Server", "Workstation", "Other"}:
+        if device_type not in MANUAL_DEVICE_TYPES:
             raise ValidationError("Select a supported device type.")
         device.device_type = device_type
     if "os" in data:

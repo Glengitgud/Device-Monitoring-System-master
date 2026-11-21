@@ -13,8 +13,6 @@ let devicePage = 1;
 let userVisibleCount = ITEMS_PER_PAGE;
 let usersLoaded = false;
 let deviceDetailsRequestId = 0;
-let deviceQrCountdownInterval = null;
-let deviceQrStatusInterval = null;
 let deviceRefreshPromise = null;
 let dashboardRefreshPromise = null;
 let observedRegistrationDeviceIds = null;
@@ -112,7 +110,7 @@ function showRegistrationSuccess(device = null) {
         registrationRedirectStarted = true;
         window.location.assign(destination);
     };
-    modalRoot.querySelector('#deviceScanDashboardButton').addEventListener('click', event => {
+    modalRoot.querySelector('#deviceRegistrationDashboardButton').addEventListener('click', event => {
         event.preventDefault();
         redirect('/dashboard');
     }, { once: true });
@@ -155,6 +153,7 @@ function initSidebar() {
 
 function getCurrentPage() {
     const path = window.location.pathname;
+    if (path === '/download') return 'download';
     if (path.includes('device-verification')) return 'device-verification';
     if (path.includes('archived-devices')) return 'archived-devices';
     if (path.includes('dashboard')) return 'dashboard';
@@ -382,36 +381,79 @@ function initDevicesPage() {
         devicePage = 1;
         renderDevicesCards();
     });
-    initDeviceQrControls();
 }
 
-function initDeviceQrControls() {
-    const qrModalElement = document.getElementById('deviceRegistrationQrModal');
-    if (qrModalElement) {
-        const qrModal = bootstrap.Modal.getOrCreateInstance(qrModalElement);
-        document.getElementById('generateDeviceQrBtn')?.addEventListener('click', () => {
-            qrModal.show();
-            generateDeviceRegistrationQr();
-        });
-        document.getElementById('createDeviceQrBtn')?.addEventListener(
-            'click',
-            generateDeviceRegistrationQr
-        );
-        document.getElementById('copyDeviceQrLinkBtn')?.addEventListener(
-            'click',
-            copyDeviceRegistrationLink
-        );
-        return;
-    }
+function initDownloadPage() {
+    document.querySelectorAll('form[data-agent-download]').forEach(form => {
+        form.addEventListener('submit', startAgentDownload);
+    });
+    highlightDetectedPlatform();
+}
 
-    document.getElementById('createDeviceQrBtn')?.addEventListener(
-        'click',
-        generateDeviceRegistrationQr
-    );
-    document.getElementById('copyDeviceQrLinkBtn')?.addEventListener(
-        'click',
-        copyDeviceRegistrationLink
-    );
+function detectClientPlatform() {
+    const ua = navigator.userAgent || '';
+    const hint = navigator.userAgentData?.platform || navigator.platform || '';
+    if (/android/i.test(ua)) return 'android';
+    // iPadOS reports a Mac user agent but has a touch screen.
+    if (/iphone|ipad|ipod/i.test(ua) || (/mac/i.test(hint) && navigator.maxTouchPoints > 1)) {
+        return 'ios';
+    }
+    if (/mac/i.test(hint) || /macintosh/i.test(ua)) return 'macos';
+    if (/win/i.test(hint) || /windows/i.test(ua)) return 'windows';
+    if (/linux|x11|cros/i.test(`${hint} ${ua}`)) return 'linux';
+    return null;
+}
+
+function highlightDetectedPlatform() {
+    const key = detectClientPlatform();
+    const card = key && document.querySelector(`.dl-card[data-platform="${key}"]`);
+    if (!card) return;
+    card.classList.add('is-recommended');
+    card.querySelector('.dl-recommended')?.removeAttribute('hidden');
+    const detected = document.getElementById('dlDetected');
+    if (detected) {
+        detected.textContent =
+            `This looks like a ${card.querySelector('.dl-name').textContent} device.`;
+        detected.hidden = false;
+    }
+}
+
+function initLinkDeviceButton() {
+    const button = document.getElementById('linkThisDeviceBtn');
+    if (!button) return;
+    const status = document.getElementById('linkDeviceStatus');
+    const fallback = document.getElementById('linkDeviceFallback');
+    const value = document.getElementById('linkDeviceValue');
+    button.addEventListener('click', async () => {
+        const spinner = button.querySelector('.spinner-border');
+        button.disabled = true;
+        spinner.classList.remove('d-none');
+        fallback.hidden = true;
+        status.textContent = 'Creating a one-use link...';
+        try {
+            const result = await api('/api/device-link', { method: 'POST' });
+            value.value = result.link;
+            status.textContent =
+                'Opening the DevMonitor app. This link works once and expires in 30 minutes.';
+            window.location.href = result.link;
+            window.setTimeout(() => { fallback.hidden = false; }, 1500);
+        } catch (error) {
+            status.textContent = error.message;
+            showToast(error.message, 'danger');
+        } finally {
+            button.disabled = false;
+            spinner.classList.add('d-none');
+        }
+    });
+    document.getElementById('copyDeviceLinkBtn')?.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(value.value);
+            showToast('Link copied.');
+        } catch (error) {
+            value.select();
+            showToast('Select the link and copy it manually.', 'warning');
+        }
+    });
 }
 
 async function refreshDeviceVerificationStatus() {
@@ -432,13 +474,11 @@ async function refreshDeviceVerificationStatus() {
             showRegistrationSuccess(latest);
         }
         if (latest?.id != null) latestVerificationDeviceId = latest.id;
+        updatePendingEnrollmentNotice(result.verified ? null : result.pending_enrollment);
         if (!result.verified) return;
 
         document.getElementById('deviceVerificationPending')?.classList.add('d-none');
         document.getElementById('deviceVerificationComplete')?.classList.remove('d-none');
-        document.getElementById('deviceVerificationQrPanel')?.classList.remove('d-none');
-        document.querySelectorAll('#deviceRegistrationProgress .list-group-item')
-            .forEach(item => item.classList.add('list-group-item-success'));
         status.textContent =
             `${result.verified_devices} verified device${result.verified_devices === 1 ? '' : 's'} linked to your account.`;
     } catch (error) {
@@ -446,13 +486,35 @@ async function refreshDeviceVerificationStatus() {
     }
 }
 
+function updatePendingEnrollmentNotice(pending) {
+    const notice = document.getElementById('pendingEnrollmentNotice');
+    const text = document.getElementById('pendingEnrollmentText');
+    if (!notice || !text) return;
+    if (!pending) {
+        notice.hidden = true;
+        return;
+    }
+    const time = value => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    text.textContent = `An agent or app link prepared at ${time(pending.prepared_at)} has not `
+        + 'submitted a device yet. Run it, review the details and type yes (or tap Register '
+        + `in the app). It stays valid until ${time(pending.expires_at)}. This page updates by itself.`;
+    notice.hidden = false;
+}
+
 function initDeviceVerificationPage() {
-    initDeviceQrControls();
-    const qrCard = document.getElementById('deviceQrCard');
-    if (qrCard && !qrCard.classList.contains('d-none') && qrCard.dataset.enrollmentUrl) {
-        const token = new URL(qrCard.dataset.enrollmentUrl, window.location.origin)
-            .pathname.split('/').pop();
-        startDeviceQrCountdown(qrCard.dataset.expiresAt, qrCard.dataset.serverTime, token);
+    initLinkDeviceButton();
+    // Windows and Linux agents carry their own token; the app-link button is for phones/Macs.
+    if (['windows', 'linux'].includes(detectClientPlatform())) {
+        const desktopNotice = document.getElementById('desktopAgentNotice');
+        if (desktopNotice) desktopNotice.hidden = false;
+        document.getElementById('linkThisDeviceBtn')?.classList.replace('btn-primary', 'btn-outline-light');
+    }
+    const notice = document.getElementById('pendingEnrollmentNotice');
+    if (notice && !notice.hidden && notice.dataset.preparedAt) {
+        updatePendingEnrollmentNotice({
+            prepared_at: notice.dataset.preparedAt,
+            expires_at: notice.dataset.expiresAt,
+        });
     }
     refreshDeviceVerificationStatus();
     window.setInterval(() => {
@@ -676,150 +738,85 @@ function renderDeviceDetails(device) {
         View detected device specifications</a></p>`;
 }
 
-async function generateDeviceRegistrationQr() {
+function setWindowsDownloadStatus(message, state = 'info') {
+    const status = document.getElementById('windowsDownloadStatus');
+    if (!status) return;
+    status.textContent = message;
+    status.dataset.state = state;
+}
+
+function downloadFilename(response, fallback) {
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+    return match ? decodeURIComponent(match[1]) : fallback;
+}
+
+const AGENT_DOWNLOAD_MESSAGES = {
+    windows: {
+        preparing: 'Building your Windows Device Agent. This can take a few seconds...',
+        done: name => `Download started. Run ${name} on this Windows PC and approve the `
+            + 'detected specifications. It works once and expires after 30 minutes.',
+    },
+    linux: {
+        preparing: 'Preparing your Linux package...',
+        done: name => (name.endsWith('.deb')
+            ? `Download started. Install it with: sudo apt install ./${name}  then run `
+                + 'devmonitor-agent and type yes to approve.'
+            : `Download started. Extract ${name} and run ./devmonitor-agent/devmonitor-agent, `
+                + 'then type yes to approve.')
+            + ' It works once and expires after 30 minutes.',
+    },
+};
+
+async function startAgentDownload(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const messages = AGENT_DOWNLOAD_MESSAGES[form.dataset.platform] || AGENT_DOWNLOAD_MESSAGES.windows;
+    const button = form.querySelector('button[type="submit"]');
+    const spinner = button.querySelector('.spinner-border');
+    const label = button.querySelector('.dl-btn-label');
+    const originalLabel = label.textContent;
     registrationSuccessShown = false;
     registrationRedirectStarted = false;
     window.clearTimeout(registrationRedirectTimer);
     window.clearInterval(registrationRedirectInterval);
-    const button = document.getElementById('createDeviceQrBtn');
-    const qrCard = document.getElementById('deviceQrCard');
-    const image = document.getElementById('deviceRegistrationQrImage');
-    const link = document.getElementById('deviceRegistrationQrLink');
-    const copyButton = document.getElementById('copyDeviceQrLinkBtn');
-    const status = document.getElementById('deviceQrStatus');
-    const expiryCard = document.getElementById('deviceQrExpiryCard');
     button.disabled = true;
-    clearInterval(deviceQrCountdownInterval);
-    clearInterval(deviceQrStatusInterval);
-    qrCard.classList.add('d-none');
-    link.classList.add('d-none');
-    copyButton.classList.add('d-none');
-    expiryCard.classList.add('d-none');
-    button.textContent = 'Generate QR Code';
-    status.textContent = 'Creating a secure one-use registration code...';
+    spinner.classList.remove('d-none');
+    label.textContent = 'Preparing...';
+    setWindowsDownloadStatus(messages.preparing);
     try {
-        const result = await api('/api/device-registration-tokens', { method: 'POST' });
-        image.src = result.qr_code;
-        qrCard.classList.remove('d-none');
-        link.href = result.enrollment_url;
-        link.classList.remove('d-none');
-        copyButton.classList.remove('d-none');
-        expiryCard.classList.remove('d-none');
-        status.textContent = 'Your QR code is ready.';
-        button.textContent = 'Regenerate QR Code';
-        const token = new URL(result.enrollment_url, window.location.origin)
-            .pathname.split('/').pop();
-        startDeviceQrCountdown(result.expires_at, result.server_time, token);
+        const response = await fetch(form.action, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { Accept: 'application/json', 'X-CSRF-Token': csrfToken() },
+            body: new FormData(form),
+        });
+        if (response.status === 401) {
+            window.location.assign('/');
+            return;
+        }
+        if (!response.ok) {
+            const result = await response.json().catch(() => ({}));
+            throw new Error(result.error || `Download failed (${response.status}).`);
+        }
+        const name = downloadFilename(response, 'devmonitor-agent');
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+        setWindowsDownloadStatus(messages.done(name), 'success');
     } catch (error) {
-        status.textContent = error.message;
+        setWindowsDownloadStatus(error.message, 'error');
         showToast(error.message, 'danger');
     } finally {
         button.disabled = false;
-    }
-}
-
-function startDeviceQrCountdown(expiresAt, serverTime, token) {
-    let expiration = new Date(expiresAt).getTime();
-    let serverClockOffset = Date.now() - new Date(serverTime).getTime();
-    const remaining = document.getElementById('deviceQrRemainingTime');
-    const expiryStatus = document.getElementById('deviceQrExpiryStatus');
-    const tokenStatus = document.getElementById('deviceQrTokenStatus');
-    const createButton = document.getElementById('createDeviceQrBtn');
-    const link = document.getElementById('deviceRegistrationQrLink');
-    const copyButton = document.getElementById('copyDeviceQrLinkBtn');
-
-    const updateCountdown = () => {
-        const serverNow = Date.now() - serverClockOffset;
-        const seconds = Math.max(0, Math.ceil((expiration - serverNow) / 1000));
-        const minutes = Math.floor(seconds / 60);
-        const displaySeconds = String(seconds % 60).padStart(2, '0');
-        remaining.textContent = `${minutes}:${displaySeconds}`;
-
-        if (seconds === 0) {
-            clearInterval(deviceQrCountdownInterval);
-            clearInterval(deviceQrStatusInterval);
-            expiryStatus.textContent = 'Expired';
-            tokenStatus.textContent = 'Expired';
-            link.classList.add('d-none');
-            copyButton.classList.add('d-none');
-            createButton.textContent = 'Regenerate QR Code';
-            document.getElementById('deviceQrStatus').textContent =
-                'This QR code has expired. Generate a new one to continue.';
-            return;
-        }
-
-        expiryStatus.textContent = new Date(expiration).toLocaleTimeString();
-        tokenStatus.textContent = 'Unused';
-    };
-
-    const refreshStatus = async () => {
-        const result = await api(
-            `/api/device-registration-tokens/${encodeURIComponent(token)}/status`
-        );
-        serverClockOffset = Date.now() - new Date(result.server_time).getTime();
-        expiration = new Date(result.expires_at).getTime();
-        if (result.status === 'active') {
-            tokenStatus.textContent = 'Unused';
-            updateCountdown();
-            return;
-        }
-
-        if (result.status === 'verified' || result.status === 'download_confirmed') {
-            tokenStatus.textContent = result.status === 'verified'
-                ? 'Account verified'
-                : 'Download confirmed';
-            expiryStatus.textContent = 'Awaiting device registration';
-            remaining.textContent = `${Math.max(0, Math.ceil((expiration - (Date.now() - serverClockOffset)) / 1000))}s`;
-            document.getElementById('deviceQrStatus').textContent =
-                result.status === 'verified'
-                    ? 'Account verified. Confirm the Windows EXE download on the scanned device.'
-                    : 'Download confirmed. Run the Device Agent EXE and approve device registration.';
-            return;
-        }
-
-        clearInterval(deviceQrCountdownInterval);
-        clearInterval(deviceQrStatusInterval);
-        remaining.textContent = result.status === 'used' ? 'Complete' : '00:00';
-        expiryStatus.textContent = result.status === 'used'
-            ? 'Registration complete'
-            : result.status === 'revoked' ? 'Revoked' : 'Expired';
-        tokenStatus.textContent = result.status === 'used'
-            ? 'Used'
-            : result.status === 'revoked' ? 'Revoked' : 'Expired';
-        link.classList.add('d-none');
-        copyButton.classList.add('d-none');
-        createButton.textContent = 'Generate New QR Code';
-        document.getElementById('deviceQrStatus').textContent =
-            result.status === 'used'
-                ? 'This QR code has been used to register a device.'
-                : `This QR code is ${result.status}. Generate a new one to continue.`;
-        if (result.status === 'used') showRegistrationSuccess(result.device);
-    };
-
-    updateCountdown();
-    tokenStatus.textContent = 'Unused';
-    deviceQrCountdownInterval = setInterval(updateCountdown, 1000);
-    refreshStatus().catch(error => {
-        clearInterval(deviceQrStatusInterval);
-        tokenStatus.textContent = 'Unavailable';
-        showToast(`Unable to verify the QR code status: ${error.message}`, 'danger');
-    });
-    deviceQrStatusInterval = setInterval(() => {
-        refreshStatus().catch(error => {
-            clearInterval(deviceQrStatusInterval);
-            tokenStatus.textContent = 'Unavailable';
-            showToast(`Unable to verify the QR code status: ${error.message}`, 'danger');
-        });
-    }, 10000);
-}
-
-async function copyDeviceRegistrationLink() {
-    const link = document.getElementById('deviceRegistrationQrLink');
-    try {
-        await navigator.clipboard.writeText(link.href);
-        showToast('Registration link copied.');
-    } catch (error) {
-        showToast('Unable to copy the registration link in this browser.', 'danger');
+        spinner.classList.add('d-none');
+        label.textContent = originalLabel;
     }
 }
 
@@ -1280,6 +1277,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (page === 'devices') initDevicesPage();
     if (page === 'device-verification') initDeviceVerificationPage();
+    if (page === 'download') initDownloadPage();
     if (page === 'archived-devices') initArchivedDevicesPage();
     if (page === 'admin') initAdminPage();
 });

@@ -1,59 +1,112 @@
 {% extends "base.html" %}
 
-{% block title %}Device Verification - Device Monitoring System{% endblock %}
-{% block page_title %}Device Verification{% endblock %}
+{% block title %}Link a Device - Device Monitoring System{% endblock %}
+{% block page_title %}Link a Device{% endblock %}
 
 {% block content %}
 <div class="row justify-content-center">
-    <div class="col-xl-8 col-lg-10">
-        <div class="content-card mb-4">
-            <div class="content-card-header">
-                <h6 class="mb-0"><i class="bi bi-shield-check me-2"></i>Verify a Device</h6>
-            </div>
-            <div class="content-card-body text-center">
-                <div id="deviceVerificationPending"
-                     class="{{ 'd-none' if verified_device_count else '' }}">
-                    <p class="mb-3">
-                        {% if registration_complete %}
-                            Account created. Your verification QR code is ready.
-                        {% else %}
-                            Register and verify a Windows desktop or laptop to activate dashboard access.
-                        {% endif %}
-                    </p>
+    <div class="col-xxl-7 col-xl-8 col-lg-10">
+        <div id="deviceVerificationComplete"
+             class="alert alert-success {{ '' if verified_device_count else 'd-none' }}"
+             role="status">
+            <i class="bi bi-check-circle me-1"></i>
+            <span id="deviceVerificationMessage">
+                {{ verified_device_count }} verified device{{ '' if verified_device_count == 1 else 's' }} linked to your account.
+            </span>
+            <a class="alert-link ms-2" href="{{ url_for('dashboard') }}">Open dashboard</a>
+        </div>
+
+        <div id="pendingEnrollmentNotice" class="alert alert-info"
+             role="status" {% if not pending_enrollment %}hidden{% endif %}
+             data-prepared-at="{{ pending_enrollment.prepared_at if pending_enrollment else '' }}"
+             data-expires-at="{{ pending_enrollment.expires_at if pending_enrollment else '' }}">
+            <i class="bi bi-hourglass-split me-1" aria-hidden="true"></i>
+            <strong>Waiting for your device.</strong>
+            <span id="pendingEnrollmentText">
+                An agent you downloaded has not submitted a device yet. Run it, review
+                the details and type <kbd>yes</kbd> to confirm. This page updates by itself.
+            </span>
+        </div>
+
+        <div id="desktopAgentNotice" class="alert alert-secondary" hidden>
+            <i class="bi bi-pc-display me-1" aria-hidden="true"></i>
+            <strong>On this computer you don't need the button below.</strong>
+            Download the agent from <a href="{{ url_for('download_page') }}" class="alert-link">Downloads</a>,
+            run it and type <kbd>yes</kbd>. It is already linked to your account.
+        </div>
+
+        <div class="content-card link-card mb-4">
+            <div class="content-card-body">
+                <span class="link-card-icon" aria-hidden="true"><i class="bi bi-link-45deg"></i></span>
+                <h2 class="link-card-title">Link this device</h2>
+                <p class="link-card-text">
+                    For the <strong>Android, macOS and iOS apps</strong>: open this page
+                    <strong>on that device</strong> and tap the button. The app opens,
+                    shows what it detected, and asks you to approve.
+                </p>
+                <button type="button" class="btn btn-primary btn-lg" id="linkThisDeviceBtn">
+                    <span class="spinner-border spinner-border-sm me-1 d-none" aria-hidden="true"></span>
+                    <i class="bi bi-phone me-1" aria-hidden="true"></i>Link this device
+                </button>
+                <p id="linkDeviceStatus" class="link-card-status" role="status" aria-live="polite"></p>
+                <div id="linkDeviceFallback" class="link-card-fallback" hidden>
+                    <label for="linkDeviceValue" class="form-label small">
+                        Nothing opened? Install the app first, or copy this link into the app:
+                    </label>
+                    <div class="input-group input-group-sm">
+                        <input id="linkDeviceValue" class="form-control" readonly>
+                        <button class="btn btn-outline-secondary" type="button" id="copyDeviceLinkBtn">Copy</button>
+                    </div>
                 </div>
-                <div id="deviceVerificationComplete"
-                     class="alert alert-success {{ '' if verified_device_count else 'd-none' }}"
-                     role="status">
-                    <i class="bi bi-check-circle me-1"></i>
-                    <span id="deviceVerificationMessage">
-                        {{ verified_device_count }} verified device{{ '' if verified_device_count == 1 else 's' }} linked to your account.
-                    </span>
-                    <a class="alert-link ms-2" href="{{ url_for('dashboard') }}">Open dashboard</a>
-                </div>
-                <div id="deviceVerificationQrPanel" class="qr-verification-panel">
-                    {% include "_device_registration_qr_panel.html" %}
-                </div>
-                <ol class="list-group list-group-numbered text-start mt-4"
-                    id="deviceRegistrationProgress">
-                    <li class="list-group-item {{ 'list-group-item-success' if registration_complete else '' }}">
-                        Account registered
-                    </li>
-                    <li class="list-group-item {{ 'list-group-item-success' if registration_qr else '' }}">
-                        Scan QR and verify account
-                    </li>
-                    <li class="list-group-item {{ 'list-group-item-success' if verified_device_count else '' }}">
-                        Download EXE agent, review specifications, and submit
-                    </li>
-                    <li class="list-group-item {{ 'list-group-item-success' if verified_device_count else '' }}">
-                        Dashboard access activated
-                    </li>
-                </ol>
+                <hr class="link-card-divider">
+                <p class="link-card-text mb-0">
+                    <i class="bi bi-windows me-1" aria-hidden="true"></i>
+                    <i class="bi bi-ubuntu me-1" aria-hidden="true"></i>
+                    Windows and Linux downloads are already linked to your account; just run them.
+                    <a href="{{ url_for('download_page') }}" class="ms-1">Go to downloads</a>
+                </p>
             </div>
         </div>
-        <p class="text-muted text-center small">
-            Your account stays linked to the device through its one-time registration token.
-            Administrators can monitor verified devices from the admin dashboard.
+        <p id="deviceVerificationPending"
+           class="text-center small link-card-note {{ 'd-none' if verified_device_count else '' }}">
+            <i class="bi bi-info-circle me-1" aria-hidden="true"></i>
+            Your dashboard unlocks after the first device is linked.
         </p>
+    </div>
+</div>
+
+{# Shown by showRegistrationSuccess() in script.js when the status poll sees a
+   newly registered device; the IDs below are the ones that function uses. #}
+<div class="modal fade" id="deviceRegistrationSuccessModal" tabindex="-1"
+     aria-labelledby="deviceRegistrationSuccessTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content device-scan-success">
+            <div class="modal-body text-center p-4 p-md-5">
+                <div class="device-scan-success-icon" aria-hidden="true">
+                    <i class="bi bi-check-lg"></i>
+                </div>
+                <h2 class="h4 mt-3" id="deviceRegistrationSuccessTitle">Device linked</h2>
+                <p class="text-muted">
+                    The device was registered to your account and your dashboard is now unlocked.
+                </p>
+                <p class="fw-semibold" id="deviceRegistrationCountdown" role="status" aria-live="polite">
+                    Redirecting to Dashboard in 5 seconds...
+                </p>
+                <div class="d-flex flex-wrap justify-content-center gap-2 mt-4">
+                    <a class="btn btn-primary" id="deviceRegistrationDashboardButton"
+                       href="{{ url_for('dashboard') }}">
+                        <i class="bi bi-speedometer2 me-1"></i>Go to Dashboard
+                    </a>
+                    <a class="btn btn-outline-primary" id="deviceRegistrationDetailsButton"
+                       href="{{ url_for('devices') }}">
+                        <i class="bi bi-pc-display me-1"></i>View Device Details
+                    </a>
+                    <button class="btn btn-outline-secondary" type="button" data-bs-dismiss="modal">
+                        Stay here
+                    </button>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 {% endblock %}
