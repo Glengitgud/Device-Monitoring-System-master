@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="DevMonitor keeps every device you own in one place: Windows, macOS, Linux, Android and iOS, linked securely and reviewed before anything is sent.">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>DevMonitor - Every device, one mission control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/home.css') }}" rel="stylesheet">
+</head>
+<body class="hp">
+<a class="hp-skip" href="#home">Skip to content</a>
+
+<header class="hp-nav" id="hpNav">
+    <div class="hp-wrap hp-nav-inner">
+        <a class="hp-brand" href="#home" aria-label="DevMonitor home">
+            <span class="hp-brand-mark" aria-hidden="true"><i class="bi bi-broadcast"></i></span>
+            DevMonitor
+        </a>
+        <button class="hp-menu-btn" id="hpMenuBtn" type="button" aria-expanded="false"
+                aria-controls="hpLinks" aria-label="Open menu">
+            <i class="bi bi-list" aria-hidden="true"></i>
+        </button>
+        <nav class="hp-links" id="hpLinks" aria-label="Homepage sections">
+            <a href="#home" data-section="home">Home</a>
+            <a href="#about" data-section="about">About</a>
+            <a href="#system" data-section="system">The System</a>
+            <a href="#contact" data-section="contact">Contact us</a>
+            <span class="hp-links-actions">
+                {% if current_user.is_authenticated %}
+                <a class="hp-btn hp-btn-solid hp-btn-sm" href="{{ url_for('dashboard') }}">
+                    <i class="bi bi-speedometer2" aria-hidden="true"></i>Open my dashboard
+                </a>
+                {% else %}
+                <a class="hp-btn hp-btn-ghost hp-btn-sm" href="{{ url_for('login') }}">Sign in</a>
+                <a class="hp-btn hp-btn-solid hp-btn-sm" href="{{ url_for('register') }}">Get started</a>
+                {% endif %}
+            </span>
+        </nav>
+    </div>
+</header>
+
+<main>
+    <!-- ============ HOME ============ -->
+    <section class="hp-hero" id="home" aria-labelledby="heroTitle">
+        <div class="hp-grid-bg" aria-hidden="true"></div>
+        <div class="hp-wrap hp-hero-inner">
+            <div class="hp-hero-copy">
+                <p class="hp-eyebrow"><span class="hp-pulse" aria-hidden="true"></span>Device mission control</p>
+                <h1 id="heroTitle">Every device you own,<br><span class="hp-gradient-text">on one signal.</span></h1>
+                <p class="hp-lead">
+                    DevMonitor brings your laptops, desktops and phones into a single dashboard.
+                    A small agent reads each device's hardware, shows you everything first,
+                    and only links it to your account after you approve.
+                </p>
+                <div class="hp-cta">
+                    {% if current_user.is_authenticated %}
+                    <a class="hp-btn hp-btn-solid" href="{{ url_for('dashboard') }}">
+                        <i class="bi bi-speedometer2" aria-hidden="true"></i>Open my dashboard
+                    </a>
+                    {% else %}
+                    <a class="hp-btn hp-btn-solid" href="{{ url_for('register') }}">
+                        <i class="bi bi-rocket-takeoff" aria-hidden="true"></i>Create a free account
+                    </a>
+                    {% endif %}
+                    <a class="hp-btn hp-btn-ghost" href="#about">How it works</a>
+                </div>
+                <ul class="hp-platforms" aria-label="Supported platforms">
+                    <li><i class="bi bi-windows" aria-hidden="true"></i>Windows</li>
+                    <li><i class="bi bi-apple" aria-hidden="true"></i>macOS</li>
+                    <li><i class="bi bi-ubuntu" aria-hidden="true"></i>Linux</li>
+                    <li><i class="bi bi-android2" aria-hidden="true"></i>Android</li>
+                    <li><i class="bi bi-phone" aria-hidden="true"></i>iOS</li>
+                </ul>
+            </div>
+
+            <div class="hp-hero-visual" aria-hidden="true">
+                <div class="hp-orbit">
+                    <svg class="hp-orbit-lines" viewBox="0 0 400 400">
+                        <circle class="hp-ring" cx="200" cy="200" r="110"/>
+                        <circle class="hp-ring hp-ring-outer" cx="200" cy="200" r="175"/>
+                        <line class="hp-signal" x1="200" y1="200" x2="200" y2="25"/>
+                        <line class="hp-signal hp-signal-2" x1="200" y1="200" x2="351" y2="287"/>
+                        <line class="hp-signal hp-signal-3" x1="200" y1="200" x2="49" y2="287"/>
+                        <line class="hp-signal hp-signal-4" x1="200" y1="200" x2="310" y2="200"/>
+                    </svg>
+                    <div class="hp-hub"><i class="bi bi-broadcast"></i></div>
+                    <div class="hp-node hp-node-1"><i class="bi bi-laptop"></i></div>
+                    <div class="hp-node hp-node-2"><i class="bi bi-phone"></i></div>
+                    <div class="hp-node hp-node-3"><i class="bi bi-pc-display"></i></div>
+                    <div class="hp-node hp-node-4 hp-node-small"><i class="bi bi-tablet"></i></div>
+                </div>
+                <div class="hp-terminal">
+                    <div class="hp-terminal-bar"><span></span><span></span><span></span>devmonitor-agent</div>
+                    <pre class="hp-terminal-body" id="hpTerminal"><span class="t-dim">$</span> devmonitor-agent
+<span class="t-ok">✓</span> Processor ........ detected
+<span class="t-ok">✓</span> Memory ........... detected
+<span class="t-ok">✓</span> Storage .......... detected
+<span class="t-ok">✓</span> Network .......... detected
+<span class="t-ask">?</span> Link this device to your account? <span class="t-key">yes</span>
+<span class="t-ok">●</span> Linked. Nothing sent until you said yes.</pre>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============ ABOUT ============ -->
+    <section class="hp-section" id="about" aria-labelledby="aboutTitle">
+        <div class="hp-wrap">
+            <p class="hp-kicker">About DevMonitor</p>
+            <h2 id="aboutTitle">Know what's inside every machine, without the spreadsheet.</h2>
+            <p class="hp-section-lead">
+                DevMonitor is a centralized end-user device monitoring system. Instead of
+                typing serial numbers and specs by hand, you run a lightweight agent on each
+                device. It reads the hardware, lets you review it, and keeps the record up to
+                date in one secure place.
+            </p>
+
+            <div class="hp-features">
+                <article class="hp-feature hp-reveal">
+                    <span class="hp-feature-icon"><i class="bi bi-cpu" aria-hidden="true"></i></span>
+                    <h3>Real hardware, read for you</h3>
+                    <p>Processor, cores, memory, storage, graphics, motherboard, operating system and network adapters, collected straight from the device.</p>
+                </article>
+                <article class="hp-feature hp-reveal">
+                    <span class="hp-feature-icon"><i class="bi bi-eye" aria-hidden="true"></i></span>
+                    <h3>You approve everything</h3>
+                    <p>The agent shows exactly what it found before anything leaves the device. Nothing is sent until you confirm.</p>
+                </article>
+                <article class="hp-feature hp-reveal">
+                    <span class="hp-feature-icon"><i class="bi bi-shield-lock" aria-hidden="true"></i></span>
+                    <h3>Locked down by default</h3>
+                    <p>Accounts are protected by email verification and Google Authenticator. Each device link works once and expires quickly.</p>
+                </article>
+                <article class="hp-feature hp-reveal">
+                    <span class="hp-feature-icon"><i class="bi bi-grid-3x3-gap" aria-hidden="true"></i></span>
+                    <h3>One dashboard, every platform</h3>
+                    <p>Windows, macOS, Linux and Android devices side by side, with archive and restore when a device is retired.</p>
+                </article>
+            </div>
+
+            <div class="hp-steps">
+                <h3 class="hp-steps-title">From download to dashboard in three steps</h3>
+                <ol>
+                    <li class="hp-reveal">
+                        <span class="hp-step-num">01</span>
+                        <strong>Download</strong>
+                        <span>Get the agent for your device from the Downloads page.</span>
+                    </li>
+                    <li class="hp-reveal">
+                        <span class="hp-step-num">02</span>
+                        <strong>Review</strong>
+                        <span>Open it. It reads the hardware and shows you everything it found.</span>
+                    </li>
+                    <li class="hp-reveal">
+                        <span class="hp-step-num">03</span>
+                        <strong>Link</strong>
+                        <span>Approve, and the device appears on your dashboard.</span>
+                    </li>
+                </ol>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============ THE SYSTEM ============ -->
+    <section class="hp-section hp-system" id="system" aria-labelledby="systemTitle">
+        <div class="hp-wrap hp-system-inner">
+            <div class="hp-system-copy">
+                <p class="hp-kicker">The System</p>
+                <h2 id="systemTitle">
+                    {% if current_user.is_authenticated %}Welcome back, {{ current_user.full_name or current_user.username }}.
+                    {% else %}Step inside your mission control.{% endif %}
+                </h2>
+                <p class="hp-section-lead">
+                    {% if current_user.is_authenticated %}
+                    Pick up where you left off: check your devices, add a new one, or grab an agent.
+                    {% else %}
+                    Sign in to see your devices, or create an account in a minute. You will verify
+                    your email and set up Google Authenticator, then link your first device.
+                    {% endif %}
+                </p>
+                <div class="hp-portal">
+                    {% if current_user.is_authenticated %}
+                    <a class="hp-portal-card" href="{{ url_for('dashboard') }}">
+                        <i class="bi bi-speedometer2" aria-hidden="true"></i>
+                        <span><strong>Dashboard</strong><small>Your devices at a glance</small></span>
+                        <i class="bi bi-arrow-right hp-portal-arrow" aria-hidden="true"></i>
+                    </a>
+                    <a class="hp-portal-card" href="{{ url_for('devices') }}">
+                        <i class="bi bi-laptop" aria-hidden="true"></i>
+                        <span><strong>My Devices</strong><small>Specs and details for each device</small></span>
+                        <i class="bi bi-arrow-right hp-portal-arrow" aria-hidden="true"></i>
+                    </a>
+                    <a class="hp-portal-card" href="{{ url_for('device_verification') }}">
+                        <i class="bi bi-link-45deg" aria-hidden="true"></i>
+                        <span><strong>Link a Device</strong><small>Add another device to your account</small></span>
+                        <i class="bi bi-arrow-right hp-portal-arrow" aria-hidden="true"></i>
+                    </a>
+                    {% else %}
+                    <a class="hp-portal-card hp-portal-primary" href="{{ url_for('login') }}">
+                        <i class="bi bi-box-arrow-in-right" aria-hidden="true"></i>
+                        <span><strong>Sign in</strong><small>Email or username, then your authenticator code</small></span>
+                        <i class="bi bi-arrow-right hp-portal-arrow" aria-hidden="true"></i>
+                    </a>
+                    <a class="hp-portal-card" href="{{ url_for('register') }}">
+                        <i class="bi bi-person-plus" aria-hidden="true"></i>
+                        <span><strong>Create an account</strong><small>Verify your email and set up the authenticator</small></span>
+                        <i class="bi bi-arrow-right hp-portal-arrow" aria-hidden="true"></i>
+                    </a>
+                    {% endif %}
+                    <a class="hp-portal-card" href="{{ url_for('download_page') }}">
+                        <i class="bi bi-cloud-arrow-down" aria-hidden="true"></i>
+                        <span><strong>Downloads</strong><small>Agents for Windows, macOS, Linux and Android</small></span>
+                        <i class="bi bi-arrow-right hp-portal-arrow" aria-hidden="true"></i>
+                    </a>
+                </div>
+            </div>
+
+            <div class="hp-screen hp-reveal" aria-hidden="true">
+                <div class="hp-screen-bar"><span></span><span></span><span></span><em>DevMonitor · Dashboard</em></div>
+                <div class="hp-screen-body">
+                    <div class="hp-screen-side"><i></i><i></i><i></i><i></i></div>
+                    <div class="hp-screen-main">
+                        <div class="hp-screen-tiles">
+                            <div><span class="dot dot-ok"></span><b></b><s></s></div>
+                            <div><span class="dot dot-info"></span><b></b><s></s></div>
+                            <div><span class="dot dot-warn"></span><b></b><s></s></div>
+                        </div>
+                        <div class="hp-screen-rows">
+                            <p><i class="bi bi-laptop"></i><b></b><span class="pill pill-ok">Online</span></p>
+                            <p><i class="bi bi-phone"></i><b></b><span class="pill pill-ok">Online</span></p>
+                            <p><i class="bi bi-pc-display"></i><b></b><span class="pill">Offline</span></p>
+                        </div>
+                    </div>
+                    <div class="hp-scanline"></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ============ CONTACT ============ -->
+    <section class="hp-section" id="contact" aria-labelledby="contactTitle">
+        <div class="hp-wrap hp-contact-inner">
+            <div class="hp-contact-copy">
+                <p class="hp-kicker">Contact us</p>
+                <h2 id="contactTitle">Questions, feedback, or a device that won't link?</h2>
+                <p class="hp-section-lead">
+                    Send us a message and the DevMonitor team will reply by email.
+                </p>
+                {% if contact_email %}
+                <a class="hp-contact-line" href="mailto:{{ contact_email }}">
+                    <i class="bi bi-envelope" aria-hidden="true"></i>{{ contact_email }}
+                </a>
+                {% endif %}
+                <p class="hp-contact-line"><i class="bi bi-clock" aria-hidden="true"></i>We usually reply within a few days.</p>
+            </div>
+
+            <form class="hp-form" id="hpContactForm" method="post" action="{{ url_for('contact_message') }}" novalidate>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="hp-hp" aria-hidden="true">
+                    <label for="contactWebsite">Leave this empty</label>
+                    <input id="contactWebsite" name="website" tabindex="-1" autocomplete="off">
+                </div>
+                <div class="hp-field-row">
+                    <div class="hp-field">
+                        <label for="contactName">Your name</label>
+                        <input id="contactName" name="name" required maxlength="120" autocomplete="name"
+                               value="{{ (current_user.full_name or '') if current_user.is_authenticated else '' }}">
+                    </div>
+                    <div class="hp-field">
+                        <label for="contactEmail">Email address</label>
+                        <input id="contactEmail" name="email" type="email" required maxlength="254" autocomplete="email"
+                               value="{{ current_user.email if current_user.is_authenticated else '' }}">
+                    </div>
+                </div>
+                <div class="hp-field">
+                    <label for="contactSubject">Subject</label>
+                    <input id="contactSubject" name="subject" required maxlength="150">
+                </div>
+                <div class="hp-field">
+                    <label for="contactMessage">Message</label>
+                    <textarea id="contactMessage" name="message" rows="5" required minlength="10" maxlength="4000"></textarea>
+                </div>
+                <button class="hp-btn hp-btn-solid hp-form-submit" type="submit">
+                    <i class="bi bi-send" aria-hidden="true"></i><span>Send message</span>
+                </button>
+                <p class="hp-form-status" id="hpContactStatus" role="status" aria-live="polite"></p>
+            </form>
+        </div>
+    </section>
+</main>
+
+<footer class="hp-footer">
+    <div class="hp-wrap hp-footer-inner">
+        <span class="hp-brand hp-brand-sm"><span class="hp-brand-mark" aria-hidden="true"><i class="bi bi-broadcast"></i></span>DevMonitor</span>
+        <nav aria-label="Footer">
+            <a href="#home">Home</a><a href="#about">About</a><a href="#system">The System</a><a href="#contact">Contact us</a>
+        </nav>
+        <small>&copy; {{ year }} DevMonitor · Centralized End-User Device Monitoring System</small>
+    </div>
+</footer>
+
+<script src="{{ url_for('static', filename='js/home.js') }}" defer></script>
+</body>
+</html>

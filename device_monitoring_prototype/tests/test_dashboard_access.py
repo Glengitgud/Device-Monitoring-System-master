@@ -118,7 +118,7 @@ class DashboardAccessTest(unittest.TestCase):
         dashboard = self.client.get("/dashboard")
         self.assertEqual(dashboard.status_code, 302)
         self.assertEqual(dashboard.location, "/device-verification")
-        self.assertEqual(self.client.get("/").location, "/device-verification")
+        self.assertEqual(self.client.get("/login").location, "/device-verification")
         self.assertEqual(self.client.get("/register").location, "/device-verification")
         self.assertEqual(self.client.get("/api/dashboard").status_code, 403)
         self.assertEqual(self.client.get("/api/devices").status_code, 403)
@@ -137,7 +137,7 @@ class DashboardAccessTest(unittest.TestCase):
         # Same browser session, no logout/login: access is granted at once.
         self.assertEqual(self.client.get("/dashboard").status_code, 200)
         self.assertEqual(self.client.get("/api/dashboard").status_code, 200)
-        self.assertEqual(self.client.get("/").location, "/dashboard")
+        self.assertEqual(self.client.get("/login").location, "/dashboard")
         status = self.status()
         self.assertTrue(status["verified"])
         self.assertEqual(status["verified_devices"], 1)
@@ -284,12 +284,12 @@ class DashboardAccessTest(unittest.TestCase):
                 expected = "/device-verification" if path == "/dashboard" else path
                 self.assertEqual(response.request.path, expected)
         self.assertEqual(self.enroll(self.issue_link_token(csrf)).status_code, 201)
-        for path in ("/download", "/device-verification", "/dashboard", "/devices", "/"):
+        for path in ("/download", "/device-verification", "/dashboard", "/devices", "/login"):
             with self.subTest(state="verified", path=path):
                 response = self.client.get(path, follow_redirects=True)
                 self.assertEqual(response.status_code, 200)
                 self.assertLessEqual(len(response.history), 1)
-                self.assertEqual(response.request.path, "/dashboard" if path == "/" else path)
+                self.assertEqual(response.request.path, "/dashboard" if path == "/login" else path)
 
     def test_administrators_keep_their_access(self):
         self.register_and_login()
@@ -299,7 +299,7 @@ class DashboardAccessTest(unittest.TestCase):
             db.session.commit()
         csrf = self.csrf_for(self.client)
         self.assertEqual(self.client.get("/dashboard").status_code, 200)
-        self.assertEqual(self.client.get("/").location, "/dashboard")
+        self.assertEqual(self.client.get("/login").location, "/dashboard")
         self.assertEqual(self.client.get("/device-verification").status_code, 404)
         self.assertEqual(self.client.get("/download").status_code, 200)
         self.assertEqual(self.client.post("/api/device-link", headers={"X-CSRF-Token": csrf}).status_code, 403)

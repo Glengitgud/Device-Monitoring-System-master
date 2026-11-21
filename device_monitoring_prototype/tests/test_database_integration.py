@@ -338,7 +338,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         return agent.json["device_id"]
 
     def test_login_and_registration_pages_render(self):
-        login_page = self.client.get("/")
+        login_page = self.client.get("/login")
         self.assertEqual(login_page.status_code, 200)
         self.assertIn(b'id="loginEmailValidation"', login_page.data)
         self.assertIn(b'aria-required="true"', login_page.data)

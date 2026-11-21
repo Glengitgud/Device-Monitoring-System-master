@@ -238,6 +238,61 @@ def _send_email(email, code):
             smtp.close()
 
 
+def send_contact_message(contact):
+    """Email a homepage "Contact us" message to the DevMonitor team inbox.
+
+    ``contact`` comes from services.validate_contact_message. The visitor's address
+    is only used as Reply-To; the message is sent from the configured account.
+    """
+    host = current_app.config.get("MAIL_SERVER")
+    username = current_app.config.get("MAIL_USERNAME")
+    password = current_app.config.get("MAIL_PASSWORD")
+    sender = current_app.config.get("MAIL_DEFAULT_SENDER") or username
+    recipient = current_app.config.get("CONTACT_RECIPIENT") or sender
+    if not host or not username or not password or not recipient:
+        current_app.logger.error("Contact form email is not configured.")
+        raise EmailDeliveryError(
+            "Messages cannot be sent right now. Please email us directly instead."
+        )
+
+    message = EmailMessage()
+    message["Subject"] = f"[DevMonitor contact] {contact['subject']}"
+    message["From"] = f"DevMonitor Website <{sender}>"
+    message["To"] = recipient
+    message["Reply-To"] = f"{contact['name']} <{contact['email']}>"
+    message.set_content(
+        "New message from the DevMonitor homepage\n\n"
+        f"From: {contact['name']} <{contact['email']}>\n"
+        f"Subject: {contact['subject']}\n\n"
+        f"{contact['message']}\n"
+    )
+
+    port = int(current_app.config.get("MAIL_PORT", 587))
+    timeout = int(current_app.config.get("MAIL_TIMEOUT", 15))
+    use_tls = current_app.config.get("MAIL_USE_TLS", True)
+    smtp = None
+    try:
+        smtp = _open_smtp(host, port, timeout, username, password, use_tls)
+        refused = smtp.send_message(message)
+        if isinstance(refused, dict) and refused:
+            raise EmailDeliveryError("Your message could not be delivered. Please try again later.")
+        current_app.logger.info("SMTP accepted a homepage contact message.")
+    except EmailDeliveryError:
+        raise
+    except (OSError, smtplib.SMTPException) as error:
+        current_app.logger.error(
+            "Contact message delivery failed (%s, code=%s).",
+            type(error).__name__,
+            getattr(error, "smtp_code", None),
+        )
+        raise EmailDeliveryError(
+            "Your message could not be sent right now. Please try again later."
+        ) from error
+    finally:
+        if smtp is not None:
+            smtp.close()
+
+
 def _open_smtp(host, port, timeout, username, password, use_tls):
     smtp = None
     try:

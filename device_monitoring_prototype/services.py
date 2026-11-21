@@ -122,6 +122,21 @@ def _required_text(data, key, limit):
     return value
 
 
+def validate_contact_message(data):
+    """Clean a "Contact us" submission from the public homepage."""
+    name = _required_text(data, "name", limit=120)
+    email = _required_text(data, "email", limit=254)
+    if not EMAIL_PATTERN.fullmatch(email):
+        raise ValidationError("Enter a valid email address so we can reply.")
+    subject = _required_text(data, "subject", limit=150)
+    message = _required_text(data, "message", limit=4000)
+    if len(message) < 10:
+        raise ValidationError("Please write a little more in your message.")
+    if any(character in value for value in (name, email, subject) for character in "\r\n"):
+        raise ValidationError("Name, email and subject must each be a single line.")
+    return {"name": name, "email": email, "subject": subject, "message": message}
+
+
 def _role(name):
     role = Role.query.filter_by(name=name).one_or_none()
     if role is None:

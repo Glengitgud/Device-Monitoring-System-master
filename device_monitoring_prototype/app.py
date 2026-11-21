@@ -108,6 +108,7 @@ from device_monitoring_prototype.authentication import (
     complete_registration,
     registration_authenticator_qr,
     resend_email_code,
+    send_contact_message,
     start_registration,
     verify_email_code,
     verify_login_totp,
@@ -151,11 +152,17 @@ from device_monitoring_prototype.services import (
     RegistrationTokenError,
     restore_device,
     soft_delete_device,
+    validate_contact_message,
     validate_password,
     verify_password,
     update_device,
     update_user,
 )
+
+
+# Homepage contact form: at most this many messages per browser session per window.
+CONTACT_MAX_PER_WINDOW = 3
+CONTACT_WINDOW_SECONDS = 10 * 60
 
 
 def diagnostic_sort_key(run):
@@ -300,6 +307,8 @@ def create_app(test_config=None):
         MAIL_DEFAULT_SENDER=os.environ.get("MAIL_DEFAULT_SENDER"),
         MAIL_USE_TLS=os.environ.get("MAIL_USE_TLS", "true").lower() == "true",
         MAIL_TIMEOUT=int(os.environ.get("MAIL_TIMEOUT", "15")),
+        # Inbox for the homepage "Contact us" form; defaults to MAIL_DEFAULT_SENDER.
+        CONTACT_RECIPIENT=os.environ.get("CONTACT_RECIPIENT", "").strip(),
         SQLALCHEMY_DATABASE_URI=_database_uri(),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         SQLALCHEMY_ENGINE_OPTIONS=_database_engine_options(),
@@ -414,6 +423,8 @@ def create_app(test_config=None):
             and not current_user.is_admin
             and not verified_device_count(current_user.id)
             and request.endpoint not in {
+                "home",
+                "contact_message",
                 "login",
                 "register",
                 "logout",
@@ -724,7 +735,42 @@ def create_app(test_config=None):
             return url_for("device_verification")
         return next_url or url_for("dashboard")
 
-    @app.route("/", methods=["GET", "POST"])
+    @app.get("/")
+    def home():
+        """Public homepage: Home, About, the system portal, and Contact us."""
+        return render_template(
+            "home.html",
+            contact_email=app.config.get("CONTACT_RECIPIENT")
+            or app.config.get("MAIL_DEFAULT_SENDER")
+            or "",
+            year=datetime.now(timezone.utc).year,
+        )
+
+    @app.post("/contact")
+    def contact_message():
+        """"Contact us" form: emails the message to the DevMonitor inbox."""
+        # Bots fill the hidden "website" field; pretend success and send nothing.
+        if (request.form.get("website") or "").strip():
+            return jsonify(message="Thanks! Your message has been sent.")
+        now = time.time()
+        recent = [
+            stamp for stamp in session.get("contact_sent_at", [])
+            if isinstance(stamp, (int, float)) and now - stamp < CONTACT_WINDOW_SECONDS
+        ]
+        if len(recent) >= CONTACT_MAX_PER_WINDOW:
+            return jsonify(
+                error="You have sent several messages already. Please try again in a few minutes."
+            ), 429
+        try:
+            contact = validate_contact_message(request.form)
+            send_contact_message(contact)
+        except ValidationError as error:
+            return jsonify(error=str(error)), 400
+        except EmailDeliveryError as error:
+            return jsonify(error=str(error)), 503
+        session["contact_sent_at"] = recent + [now]
+        return jsonify(message="Thanks! Your message has been sent. We will reply by email.")
+
     @app.route("/login", methods=["GET", "POST"])
     def login():
         if current_user.is_authenticated and request.method == "GET":
