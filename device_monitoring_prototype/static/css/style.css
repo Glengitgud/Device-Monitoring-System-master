@@ -27,6 +27,10 @@
     --dm-text-muted: #b6c3d1;
     --dm-text-dim: #9aa8ba;
 
+    /* Bootstrap's .text-muted / .text-body-secondary read this variable; its
+       default dark grey is unreadable on the purple surfaces. */
+    --bs-secondary-color: var(--dm-text-muted);
+
     /* Metrics */
     --sidebar-width: 250px;
     --top-navbar-height: 60px;
@@ -424,6 +428,15 @@ code {
 
 .content-card-body {
     padding: 1.35rem;
+}
+
+/* Secondary text inside cards and modals uses the theme's muted colour at every
+   screen size. (A copy of this rule further down sits inside the phone-only
+   media query, so on wider screens Bootstrap's dark grey was used and the text
+   was nearly invisible on the purple surfaces.) */
+.content-card .text-muted,
+.modal-content .text-muted {
+    color: var(--dm-text-muted) !important;
 }
 
 /* =============================================================
@@ -1942,6 +1955,21 @@ code {
     font-weight: 600;
 }
 
+/* Device details page: the ID / type / status / owner line and the
+   "nothing recorded yet" messages. */
+.device-meta {
+    color: var(--dm-text);
+    opacity: 0.9;
+}
+
+.device-empty-state {
+    padding: 0.85rem 1rem;
+    color: var(--dm-text);
+    background: var(--dm-surface);
+    border: 1px dashed rgba(182, 195, 209, 0.3);
+    border-radius: var(--radius-md);
+}
+
 .device-scan-success {
     color: var(--dm-text);
     background: var(--dm-surface);
@@ -2142,4 +2170,174 @@ code {
 
 .dl-card.is-pending .dl-status .bi-tools {
     color: #fbbf24;
+}
+
+
+/* =============================================================
+   LIVE MONITORING (opt-in heartbeats)
+   ============================================================= */
+
+.live-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.live-indicator.is-off {
+    background: rgba(148, 163, 184, 0.12);
+    color: var(--dm-text-dim);
+}
+
+.live-indicator-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 0 currentColor;
+    animation: live-pulse 2s ease-out infinite;
+}
+
+.live-indicator.is-off .live-indicator-dot {
+    animation: none;
+}
+
+@keyframes live-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
+    70% { box-shadow: 0 0 0 0.45rem rgba(52, 211, 153, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+}
+
+/* Dashboard table cell */
+.live-usage-link {
+    color: inherit;
+    text-decoration: none;
+}
+
+.live-usage {
+    display: grid;
+    gap: 0.25rem;
+    min-width: 11rem;
+}
+
+.live-usage.is-stale {
+    opacity: 0.55;
+}
+
+.live-meter {
+    display: grid;
+    grid-template-columns: 2.1rem 1fr 2.4rem;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.75rem;
+}
+
+.live-meter-label {
+    color: var(--dm-text-dim);
+    font-weight: 600;
+}
+
+.live-meter-track {
+    height: 0.4rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.live-meter-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    transition: width 0.6s ease, background-color 0.6s ease;
+}
+
+.live-meter-value {
+    color: var(--dm-text);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.live-net {
+    display: flex;
+    gap: 0.75rem;
+    color: var(--dm-text-muted);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.live-net .bi-arrow-down { color: #4ade80; }
+.live-net .bi-arrow-up { color: #f472b6; }
+
+.live-off {
+    color: var(--dm-text-dim);
+    font-size: 0.8rem;
+}
+
+/* Device page tiles */
+.live-meta {
+    color: var(--dm-text-muted);
+}
+
+.live-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+    gap: 0.75rem;
+}
+
+#liveMonitoringPanel.is-stale .live-grid {
+    opacity: 0.6;
+}
+
+.live-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--dm-border);
+    border-radius: var(--radius-md);
+    background: var(--dm-surface);
+}
+
+.live-tile-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+
+.live-tile-label {
+    color: var(--dm-text-muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.live-tile-value {
+    color: #ffffff;
+    font-size: 1.25rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.live-sparkline {
+    width: 100%;
+    height: 2.5rem;
+    display: block;
+}
+
+.live-tile-note {
+    min-height: 1.1rem;
+    color: var(--dm-text-dim);
+    font-size: 0.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .live-indicator-dot { animation: none; }
+    .live-meter-fill { transition: none; }
 }

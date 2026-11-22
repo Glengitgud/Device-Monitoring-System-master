@@ -257,6 +257,15 @@ class Device(db.Model):
         onupdate=func.current_timestamp(),
     )
     last_seen_at = db.Column(db.DateTime(timezone=True))
+    # Opt-in live monitoring: SHA-256 of the agent's heartbeat credential.
+    # Enabled only after the device user consents; cleared when monitoring stops.
+    monitoring_token_hash = db.Column(db.String(64), unique=True)
+    monitoring_enabled_at = db.Column(db.DateTime(timezone=True))
+    monitoring_stopped_at = db.Column(db.DateTime(timezone=True))
+
+    @property
+    def monitoring_active(self):
+        return bool(self.monitoring_token_hash and self.monitoring_enabled_at)
 
     owner = db.relationship(
         "User", foreign_keys=[owner_user_id], back_populates="owned_devices"
@@ -571,6 +580,8 @@ class DeviceMetric(db.Model):
     storage_used_bytes = db.Column(ID_TYPE)
     network_rx_bytes = db.Column(ID_TYPE)
     network_tx_bytes = db.Column(ID_TYPE)
+    network_rx_bytes_per_sec = db.Column(ID_TYPE)
+    network_tx_bytes_per_sec = db.Column(ID_TYPE)
     collected_at = db.Column(
         db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
     )

@@ -1751,6 +1751,550 @@ def resolve_link_enrollment(link, *, interactive):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Opt-in live monitoring
+# ---------------------------------------------------------------------------
+# Runs only after the device user agrees (consent prompt after registration).
+# It is visible and stoppable: a "DevMonitor Live Monitoring" startup entry
+# (Task Manager > Startup apps), a minimised console window titled as such,
+# the "Stop live monitoring" button on the website, and "--stop-monitoring".
+# Only usage figures are sent: CPU, memory, storage and network throughput.
+#
+# Platform-specific pieces are the five functions marked "platform hook";
+# Linux/macOS support can be added by implementing them for those systems.
+
+HEARTBEAT_PATH = "/api/device-agent/heartbeat"
+MONITORING_ENABLE_PATH = "/api/device-agent/monitoring/enable"
+MONITORING_STOP_PATH = "/api/device-agent/monitoring/stop"
+HEARTBEAT_INTERVAL_SECONDS = 30
+MONITOR_STARTUP_NAME = "DevMonitor Live Monitoring"
+MONITOR_CONFIG_NAME = "monitoring.json"
+MONITOR_PID_NAME = "monitoring.pid"
+MONITOR_EXECUTABLE_NAME = "devmonitor-device-agent.exe"
+MONITOR_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+MONITOR_MUTEX_NAME = "Local\\DevMonitorLiveMonitoring"
+MONITOR_CONSOLE_TITLE = "DevMonitor live monitoring is ON"
+_MONITOR_MUTEX = None
+CONSENT_TEXT = (
+    "DevMonitor can keep this device's dashboard up to date. When turned on it "
+    "runs in the background whenever you sign in to Windows and sends this "
+    "device's CPU, memory, storage and network usage to {server} every "
+    f"{HEARTBEAT_INTERVAL_SECONDS} seconds.\n\n"
+    "It does not collect files, keystrokes, screenshots, browsing history or "
+    "the contents of your network traffic.\n\n"
+    "You can stop it at any time: click \"Stop live monitoring\" on this "
+    "device's page in DevMonitor, or run this agent with --stop-monitoring. "
+    f"It appears as \"{MONITOR_STARTUP_NAME}\" in Task Manager > Startup apps."
+)
+
+
+def monitoring_supported():
+    return sys.platform == "win32"
+
+
+def monitoring_directory():
+    return Path(
+        os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+    ) / "DevMonitor"
+
+
+def _server_base(url):
+    """scheme://host[:port] of a DevMonitor URL; HTTPS unless it is local."""
+    parts = urlsplit(url or "")
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("The DevMonitor server address is invalid.")
+    if parts.scheme != "https" and parts.hostname not in LOCAL_HOSTS:
+        raise ValueError("For your security the DevMonitor server must use HTTPS.")
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = [
+        ("cbData", ctypes.wintypes.DWORD),
+        ("pbData", ctypes.POINTER(ctypes.c_char)),
+    ]
+
+
+def _dpapi(data, protect):
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    buffer = ctypes.create_string_buffer(data, len(data))
+    blob_in = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+    blob_out = _DataBlob()
+    ui_forbidden = 0x01
+    if protect:
+        ok = crypt32.CryptProtectData(
+            ctypes.byref(blob_in), "DevMonitor monitoring credential",
+            None, None, None, ui_forbidden, ctypes.byref(blob_out),
+        )
+    else:
+        ok = crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None, ui_forbidden,
+            ctypes.byref(blob_out),
+        )
+    if not ok:
+        raise OSError(ctypes.get_last_error(), "Windows could not protect the credential.")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(blob_out.pbData, ctypes.c_void_p))
+
+
+def _protect_secret(secret):  # platform hook
+    """Encrypt for the signed-in Windows user only (DPAPI)."""
+    import base64
+
+    return base64.b64encode(_dpapi(secret.encode("utf-8"), protect=True)).decode("ascii")
+
+
+def _unprotect_secret(protected):  # platform hook
+    import base64
+
+    return _dpapi(base64.b64decode(protected), protect=False).decode("utf-8")
+
+
+def _register_autostart(command):  # platform hook
+    """Start monitoring at sign-in for this user only (no administrator rights)."""
+    import winreg
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, MONITOR_RUN_KEY) as key:
+        winreg.SetValueEx(key, MONITOR_STARTUP_NAME, 0, winreg.REG_SZ, command)
+
+
+def _remove_autostart():  # platform hook
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, MONITOR_RUN_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.DeleteValue(key, MONITOR_STARTUP_NAME)
+    except FileNotFoundError:
+        pass
+
+
+def _acquire_single_instance():  # platform hook
+    """True when this is the only monitor running for the signed-in user."""
+    global _MONITOR_MUTEX
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+    handle = kernel32.CreateMutexW(None, False, MONITOR_MUTEX_NAME)
+    already_exists = ctypes.get_last_error() == 183
+    if not handle or already_exists:
+        return False
+    _MONITOR_MUTEX = handle
+    return True
+
+
+def _show_monitor_console():
+    """Keep the monitor visible but out of the way: titled and minimised."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.kernel32.SetConsoleTitleW(
+            f"{MONITOR_CONSOLE_TITLE} - close this window to pause until next sign-in"
+        )
+        window = ctypes.windll.kernel32.GetConsoleWindow()
+        if window:
+            ctypes.windll.user32.ShowWindow(window, 6)  # SW_MINIMIZE
+    except (AttributeError, OSError):
+        LOGGER.warning("Could not adjust the monitoring console window.", exc_info=True)
+
+
+def _monitor_command():
+    """Command line that starts the background monitor from a stable location."""
+    import shutil
+    import subprocess
+
+    if getattr(sys, "frozen", False):
+        target = monitoring_directory() / MONITOR_EXECUTABLE_NAME
+        source = Path(sys.executable).resolve()
+        if source != target.resolve():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        arguments = [str(target), "--monitor"]
+    else:
+        arguments = [sys.executable, str(Path(__file__).resolve()), "--monitor"]
+    return arguments, subprocess.list2cmdline(arguments)
+
+
+def _launch_monitor(arguments):
+    import subprocess
+
+    startup = None
+    flags = 0
+    if os.name == "nt":
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = 7  # SW_SHOWMINNOACTIVE
+        flags = subprocess.CREATE_NEW_CONSOLE
+    subprocess.Popen(arguments, creationflags=flags, startupinfo=startup, close_fds=True)
+
+
+def save_monitoring_config(server, device_id, token):
+    directory = monitoring_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    config = {
+        "server": server,
+        "device_id": device_id,
+        "credential": _protect_secret(token),
+        "enabled_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    (directory / MONITOR_CONFIG_NAME).write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def load_monitoring_config():
+    path = monitoring_directory() / MONITOR_CONFIG_NAME
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            "server": _server_base(config["server"]),
+            "device_id": config.get("device_id"),
+            "token": _unprotect_secret(config["credential"]),
+        }
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        LOGGER.exception("The live monitoring settings could not be read.")
+        return None
+
+
+def remove_local_monitoring():
+    """Remove the startup entry and the stored credential from this device."""
+    try:
+        _remove_autostart()
+    except OSError:
+        LOGGER.exception("Could not remove the live monitoring startup entry.")
+    for name in (MONITOR_CONFIG_NAME, MONITOR_PID_NAME):
+        try:
+            (monitoring_directory() / name).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            LOGGER.exception("Could not delete %s.", name)
+
+
+def _post_agent_json(url, token, payload, timeout=15):
+    """POST JSON with a bearer credential. Returns (status, decoded body)."""
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": f"DevMonitor-Agent/{AGENT_VERSION}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = getattr(response, "status", None) or response.getcode()
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        status, body = error.code, error.read().decode("utf-8", errors="replace")
+    try:
+        return status, json.loads(body) if body else {}
+    except ValueError:
+        return status, {}
+
+
+def _storage_usage():
+    used = total = 0
+    for partition in psutil.disk_partitions(all=False):
+        options = (partition.opts or "").lower()
+        if "cdrom" in options or not partition.fstype:
+            continue
+        try:
+            usage = psutil.disk_usage(partition.mountpoint)
+        except (OSError, PermissionError):
+            continue
+        used += int(usage.used)
+        total += int(usage.total)
+    if not total:
+        return None, None
+    return round(used / total * 100, 2), used
+
+
+def _network_counters():
+    """Bytes received/sent across real adapters (loopback excluded)."""
+    received = sent = 0
+    for name, counters in psutil.net_io_counters(pernic=True).items():
+        lowered = name.lower()
+        if lowered == "lo" or lowered.startswith("loopback"):
+            continue
+        received += int(counters.bytes_recv)
+        sent += int(counters.bytes_sent)
+    return received, sent
+
+
+class LiveMetricSampler:
+    """Collects one heartbeat sample; throughput is the counter delta per second."""
+
+    def __init__(self, clock=None):
+        import time
+
+        self._clock = clock or time.monotonic
+        psutil.cpu_percent(interval=None)  # primes the CPU counter
+        self._previous = self._read_counters()
+
+    def _read_counters(self):
+        try:
+            return (*_network_counters(), self._clock())
+        except (psutil.Error, OSError):
+            LOGGER.exception("Network counters are unavailable.")
+            return None
+
+    def sample(self):
+        sample = {}
+        try:
+            sample["cpu_percent"] = round(float(psutil.cpu_percent(interval=None)), 2)
+        except (psutil.Error, OSError):
+            sample["cpu_percent"] = None
+        try:
+            memory = psutil.virtual_memory()
+            sample["memory_percent"] = round(float(memory.percent), 2)
+            sample["memory_used_bytes"] = int(memory.used)
+        except (psutil.Error, OSError):
+            sample["memory_percent"] = sample["memory_used_bytes"] = None
+        sample["storage_percent"], sample["storage_used_bytes"] = _storage_usage()
+
+        current = self._read_counters()
+        sample["network_rx_bytes_per_sec"] = sample["network_tx_bytes_per_sec"] = None
+        sample["network_rx_bytes"] = current[0] if current else None
+        sample["network_tx_bytes"] = current[1] if current else None
+        previous, self._previous = self._previous, current
+        if previous and current:
+            elapsed = current[2] - previous[2]
+            received, sent = current[0] - previous[0], current[1] - previous[1]
+            # A negative delta means the counters were reset (adapter restart,
+            # sleep/resume); that interval has no valid speed.
+            if elapsed > 0 and received >= 0 and sent >= 0:
+                sample["network_rx_bytes_per_sec"] = int(received / elapsed)
+                sample["network_tx_bytes_per_sec"] = int(sent / elapsed)
+        return sample
+
+
+def send_heartbeat(config, sample):
+    """Returns "ok", "revoked", or "retry"."""
+    try:
+        status, body = _post_agent_json(config["server"] + HEARTBEAT_PATH, config["token"], sample)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        LOGGER.warning("Heartbeat could not reach the server; retrying next interval.", exc_info=True)
+        return "retry"
+    if status == 201:
+        return "ok"
+    if status == 401 and body.get("monitoring") == "revoked":
+        return "revoked"
+    LOGGER.warning("Heartbeat was not accepted (HTTP %s): %s", status, body.get("error"))
+    return "retry"
+
+
+def run_monitor(sleep=None, max_beats=None):
+    """Background loop started at sign-in. Returns a process exit code."""
+    import time
+
+    sleep = sleep or time.sleep
+    config = load_monitoring_config()
+    if config is None:
+        print("Live monitoring is not turned on for this device.")
+        return 2
+    if not _acquire_single_instance():
+        print("DevMonitor live monitoring is already running.")
+        return 0
+    _show_monitor_console()
+    pid_path = monitoring_directory() / MONITOR_PID_NAME
+    try:
+        pid_path.write_text(str(os.getpid()), encoding="ascii")
+    except OSError:
+        LOGGER.warning("Could not record the monitoring process ID.", exc_info=True)
+    print(MONITOR_CONSOLE_TITLE + ".")
+    print(f"Sending CPU, memory, storage and network usage to {config['server']} "
+          f"every {HEARTBEAT_INTERVAL_SECONDS} seconds.")
+    print("Stop it from the device page in DevMonitor or run this agent with --stop-monitoring.")
+    LOGGER.info("Live monitoring started (device_id=%s).", config.get("device_id"))
+
+    sampler = LiveMetricSampler()
+    beats = 0
+    try:
+        while max_beats is None or beats < max_beats:
+            sleep(HEARTBEAT_INTERVAL_SECONDS)
+            result = send_heartbeat(config, sampler.sample())
+            beats += 1
+            if result == "revoked":
+                LOGGER.info("Live monitoring was stopped from DevMonitor; removing it from this device.")
+                print("Live monitoring was stopped from DevMonitor. It has been removed from this device.")
+                remove_local_monitoring()
+                return 0
+    except KeyboardInterrupt:
+        LOGGER.info("Live monitoring paused by the user until next sign-in.")
+    finally:
+        try:
+            pid_path.unlink()
+        except OSError:
+            pass
+    return 0
+
+
+def _stop_running_monitor():
+    """End a running monitor process recorded in the PID file."""
+    try:
+        pid = int((monitoring_directory() / MONITOR_PID_NAME).read_text(encoding="ascii"))
+    except (OSError, ValueError):
+        return
+    if pid == os.getpid():
+        return
+    try:
+        process = psutil.Process(pid)
+        if "--monitor" in process.cmdline():
+            process.terminate()
+    except (psutil.Error, OSError):
+        LOGGER.warning("Could not end the running monitor process.", exc_info=True)
+
+
+def stop_live_monitoring():
+    """--stop-monitoring: tell the server, then remove everything locally."""
+    config = load_monitoring_config()
+    if config is not None:
+        try:
+            _post_agent_json(config["server"] + MONITORING_STOP_PATH, config["token"], {})
+        except (urllib.error.URLError, TimeoutError, OSError):
+            LOGGER.warning("Could not tell the server that monitoring stopped.", exc_info=True)
+            print("The server could not be reached; it will show this device as Offline.")
+    _stop_running_monitor()
+    remove_local_monitoring()
+    LOGGER.info("Live monitoring stopped on this device.")
+    print("Live monitoring is off. Nothing more will be sent from this device.")
+    return 0
+
+
+def enable_live_monitoring(server, device_id, token):
+    """Confirm consent with the server, then set up the background monitor."""
+    try:
+        status, body = _post_agent_json(server + MONITORING_ENABLE_PATH, token, {})
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        LOGGER.exception("Live monitoring could not be enabled.")
+        print(f"Live monitoring could not be turned on: {error}", file=sys.stderr)
+        return False
+    if status != 200 or body.get("monitoring") != "enabled":
+        print(
+            f"Live monitoring could not be turned on: {body.get('error') or f'HTTP {status}'}",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        arguments, command = _monitor_command()
+        save_monitoring_config(server, device_id, token)
+        _register_autostart(command)
+        _launch_monitor(arguments)
+    except (OSError, ValueError):
+        LOGGER.exception("Live monitoring could not be set up on this device.")
+        print("Live monitoring could not be set up on this device; it has been turned off.",
+              file=sys.stderr)
+        try:
+            _post_agent_json(server + MONITORING_STOP_PATH, token, {})
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+        remove_local_monitoring()
+        return False
+    LOGGER.info("Live monitoring enabled (device_id=%s).", device_id)
+    print(
+        f"Live monitoring is ON. It starts automatically when you sign in "
+        f"(\"{MONITOR_STARTUP_NAME}\" in Task Manager > Startup apps)."
+    )
+    return True
+
+
+def ask_monitoring_consent_window(server):  # pragma: no cover - needs a display
+    """Opt-in dialog. "Not now" is the default; closing the window also declines."""
+    import tkinter as tk
+
+    theme = AGENT_THEME
+    _enable_dpi_awareness()
+    root = tk.Tk()
+    root.title("Turn on live monitoring?")
+    root.resizable(False, False)
+    root.configure(background=theme["background"])
+    scale = _pixel_scale(root)
+
+    def px(value):
+        return int(round(value * scale))
+
+    choice = {"enable": False}
+    body = tk.Frame(root, background=theme["background"], padx=px(32), pady=px(26))
+    body.pack(fill="both", expand=True)
+    tk.Label(
+        body, text="Turn on live monitoring?", font=(FONT_FAMILY, 15, "bold"),
+        foreground=theme["text"], background=theme["background"],
+    ).pack(anchor="w")
+    tk.Label(
+        body, text=CONSENT_TEXT.format(server=server), font=(FONT_FAMILY, 10),
+        foreground=theme["muted"], background=theme["background"],
+        wraplength=px(440), justify="left",
+    ).pack(anchor="w", pady=(px(10), px(18)))
+    buttons = tk.Frame(body, background=theme["background"])
+    buttons.pack(fill="x")
+
+    def finish(enable):
+        choice["enable"] = enable
+        root.destroy()
+
+    def button(text, command, primary):
+        return tk.Button(
+            buttons, text=text, command=command, font=(FONT_FAMILY, 10, "bold"),
+            background=theme["accent"] if primary else theme["surface_alt"],
+            foreground="#ffffff",
+            activebackground=theme["accent_active"] if primary else theme["border"],
+            activeforeground="#ffffff", relief="flat", borderwidth=0,
+            highlightthickness=0, cursor="hand2", padx=px(18), pady=px(9),
+        )
+
+    not_now = button("Not now", lambda: finish(False), primary=False)
+    not_now.pack(side="right")
+    button("Turn on live monitoring", lambda: finish(True), primary=True).pack(
+        side="right", padx=(0, px(10))
+    )
+    root.bind("<Escape>", lambda _event: finish(False))
+    root.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+    root.update_idletasks()
+    _place_window(root, body.winfo_reqwidth(), body.winfo_reqheight())
+    _bring_to_front(root)
+    not_now.focus_set()
+    root.mainloop()
+    return choice["enable"]
+
+
+def offer_live_monitoring(args, monitoring, device_id, use_window):
+    """Ask the device user; enable only on an explicit yes."""
+    token = monitoring.get("token") if isinstance(monitoring, dict) else None
+    if not token or not monitoring_supported():
+        return False
+    try:
+        server = _server_base(SUBMISSION_URL)
+    except ValueError:
+        LOGGER.exception("Live monitoring was not offered: invalid server address.")
+        return False
+    if args.yes:
+        agreed = bool(args.enable_monitoring)
+    else:
+        agreed = None
+        if use_window:
+            try:
+                agreed = ask_monitoring_consent_window(urlsplit(server).netloc)
+            except Exception:
+                LOGGER.exception("The monitoring consent window could not be shown.")
+        if agreed is None:
+            print("\nTurn on live monitoring?\n")
+            print(CONSENT_TEXT.format(server=urlsplit(server).netloc))
+            answer = input("\nType yes to turn on live monitoring (press Enter to skip): ")
+            agreed = answer.strip().casefold() in {"yes", "y"}
+    if not agreed:
+        LOGGER.info("Live monitoring was not enabled (the user declined).")
+        print("Live monitoring is off. You can link the device again later to turn it on.")
+        return False
+    return enable_live_monitoring(server, device_id, token)
+
+
 def _guess_device_type():
     try:
         return "Laptop" if psutil.sensors_battery() is not None else "Desktop"
@@ -1765,6 +2309,22 @@ def _parse_arguments(argv):
     parser.add_argument("--name", help="device name to use with --yes")
     parser.add_argument("--device-type", choices=["Desktop", "Laptop"], help="used with --yes")
     parser.add_argument("--version", action="version", version=AGENT_VERSION)
+    monitoring = parser.add_mutually_exclusive_group()
+    monitoring.add_argument(
+        "--monitor",
+        action="store_true",
+        help="run live monitoring (started at sign-in once you have turned it on)",
+    )
+    monitoring.add_argument(
+        "--stop-monitoring",
+        action="store_true",
+        help="turn live monitoring off on this device and tell DevMonitor",
+    )
+    parser.add_argument(
+        "--enable-monitoring",
+        action="store_true",
+        help="with --yes: also turn on live monitoring (you consent to it)",
+    )
     parser.add_argument(
         "--print-specs",
         action="store_true",
@@ -1797,6 +2357,10 @@ def main(argv=None):
 
     args = _parse_arguments(sys.argv[1:] if argv is None else argv)
     log_path = configure_logging()
+    if args.monitor:
+        return run_monitor()
+    if args.stop_monitoring:
+        return stop_live_monitoring()
     if args.print_specs:
         try:
             print(json.dumps(
@@ -1925,6 +2489,12 @@ def main(argv=None):
             headers={
                 "Authorization": f"Bearer {authorization_token}",
                 "Content-Type": "application/json",
+                # Lets the server offer opt-in live monitoring to this agent.
+                **(
+                    {"X-DevMonitor-Monitoring": "supported"}
+                    if not scanner_mode and monitoring_supported()
+                    else {}
+                ),
             },
             method="POST",
         )
@@ -1994,6 +2564,12 @@ def main(argv=None):
     else:
         LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
         print(f"Device Registered Successfully (Device ID: {result['device_id']}).")
+        offer_live_monitoring(
+            args,
+            result.get("monitoring"),
+            result["device_id"],
+            use_window=reviewed is not None,
+        )
         if args.yes:
             return 0
         try:
@@ -2018,6 +2594,6 @@ def _pause_before_closing():
 
 if __name__ == "__main__":
     exit_code = main()
-    if "--yes" not in sys.argv[1:] and "--print-specs" not in sys.argv[1:]:
+    if not {"--yes", "--print-specs", "--monitor"} & set(sys.argv[1:]):
         _pause_before_closing()
     raise SystemExit(exit_code)

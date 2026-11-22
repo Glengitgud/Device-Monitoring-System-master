@@ -21,8 +21,8 @@
 {% endif %}
 <!-- ======================================================
      DASHBOARD PAGE
-     Shows summary cards, device overview table,
-     and simulated resource monitoring.
+     Shows summary cards and the device overview table with
+     live usage from devices whose users turned on monitoring.
      ====================================================== -->
 
 <!-- ---- Summary Cards Row ---- -->
@@ -88,8 +88,12 @@
 
 <!-- ---- Device Overview Table ---- -->
 <div class="content-card mb-4">
-    <div class="content-card-header">
+    <div class="content-card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
         <h6 class="mb-0"><i class="bi bi-table me-2"></i>Device Overview</h6>
+        <span class="live-indicator" id="liveRefreshIndicator" role="status">
+            <span class="live-indicator-dot" aria-hidden="true"></span>
+            <span id="liveRefreshText">Live · refreshing every 5 s</span>
+        </span>
     </div>
     <div class="content-card-body">
         <div class="table-responsive">
@@ -101,6 +105,7 @@
                         <th>Operating System</th>
                         <th>Processor (CPU)</th>
                         <th>RAM</th>
+                        <th>Live Usage</th>
                         <th>Health</th>
                         <th>Status</th>
                     </tr>
@@ -114,7 +119,9 @@
 </div>
 
 <div class="alert alert-info" role="note">
-Health scores reflect the latest user-approved, one-time Device Scanner result; live resource monitoring is not enabled.
+Live usage appears only for devices whose user turned on live monitoring in the DevMonitor Agent;
+it updates every 30 seconds and the device shows Offline after 90 seconds without an update.
+Health scores reflect the latest user-approved Device Scanner result.
 </div>
 
 {% endblock %}

@@ -137,8 +137,18 @@ from device_monitoring_prototype.models import (
     db,
 )
 from device_monitoring_prototype.services import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    MONITORING_ACTIVATION_WINDOW,
+    MONITORING_OFFLINE_AFTER,
     DatabaseSetupError,
+    HeartbeatRateLimitError,
+    MonitoringCredentialError,
     ValidationError,
+    enable_device_monitoring,
+    issue_monitoring_credential,
+    record_device_heartbeat,
+    stop_device_monitoring,
+    stop_monitoring_from_agent,
     archive_device,
     create_device,
     create_user,
@@ -159,6 +169,12 @@ from device_monitoring_prototype.services import (
     update_user,
 )
 
+
+# Live monitoring: the dashboard polls this often; responses stay small.
+DASHBOARD_REFRESH_SECONDS = 5
+DEVICE_DETAILS_METRIC_LIMIT = 20
+# 24 hours at one sample per 30 seconds.
+METRICS_RESPONSE_LIMIT = 2880
 
 # Homepage contact form: at most this many messages per browser session per window.
 CONTACT_MAX_PER_WINDOW = 3
@@ -453,6 +469,9 @@ def create_app(test_config=None):
         if request.method == "POST" and request.endpoint not in {
             "submit_agent_enrollment",
             "submit_agent_scan",
+            "enable_agent_monitoring",
+            "submit_agent_heartbeat",
+            "stop_agent_monitoring",
         }:
             submitted = request.headers.get("X-CSRF-Token")
             if not submitted:
@@ -625,18 +644,29 @@ def create_app(test_config=None):
             abort(404)
 
     def refresh_stale_device_statuses():
+        """Mark devices Offline when they stop checking in.
+
+        Devices with live monitoring enabled are Offline after
+        MONITORING_OFFLINE_AFTER (90 s) without a heartbeat; other devices keep
+        the five-minute rule for their last scan or registration.
+        """
         now = datetime.now(timezone.utc)
-        cutoff = now - timedelta(minutes=5)
+        monitored_cutoff = now - MONITORING_OFFLINE_AFTER
+        legacy_cutoff = now - timedelta(minutes=5)
         stale_devices = []
-        for device in Device.query.filter_by(
-            status="online", lifecycle_status="active"
-        ).all():
+        candidates = Device.query.filter(
+            Device.status == "online",
+            Device.lifecycle_status == "active",
+            or_(Device.last_seen_at.is_(None), Device.last_seen_at <= monitored_cutoff),
+        ).all()
+        for device in candidates:
             last_seen = device.last_seen_at or device.updated_at or device.registered_at
             if last_seen is None:
                 continue
             if last_seen.tzinfo is None:
                 last_seen = last_seen.replace(tzinfo=timezone.utc)
-            if last_seen <= cutoff:
+            monitored = device.monitoring_active
+            if last_seen <= (monitored_cutoff if monitored else legacy_cutoff):
                 device.status = "offline"
                 stale_devices.append(device)
                 db.session.add(
@@ -647,14 +677,67 @@ def create_app(test_config=None):
                         event_type="device.status_offline",
                         entity_type="device",
                         entity_id=device.id,
-                        details={"reason": "No successful scan or check-in within five minutes."},
+                        details={
+                            "reason": (
+                                "No live monitoring heartbeat within 90 seconds."
+                                if monitored
+                                else "No successful scan or check-in within five minutes."
+                            )
+                        },
                     )
                 )
         if stale_devices:
             db.session.commit()
 
-    def serialize_device(device):
+    def serialize_metric(metric):
+        def number(value):
+            return float(value) if value is not None else None
+
+        collected_at = metric.collected_at
+        if collected_at is not None and collected_at.tzinfo is None:
+            collected_at = collected_at.replace(tzinfo=timezone.utc)
+        return {
+            "cpuPercent": number(metric.cpu_percent),
+            "memoryPercent": number(metric.memory_percent),
+            "storagePercent": number(metric.storage_percent),
+            "memoryUsedBytes": metric.memory_used_bytes,
+            "storageUsedBytes": metric.storage_used_bytes,
+            "networkRxBytesPerSec": metric.network_rx_bytes_per_sec,
+            "networkTxBytesPerSec": metric.network_tx_bytes_per_sec,
+            "collectedAt": collected_at.isoformat() if collected_at else None,
+        }
+
+    def latest_metrics_for(devices):
+        """Newest sample for each monitored device, in one query."""
+        ids = [device.id for device in devices if device.monitoring_active]
+        if not ids:
+            return {}
+        newest = (
+            db.session.query(func.max(DeviceMetric.id))
+            .filter(DeviceMetric.device_id.in_(ids))
+            .group_by(DeviceMetric.device_id)
+        )
+        return {
+            metric.device_id: metric
+            for metric in DeviceMetric.query.filter(DeviceMetric.id.in_(newest))
+        }
+
+    def monitoring_payload(device):
+        enabled_at = device.monitoring_enabled_at
+        stopped_at = device.monitoring_stopped_at
+        return {
+            "enabled": device.monitoring_active,
+            "enabledAt": enabled_at.isoformat() if enabled_at else None,
+            "stoppedAt": stopped_at.isoformat() if stopped_at else None,
+            "intervalSeconds": HEARTBEAT_INTERVAL_SECONDS,
+            "offlineAfterSeconds": int(MONITORING_OFFLINE_AFTER.total_seconds()),
+        }
+
+    def serialize_device(device, latest_metrics=None):
         spec = device.hardware_spec
+        if latest_metrics is None:
+            latest_metrics = latest_metrics_for([device])
+        latest_metric = latest_metrics.get(device.id)
         latest_diagnostic = latest_completed_diagnostic(device)
         health_check = next(
             (
@@ -693,6 +776,8 @@ def create_app(test_config=None):
             "healthScore": health_scores.get("overall"),
             "healthRunId": latest_diagnostic.id if latest_diagnostic else None,
             "status": device.status.capitalize(),
+            "monitoring": monitoring_payload(device),
+            "live": serialize_metric(latest_metric) if latest_metric else None,
             "isVerified": device.is_verified,
             "lifecycleStatus": device.lifecycle_status,
             "archivedAt": device.archived_at.isoformat() if device.archived_at else "",
@@ -1267,6 +1352,7 @@ def create_app(test_config=None):
                 has_specification=specification is not None,
                 registration_history=registration_history,
                 diagnostic_history=diagnostic_history,
+                monitoring=monitoring_payload(device),
             )
         except SQLAlchemyError:
             db.session.rollback()
@@ -2204,13 +2290,76 @@ def create_app(test_config=None):
             return api_error(error, 401)
         except ValidationError as error:
             return api_error(error)
+        payload = {
+            "device_id": device.id,
+            "asset_tag": device.asset_tag,
+            "name": device.device_name,
+            "owner_user_id": device.owner_user_id,
+            "registered_at": device.registered_at.isoformat(),
+        }
+        if request.headers.get("X-DevMonitor-Monitoring", "").strip().lower() == "supported":
+            # Inactive until the device user agrees in the agent (see enable_agent_monitoring).
+            payload["monitoring"] = {
+                "token": issue_monitoring_credential(device),
+                "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
+                "consent_window_seconds": int(MONITORING_ACTIVATION_WINDOW.total_seconds()),
+            }
+        return jsonify(payload), 201
+
+    def agent_bearer_token():
+        scheme, separator, token = request.headers.get("Authorization", "").partition(" ")
+        if not separator or scheme.casefold() != "bearer":
+            return None
+        return token.strip()
+
+    def monitoring_refused(error):
+        return jsonify(error=str(error), monitoring="revoked"), 401
+
+    @app.post("/api/device-agent/monitoring/enable")
+    def enable_agent_monitoring():
+        token = agent_bearer_token()
+        if not token:
+            return monitoring_refused("A monitoring credential is required.")
+        try:
+            device = enable_device_monitoring(token)
+        except MonitoringCredentialError as error:
+            return monitoring_refused(error)
+        app.logger.info("Live monitoring enabled (device_id=%s).", device.id)
         return jsonify(
             device_id=device.id,
-            asset_tag=device.asset_tag,
-            name=device.device_name,
-            owner_user_id=device.owner_user_id,
-            registered_at=device.registered_at.isoformat(),
+            monitoring="enabled",
+            heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS,
+        )
+
+    @app.post("/api/device-agent/heartbeat")
+    def submit_agent_heartbeat():
+        token = agent_bearer_token()
+        if not token:
+            return monitoring_refused("A monitoring credential is required.")
+        try:
+            device, sample = record_device_heartbeat(token, api_data())
+        except MonitoringCredentialError as error:
+            return monitoring_refused(error)
+        except HeartbeatRateLimitError as error:
+            response = api_error(error, 429)
+            response[0].headers["Retry-After"] = str(HEARTBEAT_INTERVAL_SECONDS)
+            return response
+        except ValidationError as error:
+            return api_error(error)
+        return jsonify(
+            device_id=device.id,
+            status=device.status,
+            next_heartbeat_seconds=HEARTBEAT_INTERVAL_SECONDS,
         ), 201
+
+    @app.post("/api/device-agent/monitoring/stop")
+    def stop_agent_monitoring():
+        token = agent_bearer_token()
+        device = stop_monitoring_from_agent(token) if token else None
+        if device is not None:
+            app.logger.info("Live monitoring stopped on the device (device_id=%s).", device.id)
+        # Same answer either way: the agent removes its local setup regardless.
+        return jsonify(monitoring="stopped")
 
     @app.post("/api/device-agent/scans/<int:run_id>")
     def submit_agent_scan(run_id):
@@ -2262,11 +2411,10 @@ def create_app(test_config=None):
                     Device.registered_by_user_id == current_user.id,
                 )
             )
+        devices = query.order_by(Device.id.desc()).all()
+        latest_metrics = latest_metrics_for(devices)
         response = jsonify(
-            [
-                serialize_device(device)
-                for device in query.order_by(Device.id.desc()).all()
-            ]
+            [serialize_device(device, latest_metrics) for device in devices]
         )
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -2495,14 +2643,15 @@ def create_app(test_config=None):
                     "storage_used_bytes": metric.storage_used_bytes,
                     "network_rx_bytes": metric.network_rx_bytes,
                     "network_tx_bytes": metric.network_tx_bytes,
+                    "network_rx_bytes_per_sec": metric.network_rx_bytes_per_sec,
+                    "network_tx_bytes_per_sec": metric.network_tx_bytes_per_sec,
                     "collected_at": metric.collected_at.isoformat(),
                 }
-                for metric in sorted(
-                    device.metric_samples,
-                    key=lambda item: item.collected_at,
-                    reverse=True,
-                )
+                for metric in DeviceMetric.query.filter_by(device_id=device.id)
+                .order_by(DeviceMetric.collected_at.desc(), DeviceMetric.id.desc())
+                .limit(DEVICE_DETAILS_METRIC_LIMIT)
             ],
+            monitoring=monitoring_payload(device),
             logs=[
                 {
                     "id": entry.id,
@@ -2648,6 +2797,57 @@ def create_app(test_config=None):
         )
         return response
 
+    @app.post("/api/devices/<int:device_id>/monitoring/stop")
+    @login_required
+    def stop_device_monitoring_route(device_id):
+        device = db.get_or_404(Device, device_id)
+        can_access_device(device)
+        stop_device_monitoring(
+            device,
+            actor=current_user,
+            reason="stopped_by_administrator" if current_user.is_admin else "stopped_by_owner",
+        )
+        return jsonify(serialize_device(device))
+
+    @app.get("/api/devices/<int:device_id>/metrics")
+    @login_required
+    def device_metrics(device_id):
+        """Live samples for charts; ``since`` returns only newer samples for polling."""
+        refresh_stale_device_statuses()
+        device = db.get_or_404(Device, device_id)
+        can_access_device(device)
+        minutes = request.args.get("minutes", default=60, type=int) or 60
+        minutes = max(5, min(minutes, 24 * 60))
+        window_start = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        query = DeviceMetric.query.filter(
+            DeviceMetric.device_id == device.id,
+            DeviceMetric.collected_at >= window_start,
+        )
+        since = request.args.get("since", "").strip()
+        if since:
+            try:
+                since_at = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            except ValueError:
+                return api_error("since must be an ISO 8601 timestamp.")
+            if since_at.tzinfo is None:
+                since_at = since_at.replace(tzinfo=timezone.utc)
+            query = query.filter(DeviceMetric.collected_at > since_at)
+        samples = (
+            query.order_by(DeviceMetric.collected_at.desc(), DeviceMetric.id.desc())
+            .limit(METRICS_RESPONSE_LIMIT)
+            .all()
+        )
+        samples.reverse()
+        response = jsonify(
+            device_id=device.id,
+            status=device.status.capitalize(),
+            last_seen_at=device.last_seen_at.isoformat() if device.last_seen_at else None,
+            monitoring=monitoring_payload(device),
+            samples=[serialize_metric(sample) for sample in samples],
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/api/devices/<int:device_id>/scans/<int:run_id>")
     @login_required
     def diagnostic_run_status(device_id, run_id):
@@ -2789,7 +2989,10 @@ def create_app(test_config=None):
                 )
             )
         devices = query.order_by(Device.id.desc()).all()
-        serialized_devices = [serialize_device(device) for device in devices]
+        latest_metrics = latest_metrics_for(devices)
+        serialized_devices = [
+            serialize_device(device, latest_metrics) for device in devices
+        ]
         app.logger.debug(
             "Dashboard device health retrieved (user_id=%s, device_count=%d).",
             current_user.id,
@@ -2800,6 +3003,8 @@ def create_app(test_config=None):
             total=len(devices),
             online=sum(device.status == "online" for device in devices),
             offline=sum(device.status == "offline" for device in devices),
+            monitored=sum(device.monitoring_active for device in devices),
+            refresh_seconds=DASHBOARD_REFRESH_SECONDS,
         )
         response.headers["Cache-Control"] = "no-store"
         return response
