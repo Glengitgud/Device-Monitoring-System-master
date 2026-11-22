@@ -1475,7 +1475,7 @@ def review_specifications_window(
     return dict(result) if result else None
 
 
-def show_registration_success(seconds=5, dashboard_url=None):  # pragma: no cover - needs a display
+def show_registration_success(dashboard_url=None):  # pragma: no cover - needs a display
     import tkinter as tk
 
     dashboard_url = dashboard_url or DASHBOARD_URL
@@ -1504,65 +1504,45 @@ def show_registration_success(seconds=5, dashboard_url=None):  # pragma: no cove
         font=(FONT_FAMILY, 16, "bold"), foreground=theme["text"],
         background=theme["background"],
     ).pack(pady=(px(2), px(6)))
+    # No automatic browser tab: the DevMonitor page that started the linking
+    # already updates by itself. The dashboard opens only when asked for.
     tk.Label(
-        body, text="You may now proceed to the Dashboard.",
+        body,
+        text=(
+            "Your DevMonitor page in the browser has updated. "
+            "You can close this window."
+        ),
         font=(FONT_FAMILY, 10), foreground=theme["muted"],
         background=theme["background"], wraplength=px(360), justify="center",
     ).pack()
-    countdown = tk.Label(
-        body, text="", font=(FONT_FAMILY, 10, "bold"),
-        foreground=theme["muted"], background=theme["background"],
-    )
-    countdown.pack(pady=(px(14), 0))
 
-    state = {"done": False, "timer": None}
-
-    def redirect(_event=None):
-        if state["done"]:
-            return
-        state["done"] = True
-        if state["timer"] is not None:
-            root.after_cancel(state["timer"])
+    def open_dashboard():
         if dashboard_url:
             webbrowser.open(dashboard_url, new=2)
         root.destroy()
 
-    def tick(remaining=seconds):
-        if state["done"]:
-            return
-        countdown.configure(text=f"Redirecting to Dashboard in {remaining} seconds...")
-        if remaining <= 0:
-            redirect()
-        else:
-            state["timer"] = root.after(1000, tick, remaining - 1)
+    def button(text, command, primary):
+        return tk.Button(
+            body, text=text, command=command, font=(FONT_FAMILY, 11, "bold"),
+            background=theme["accent"] if primary else theme["surface_alt"],
+            foreground="#ffffff",
+            activebackground=theme["accent_active"] if primary else theme["border"],
+            activeforeground="#ffffff", relief="flat", borderwidth=0,
+            highlightthickness=0, cursor="hand2", padx=px(28), pady=px(11),
+        )
 
-    button = tk.Button(
-        body,
-        text="Go to Dashboard Now",
-        command=redirect,
-        font=(FONT_FAMILY, 11, "bold"),
-        background=theme["accent"],
-        foreground="#ffffff",
-        activebackground=theme["accent_active"],
-        activeforeground="#ffffff",
-        relief="flat",
-        borderwidth=0,
-        highlightthickness=0,
-        cursor="hand2",
-        padx=px(28),
-        pady=px(11),
-        anchor="center",
-        justify="center",
-    )
-    button.pack(fill="x", pady=(px(18), 0))
-    root.bind("<Return>", redirect)
+    done = button("Done", root.destroy, primary=True)
+    done.pack(fill="x", pady=(px(18), 0))
+    if dashboard_url:
+        button("Open Dashboard", open_dashboard, primary=False).pack(fill="x", pady=(px(8), 0))
+    root.bind("<Return>", lambda _event: root.destroy())
+    root.bind("<Escape>", lambda _event: root.destroy())
     root.protocol("WM_DELETE_WINDOW", root.destroy)
 
     root.update_idletasks()
     _place_window(root, max(body.winfo_reqwidth(), px(440)), body.winfo_reqheight())
     _bring_to_front(root)
-    button.focus_set()
-    tick()
+    done.focus_set()
     root.mainloop()
 
 

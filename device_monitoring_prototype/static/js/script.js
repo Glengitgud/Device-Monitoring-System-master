@@ -29,8 +29,6 @@ let archivedDevicePage = 1;
 const isAdministrator = document.body.dataset.isAdmin === 'true';
 const deviceAddresses = new Map();
 const deviceAddressRequests = new Map();
-let registrationRedirectTimer = null;
-let registrationRedirectInterval = null;
 let registrationSuccessShown = false;
 
 function csrfToken() {
@@ -103,9 +101,9 @@ function showRegistrationSuccess(device = null) {
         detailsButton.href = device.specifications_url
             || `/devices/${encodeURIComponent(device.id)}/specifications`;
     }
+    // Navigation happens only when the user picks a button, in this same tab;
+    // the Link a Device page is never sent to the Dashboard on its own.
     const redirect = destination => {
-        window.clearTimeout(registrationRedirectTimer);
-        window.clearInterval(registrationRedirectInterval);
         if (registrationRedirectStarted) return;
         registrationRedirectStarted = true;
         window.location.assign(destination);
@@ -118,21 +116,7 @@ function showRegistrationSuccess(device = null) {
         event.preventDefault();
         redirect(detailsButton.href);
     }, { once: true });
-    modalRoot.addEventListener('hidden.bs.modal', () => {
-        window.clearTimeout(registrationRedirectTimer);
-        window.clearInterval(registrationRedirectInterval);
-        registrationRedirectStarted = true;
-    }, { once: true });
-    const countdown = modalRoot.querySelector('#deviceRegistrationCountdown');
-    let remaining = 5;
     bootstrap.Modal.getOrCreateInstance(modalRoot).show();
-    registrationRedirectInterval = window.setInterval(() => {
-        remaining -= 1;
-        if (countdown) {
-            countdown.textContent = `Redirecting to Dashboard in ${remaining} seconds...`;
-        }
-        if (remaining <= 0) redirect('/dashboard');
-    }, 1000);
 }
 
 function initSidebar() {

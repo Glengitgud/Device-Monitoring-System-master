@@ -59,8 +59,9 @@ as partially implemented are operational only within documented limitations.
 - QR registration is unavailable to Administrator accounts.
 - Successful registration links and verifies the device, stores the owner and
   registrant, captures inventory, and unlocks the standard-user dashboard.
-- Registration success shows a confirmation state with a five-second automatic
-  dashboard redirect and immediate navigation controls.
+- Registration success shows a confirmation state with Dashboard, Device
+  Details and Stay here controls. The page never redirects on its own, and the
+  agent does not open an extra browser tab.
 
 ### MAC Address Support
 
