@@ -227,7 +227,9 @@ class UnixAgentUnitTest(unittest.TestCase):
         self.assertEqual(specs["network_adapters"], ["docker0", "wlp0s20f3"])
         self.assertEqual(specs["ip_addresses"], ["192.168.1.42", "2001:db8::42"])
         self.assertEqual(specs["mac_address"], "A4:C3:F0:12:34:56")
-        validate_detected_specifications(agent.build_payload("x", "Laptop", specs)["specifications"])
+        payload = agent.build_payload("x", "Laptop", specs)
+        self.assertEqual(payload["specifications"]["mac_address"], "A4:C3:F0:12:34:56")
+        validate_detected_specifications(payload["specifications"])
 
     def test_linux_collector_degrades_gracefully_on_a_bare_system(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -258,7 +260,9 @@ class UnixAgentUnitTest(unittest.TestCase):
         self.assertEqual(specs["network_adapters"], ["en0"])
         self.assertEqual(specs["ip_addresses"], ["10.0.0.25"])
         self.assertEqual(specs["mac_address"], "3C:22:FB:AA:BB:CC")
-        validate_detected_specifications(agent.build_payload("x", "Laptop", specs)["specifications"])
+        payload = agent.build_payload("x", "Laptop", specs)
+        self.assertEqual(payload["specifications"]["mac_address"], "3C:22:FB:AA:BB:CC")
+        validate_detected_specifications(payload["specifications"])
 
     def test_enrollment_links_are_validated(self):
         url, token = agent.parse_enrollment_link(
@@ -409,6 +413,34 @@ class DownloadHubIntegrationTest(unittest.TestCase):
             self.assertEqual(device.operating_system, "Ubuntu")
         with self.assertRaisesRegex(packaged.AgentError, "expired or was already used"):
             packaged.submit_registration(*enrollment, payload, opener=self._flask_opener())
+
+    def test_macos_scan_registers_collected_details_and_unlocks_dashboard(self):
+        csrf = self.register_and_login()
+        verification_page = self.client.get("/device-verification")
+        self.assertIn(b'data-initial-verified-count="0"', verification_page.data)
+        link = self.client.post("/api/device-link", headers={"X-CSRF-Token": csrf})
+        self.assertEqual(link.status_code, 200, link.get_data(as_text=True))
+        enrollment = agent.parse_enrollment_link(link.json["link"])
+        collector = agent.MacCollector(
+            run=fake_mac_run,
+            statvfs=fake_statvfs({"/System/Volumes/Data": (460 * GIB, 120 * GIB)}),
+            exists=lambda path: path == "/System/Volumes/Data",
+        )
+        payload = agent.build_payload("MacBook Air", collector.device_type(), collector.collect())
+
+        result = agent.submit_registration(*enrollment, payload, opener=self._flask_opener())
+
+        self.assertEqual(result["name"], "MacBook Air")
+        self.assertEqual(self.client.get("/dashboard").status_code, 200)
+        dashboard = self.client.get("/api/dashboard")
+        self.assertEqual(dashboard.status_code, 200, dashboard.get_data(as_text=True))
+        self.assertEqual(dashboard.json["total"], 1)
+        self.assertEqual(dashboard.json["devices"][0]["name"], "MacBook Air")
+        with self.app.app_context():
+            device = db.session.get(Device, result["device_id"])
+            self.assertEqual(device.operating_system, "macOS")
+            self.assertEqual(device.mac_address, "3C:22:FB:AA:BB:CC")
+            self.assertEqual(device.hardware_spec.cpu_model, "Apple M2")
 
     def test_device_link_hands_a_one_use_token_to_an_installed_app(self):
         csrf = self.register_and_login()

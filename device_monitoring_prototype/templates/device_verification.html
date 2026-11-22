@@ -8,6 +8,7 @@
     <div class="col-xxl-7 col-xl-8 col-lg-10">
         <div id="deviceVerificationComplete"
              class="alert alert-success {{ '' if verified_device_count else 'd-none' }}"
+             data-initial-verified-count="{{ verified_device_count }}"
              role="status">
             <i class="bi bi-check-circle me-1"></i>
             <span id="deviceVerificationMessage">
@@ -116,7 +117,7 @@
                 <h2 class="h4 mt-3" id="deviceRegistrationSuccessTitle">Device linked</h2>
                 <p class="text-muted" role="status" aria-live="polite">
                     The device was registered to your account and your dashboard is now unlocked.
-                    Choose where to go next; this page stays open until you do.
+                    Redirecting to your dashboard shortly.
                 </p>
                 <div class="d-flex flex-wrap justify-content-center gap-2 mt-4">
                     <a class="btn btn-primary" id="deviceRegistrationDashboardButton"

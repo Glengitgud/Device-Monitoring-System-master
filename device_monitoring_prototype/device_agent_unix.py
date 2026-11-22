@@ -512,10 +512,12 @@ def submit_registration(submission_url, token, payload, opener=urllib.request.ur
 
 
 def build_payload(name, device_type, specifications):
-    specifications = {key: value for key, value in specifications.items() if key != "mac_address"}
-    mac = _normalise_mac(specifications.pop("mac_address", None) or "")
+    specifications = dict(specifications)
+    mac = _normalise_mac(specifications.get("mac_address") or "")
     if mac:
         specifications["mac_address"] = mac
+    else:
+        specifications.pop("mac_address", None)
     return {"name": name[:120], "device_type": device_type, "specifications": specifications}
 
 
@@ -616,7 +618,7 @@ def run_gui(enrollment, collector):  # pragma: no cover - needs a display
     form = ttk.Frame(frame)
     ttk.Label(form, text="Device name").grid(row=0, column=0, sticky="w")
     ttk.Entry(form, textvariable=name_var, width=36).grid(row=0, column=1, sticky="we", padx=8)
-    button = ttk.Button(frame, text="Register this device")
+    button = ttk.Button(frame, text="Register This Device")
 
     def show_details():
         server = urllib.parse.urlsplit(state["enrollment"][0]).netloc
@@ -628,7 +630,7 @@ def run_gui(enrollment, collector):  # pragma: no cover - needs a display
         link_frame.pack_forget()
         details.pack(fill="both", expand=True, pady=10)
         form.pack(fill="x")
-        status.set("Review the details, then register this device.")
+        status.set("Review the details, then select Register This Device.")
 
     def register():
         if state["enrollment"] is None:
@@ -666,7 +668,7 @@ def run_gui(enrollment, collector):  # pragma: no cover - needs a display
             except AgentError as error:
                 status.set(str(error))
                 continue
-            button.configure(text="Register this device")
+            button.configure(text="Register This Device")
             show_details()
             root.deiconify()
             root.lift()

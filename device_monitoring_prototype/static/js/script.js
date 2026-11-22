@@ -18,6 +18,7 @@ let dashboardRefreshPromise = null;
 let observedRegistrationDeviceIds = null;
 let latestVerificationDeviceId = undefined;
 let registrationRedirectStarted = false;
+let registrationRedirectTimer = null;
 let deviceSearch = '';
 let deviceStatusFilter = 'all';
 let archivedDeviceSearch = '';
@@ -106,7 +107,8 @@ function showRegistrationSuccess(device = null) {
     const redirect = destination => {
         if (registrationRedirectStarted) return;
         registrationRedirectStarted = true;
-        window.location.assign(destination);
+        window.clearTimeout(registrationRedirectTimer);
+        window.location.replace(destination);
     };
     modalRoot.querySelector('#deviceRegistrationDashboardButton').addEventListener('click', event => {
         event.preventDefault();
@@ -116,7 +118,13 @@ function showRegistrationSuccess(device = null) {
         event.preventDefault();
         redirect(detailsButton.href);
     }, { once: true });
+    modalRoot.querySelector('[data-bs-dismiss="modal"]')?.addEventListener('click', () => {
+        registrationRedirectStarted = true;
+        window.clearTimeout(registrationRedirectTimer);
+    }, { once: true });
     bootstrap.Modal.getOrCreateInstance(modalRoot).show();
+    window.clearTimeout(registrationRedirectTimer);
+    registrationRedirectTimer = window.setTimeout(() => redirect('/dashboard'), 1500);
 }
 
 function initSidebar() {
@@ -443,11 +451,17 @@ function initLinkDeviceButton() {
 
 async function refreshDeviceVerificationStatus() {
     const status = document.getElementById('deviceVerificationMessage');
+    const initialVerifiedCount = Number(
+        document.getElementById('deviceVerificationComplete')?.dataset.initialVerifiedCount || 0
+    );
     try {
         const result = await api('/api/device-verification-status');
         const latest = result.latest_device;
         if (latestVerificationDeviceId === undefined) {
             latestVerificationDeviceId = latest?.id ?? null;
+            if (latest?.id != null && result.verified_devices > initialVerifiedCount) {
+                showRegistrationSuccess(latest);
+            }
         } else if (
             latest?.id != null
             && latestVerificationDeviceId != null
@@ -788,7 +802,6 @@ async function startAgentDownload(event) {
     registrationSuccessShown = false;
     registrationRedirectStarted = false;
     window.clearTimeout(registrationRedirectTimer);
-    window.clearInterval(registrationRedirectInterval);
     button.disabled = true;
     spinner.classList.remove('d-none');
     label.textContent = 'Preparing...';
