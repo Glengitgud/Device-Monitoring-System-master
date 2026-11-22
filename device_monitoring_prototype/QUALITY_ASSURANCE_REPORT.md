@@ -1,158 +1,202 @@
 # Quality Assurance Report
 
 **System:** DevMonitor Device Monitoring System
-**Review date:** 2026-11-21
-**Scope:** Device registration, scanning, monitoring, administration, database, and user experience.
+**Review date:** 2026-11-22 (supersedes 2026-11-21)
+**Branch reviewed:** `qa/scanner-window-and-readability` (from `master` @ `76faae8`)
+**Reference:** [FEATURES_AND_FUTURE_WORK.md](FEATURES_AND_FUTURE_WORK.md)
 
-## Current QA status
+## Summary
 
-The existing prototype supports verified QR enrollment, one-time Windows inventory collection, website-based saved health reports, periodic browser refresh, re-verified role-based administration, consistent sensitive-data masking, and database-backed audit events. The automated regression suite passes; browser and production-host validations remain separate deployment checks.
+| Item | Result |
+|---|---|
+| Automated regression | **143 tests passed, 0 failed** (137 baseline + 6 new scanner-window tests) |
+| Issues fixed this review | 3 (agent console workflow, specification readability, broken test file) |
+| Open issues | 7 (none critical; see [Open issues and risks](#open-issues-and-risks)) |
+| Database audit | `schema.sql` matches all 18 ORM tables; no orphaned rows; migration chain is upgrade-only (see [Database audit](#database-audit)) |
+| Apple readiness | macOS: buildable via CI, registration only, needs notarization. iOS: TestFlight/App Store only, reduced inventory (see [Apple platform readiness](#apple-platform-readiness)) |
 
-| Area | Existing baseline | Required validation / remaining work |
+**Evidence levels used below:** **A** = automated test, **L** = live check performed in this review (real Windows host, packaged EXE, or browser), **R** = code review only, **N** = not verified (needs hardware or a deployment).
+
+## Coverage by area
+
+Status: ✅ Pass · ⚠️ Pass with open risk · ❌ Fail · ⏸ Not verifiable here
+
+| Area | Status | Evidence | Mapped to FEATURES_AND_FUTURE_WORK.md | Notes / remaining work |
+|---|---|---|---|---|
+| Authentication & Authorization | ✅ | A, L | Account Registration and Authentication; Role-Based Access | Password login, TOTP challenge, admin re-verification, and 403 on `/api/admin/*` for standard users are all covered by tests. Password login verified live. |
+| User Registration & Account Management | ✅ | A | Account Registration and Authentication | Staged email → TOTP → create flow, resend cooldowns, refresh resume. Real Gmail SMTP delivery: **N**. |
+| Admin Panel | ✅ | A | Role-Based Access and Administration; Excel Export | Fresh-credential gate, audit of verify/deny/export, email masking. |
+| Device Registration | ✅ | A, L | Device Registration; MAC Address Support | One-use hashed tokens, owner binding, replay rejected (packaged EXE live: second use exits 1). |
+| Device Scanner (registration agent) | ✅ fixed | A, L | Windows Device Agent and Scanner | **QA-01 fixed.** Windowed EXE opens the scanner window; see the [QA-01 root cause analysis](#qa-01-downloaded-agent-opens-a-command-prompt-workflow). |
+| Device Scanner (health scan) | ✅ | A, L | Windows Device Agent and Scanner; Device Monitoring | Already `--noconsole`. Real health report from this host submitted through `/api/devices/<id>/scan`, then `/api/device-agent/scans/<id>`, and rendered. Windows-only. |
+| Device Verification | ✅ | A | Device Registration | Dashboard stays locked until one verified device exists; archived devices still count, deleted devices do not. |
+| Device Inventory / My Devices | ✅ | A, L | Dashboard, Device Management, and UI | List, search, filter, archive/restore. Rendered live at desktop and 375 px. |
+| Device Specifications | ✅ fixed | L | Dashboard, Device Management, and UI | **QA-02 fixed.** Contrast measured in the browser (see [QA-02](#qa-02-device-specifications-and-scan-results-hard-to-read)). |
+| Downloads & Client Distribution | ⚠️ | A, L | Windows Device Agent; Deployment planning | Per-download and generic EXE both windowed. Unsigned EXE still triggers SmartScreen (**QA-07**). |
+| Notifications & Logging | ⚠️ | A | Audit Logs and Data Privacy; Planned: alert delivery | `logs` + `activity_logs` written for enrollment, scan, admin, and export. There is **no notification centre or alert delivery** (roadmap item, not a defect). Agent writes `%LOCALAPPDATA%\DevMonitor\logs\device-agent.log`. |
+| API Endpoints | ✅ | A | Implemented feature sections | CSRF on writes, bearer tokens on agent routes, size-limited and validated payloads, JSON errors. |
+| Database Schema | ✅ | A, L, R | Database and Deployment Support | 18/18 tables match `schema.sql`. |
+| Database Migrations | ⚠️ | R | Database and Deployment Support | `001`–`011` are upgrade deltas, not a from-empty chain (**QA-04**). No migration needed for this review's changes. |
+| Security Controls | ✅ | A, R | Security hardening (partial) | No control was weakened. The new loopback hand-off is keyed (see [QA-01](#qa-01-downloaded-agent-opens-a-command-prompt-workflow)). No general rate limiter or security-header audit yet (roadmap). |
+| Session Handling | ✅ | A | Account Registration and Authentication | Flask-Login sessions, admin verification bound to the session and cleared on revisit, optional secure cookies. |
+| Error Handling | ✅ | A, L | Implemented feature sections | Agent errors now appear in the scanner window, in the same text as before. An expired link triggers an automatic background re-link. |
+| Platform Compatibility | ⚠️ | A, L, N | Cross-platform support (partial) | Windows: **L**. Linux: built and protocol-tested, not run on hardware. Android: built, not installed. macOS/iOS: **N** (need a Mac). |
+
+## Issues fixed in this review
+
+### QA-01 Downloaded agent opens a command prompt workflow
+
+**Issue**
+- **Description:** Launching the downloaded Windows agent opened a black console window. It showed the inventory as text and asked the user to paste a `devmonitor://` link, type a device name and type, type `yes`, and then "Press Enter". On the generic (GitHub Release) build, the browser hand-off also launched a *second* console window.
+- **Root cause:** Both Windows builds were packaged as console programs (`agent_builder.py` passed `--console` for registration mode; `publish-agents.yml` built with `--console`). `device_agent.main()` implemented registration only as `input()` prompts. A GUI existed only for the final success screen.
+- **Impact:** Users did not recognise the scanner and abandoned registration, so the dashboard stayed locked (it requires a verified device).
+- **Risk level:** High (blocks onboarding for every Windows user).
+
+**Fix strategy**
+- The registration EXE is now built `--noconsole` (Windows GUI subsystem). On launch it opens the **DevMonitor Device Scanner** window, which:
+  1. starts collecting immediately on a worker thread;
+  2. links in the background: a per-download build already carries its token, and a generic build opens the signed-in website's `/device-link/open`, which hands back a one-use link;
+  3. shows the scan, with the name and type pre-filled (hostname; Laptop/Desktop from battery presence);
+  4. sends nothing until the user selects **Register This Device**, which preserves the user-confirmed requirement in AGENTS.md;
+  5. then shows the existing success window and opens the dashboard.
+- **Single window:** when the browser re-launches the agent with the link, the new process passes it to the open window over `127.0.0.1` and exits. The port and a random per-run key are kept in `%LOCALAPPDATA%\DevMonitor\agent-handoff.json` (user profile only); a wrong key is ignored. If no window is open, the new process opens its own.
+- An expired or used link (HTTP 401) automatically fetches a new link instead of telling the user to start over.
+- **Files modified:** `device_agent.py` (submission extracted into `submit_payload()`/`SubmissionError`, plus `LinkHandoff`, `ScannerWindow`, `_wants_window()`, and `--cli`/`--output`), `agent_builder.py`, `.github/workflows/publish-agents.yml`, `templates/device_verification.html`, `templates/device_link_open.html`, `static/js/script.js` (copy no longer says "type yes"), `tests/test_agent_builder.py`, `tests/test_dashboard_access.py`.
+- **Database impact:** None. The same enrollment endpoint, payload, and token consumption are used.
+- **Backward compatibility:** The text flow is unchanged for `--yes`, `--print-specs`, `--cli`, and non-packaged runs, so CI and scripts keep working. `--print-specs --output FILE` was added because a windowed EXE should not rely on stdout. The scanner (health) mode is untouched. Linux and macOS agents are untouched.
+- **Residual:** The generic build still needs one browser visit to prove which account the device belongs to (the browser holds the user's session). The per-download build needs no browser at all.
+
+**Validation**
+
+| Test case | Result |
+|---|---|
+| Packaged generic EXE PE header | ✅ Subsystem 2 (GUI): Windows never allocates a console |
+| Real `ScannerWindow` on this host: scans, link arrives via hand-off, Register enabled, submits with correct bearer token, success screen opens dashboard | ✅ L |
+| Packaged EXE `--print-specs --output` → `ci_backend.py validate-specs` | ✅ L |
+| Packaged EXE `--print-specs > file` (stdout redirect still works when windowed) | ✅ L |
+| Packaged EXE `--yes <link>` end-to-end against `ci_backend.py serve` + `check` | ✅ L (`CHECK PASSED`) |
+| Replay of a used link | ✅ L (rejected, exit 1, clear message) |
+| Window chosen only for a packaged, console-less launch; `--yes`/`--print-specs`/`--cli` keep the text flow | ✅ A |
+| `main()` opens the window instead of prompting | ✅ A |
+| Hand-off round trip; wrong key ignored; file cleaned up | ✅ A |
+| Second launch with a link exits without a window | ✅ A |
+| Existing console tests (cancel, `y`, expired download message) | ✅ A (unchanged) |
+| Double-click on a clean Windows PC with a real browser hand-off | ⏸ N (needs a deployed site; acceptance step 7) |
+
+**Regression status:** No regressions. 143/143 tests pass.
+
+### QA-02 Device specifications and scan results hard to read
+
+**Issue**
+- **Description:** On *My Devices → View Device Specifications*, the device summary line ("Device ID · type · status · owner") and all muted text in *Device Scan Results* were nearly invisible. Health gauges, issue cards, and check lists were unstyled on desktop.
+- **Root cause:** In `style.css`, an `@media (max-width: 575.98px)` block that should only have padded `.device-card` enclosed about 200 lines of desktop styles, including `.content-card .text-muted`. On screens wider than a phone, Bootstrap's light-theme muted colour `rgba(33,37,41,.75)` was applied on the dark card.
+- **Impact:** Measured contrast **1.23:1** (WCAG minimum 4.5:1). Scan results were effectively unreadable on desktop.
+- **Risk level:** Medium (accessibility and usability; no data impact).
+
+**Fix strategy**
+- The media query now holds only its mobile rules, and the desktop rules are back at top level. `.device-card-details` keeps its own mobile block.
+- Added tokens `--dm-spec-value: #ffffff` and `--dm-spec-label: #dbe4ee` for the specification grid and the device details card.
+- **Files modified:** `static/css/style.css`. **Database impact:** None. **Backward compatibility:** Phone layout is unchanged; desktop now gets the styles that were always intended.
+
+**Validation** (computed in the browser against the real page, seeded with an enrolled device and a real scan)
+
+| Element | Before | After |
 |---|---|---|
-| Device Registration | QR-enrollment tokens are expiring, one-use, and owner-bound. MAC addresses are now collected, validated, stored on devices and enrollment records, and shown in device details. | Continue validating registration compatibility and the unified scanner in later stages. |
-| Device Monitoring | Dashboard and device lists refresh periodically; the unified scanner now submits inventory and health in one authorized operation and refreshes the website data. | Validate live status indicators and automatic synchronization across all views. |
-| Device Agent | The enrollment executable collects inventory; the silent Device Scanner submits inventory and health, then opens the configured dashboard URL in the default browser. | Validate platform boundaries, packaging, and browser behavior on a supported Windows host. |
-| Device Status Monitoring | Devices have persisted status and last-seen fields. Online devices without a successful scan/check-in for five minutes transition to offline with an audit record; status indicators refresh on dashboard, lists, and open details. | Validate maintenance workflows and status behavior under a production scheduler. |
-| Dashboard Features | Database-backed fleet data and health summaries are available; the scanner opens the dashboard after a successful submission. | Verify live status, cross-platform results, and browser behavior in supported browsers. |
-| Admin Features | Administrator-only user/device management and logs use server-side authorization. Excel export requires the current administrator's username/password and records denied, started, failed, and successful attempts. | Implement and verify admin-controlled schedules and agent delivery. |
-| Cross-Platform Support | Endpoint collection and EXE packaging are Windows-specific. | Add platform-aware collection and validate Windows, macOS, and mobile capability limitations. |
-| Audit Logs | Authentication, device, scan, status-transition, and export events use persisted audit records; export events omit credentials. | Verify schedule events after the persistent-agent model is implemented. |
-| Database Integration | Flask-SQLAlchemy models, migrations, and SQLite-backed integration tests cover core workflows. MAC address columns are included in the schema and additive migration `011_device_mac_address.sql`. | Validate production database upgrade behavior; add schedule schema changes in a later stage. |
-| Error Handling | Validation, token, SMTP, packaging, and database errors have explicit responses. | Verify useful website errors for scanner, schedule, export, and unsupported-platform failures. |
-| User Experience Improvements | Responsive UI, status indicators, in-page scan results, data refresh, and the scanner dashboard redirect are implemented. | Complete a live Windows/browser acceptance pass; no code opens Explorer, Downloads, or a local directory. |
+| Device summary line | 1.23:1 | 10.60:1 |
+| Specification value | 17.35:1 | **19.00:1** (white) |
+| Specification label | 10.60:1 | 14.79:1 |
+| Scan-result muted text | 1.23:1 | 10.60:1 |
+| Diagnostic issue / check text | unstyled | 15.42:1 |
+| Health gauge grid on desktop | not a grid | grid |
+| 375 px viewport | – | No horizontal scroll; all fields visible |
 
-## Stage validation record
+**Regression status:** My Devices list and dashboard unchanged visually. No test depends on CSS.
 
-| Stage | Result |
-|---|---|
-| Baseline and report update | Existing authentication and device integration suite: 60 tests passed after the security enhancements. Unit coverage does not replace live browser or production database validation. |
-| MAC address collection and persistence | Implemented and verified: collector, input validation, device/enrollment persistence, owner/admin details, specifications page, and registration status. Three focused enrollment/collector tests passed. Production MySQL migration execution remains unverified. |
-| Scanner consolidation and removal of standalone diagnostics UI/executable | Implemented and verified: one My Devices scan action, one silent scanner executable, combined inventory/health submission, website-based history/results, and dashboard redirect; 58 tests passed. A production PyInstaller build and browser acceptance run remain unverified. |
-| Live status and Excel export | Implemented and verified: stale status transition/audit and authenticated multi-sheet workbook export; denied credentials and successful exports are audited. |
-| Scheduled monitoring | Pending the explicitly consented persistent agent, device credential lifecycle, startup/pause/stop controls, and scheduled scan delivery. |
-| Cross-platform collection, accessibility, and user acceptance | Pending implementation and platform/browser tests; current executable collector/build is Windows-only. |
-| Scanner dashboard redirect and sign-up refresh behavior | Implemented; full automated regression passed (61 tests). Live Windows/browser and SMTP acceptance remain pending. |
+### QA-03 Uncommitted edit broke the integration test module
 
-## Registration, Scanner, and Redirect Validation
+- **Description / root cause:** A stray `3` was inserted before an assertion in `tests/test_database_integration.py` (line 992) in the working tree, which is a syntax error.
+- **Impact:** The whole module fails to import, so its integration tests would silently drop out of a discovery run. **Risk:** Medium (hidden coverage loss).
+- **Fix:** Removed the character, so the file matches `master` again. No commit is needed.
+- **Validation:** Suite runs all 137 baseline tests.
 
-| Area | Validation |
-|---|---|
-| Device Scanner Workflow | `device_agent.py:main()` submits its authorized report and inventory to `app.py:submit_agent_scan`; after success, it opens the configured `/dashboard` URL with `webbrowser.open()`. `app.py:scan_device()` only builds and serves the EXE. The agent contains no Explorer, Downloads-folder, shell, or local-directory launch command. Automated coverage verifies submission and URL selection; physical Windows/browser behavior still requires a workstation acceptance pass. |
-| Redirect Validation | A successful scan opens the dashboard after submission; the dashboard loads persisted results. Scanner submission failures do not trigger this redirect. |
-| Navigation Validation | Dashboard and device links remain server-routed; the scanner completion URL is the configured dashboard route. |
-| Registration Workflow Validation | The public form contains only account fields, password confirmation, and CSRF protection. No Save Credentials control exists. Passwords are not restored from browser storage; login, authentication, and session behavior were not changed. |
-| Verification Workflow Validation | The sign-up page no longer queries verification status on load or reopens the verification dialog after refresh. A successful registration submission and active server status are required before the dialog appears. Email-delivery and status errors remain on the sign-up form. Valid name, email, and username inputs may be restored from tab-scoped session storage. |
-| Form State Management and Error Handling | Registration validation and verification stages remain intact. Verification errors are shown in the verification dialog; initial registration errors are shown on the sign-up form. A browser-launch failure is logged without undoing a successfully stored scan. |
-| Regression Testing Results | Full automated regression: 61 tests passed, including scanner redirect target, registration form contents, page rendering, and staged verification APIs. Live scanner execution, SMTP delivery, and browser interaction are deployment acceptance checks, not inferred from unit tests. |
+## Open issues and risks
 
-## Admin Panel Security Validation
+| ID | Issue | Root cause | Impact | Risk | Recommended remediation |
+|---|---|---|---|---|---|
+| QA-04 | SQL migrations cannot build a database from empty | `001`–`011` are deltas on the original XAMPP prototype. `roles`, `permissions`, `user_roles`, `role_permissions`, `activity_logs`, `device_metrics`, `network_interfaces`, `network_observations`, and `diagnostic_checks` are created by no migration. | A DBA who applies only the SQL files to an old install gets missing tables. They are created only if `init-db` (`create_all`) also runs. | Medium | Document "apply migrations, then `init-db`, then `check-db`" as the upgrade procedure, or add `012_create_missing_tables.sql` with `CREATE TABLE IF NOT EXISTS`. |
+| QA-05 | No retention or purge of expired single-use records | No cleanup job for `device_registration_tokens`, `email_verifications`, or `registration_challenges`. | Tables grow without bound, and old hashed tokens are kept longer than needed. | Low | Add a `purge-expired` CLI command (cron) that deletes rows past expiry plus a grace period. |
+| QA-06 | Cascade behaviour not exercised by tests | SQLite test DB runs without `PRAGMA foreign_keys=ON`. | `ON DELETE CASCADE / SET NULL / RESTRICT` are trusted, not tested. Production InnoDB does enforce them. | Low | Enable the pragma in the test app config. |
+| QA-07 | Unsigned Windows EXE | No code-signing certificate. | SmartScreen shows "Windows protected your PC" before the scanner opens, which is a second source of first-run confusion. | Medium | Authenticode signing (roadmap: "signed Windows executable delivery"). Until then, the download card should say "More info → Run anyway". |
+| QA-08 | macOS window freezes while collecting | `device_agent_unix.run_gui()` calls `collector.collect()` on the Tk thread (`system_profiler`, up to 20 s). | Window shows "Not responding" briefly. | Low | Move collection to a worker thread, as in the Windows `ScannerWindow`. |
+| QA-09 | Health scanner is Windows-only | `agent_builder` requires `win32`; scanner mode exists only in `device_agent.py`. | macOS/Linux devices register but cannot produce scan results. | Low (documented limitation) | Port `collect_health_report` checks to `device_agent_unix.py`. |
+| QA-10 | Local venv is Python 3.14; AGENTS.md specifies 3.12 | Environment drift. | Suite passes on 3.14; PyInstaller 6.17 builds fine. CI uses 3.12. | Low | Recreate the venv with `py -3.12` to match CI. |
 
-| Check | Result | Evidence |
+## Database audit
+
+| Check | Result | Method |
 |---|---|---|
-| Direct `/admin` access | Implemented; validated server-side | Normal login alone redirects administrators to `/admin/verify`; `/api/admin/*` rejects an unverified administrator. |
-| Additional credentials | Implemented | Verification requires the signed-in username, password, active account status, and Administrator role. |
-| Protected features | Implemented | User/device management, logs, database export, and system settings remain behind `admin_required`. |
-| Access attempts | Implemented | Requested, succeeded, denied, credential-failed, and role-failed events include username, timestamp, IP address, and status. |
+| `schema.sql` vs ORM models | ✅ 18/18 tables, all columns match | Parsed `CREATE TABLE` columns vs `db.metadata` |
+| Migrations vs models | ⚠️ Upgrade-only chain (QA-04) | Cumulative `CREATE`/`ADD COLUMN` across `001`–`011` |
+| Redundant columns | ✅ None found. `device_specifications.cpu_model`/`gpu_model`/`memory_bytes`/`storage_bytes` are the ORM names for agent `cpu_name`/`gpu_information`/`ram_capacity_bytes`/`storage_total_bytes`, so they are not duplicates. | Review |
+| Relationships / constraints | ✅ FKs with explicit `CASCADE` (child data), `SET NULL` (audit and actor references), `RESTRICT` (device owner). Check constraints on status, lifecycle, and spec bounds. Token hash unique. | `models.py` review |
+| Orphaned records | ✅ 0 devices without owner, specs without device, tokens without user, used tokens without device, runs without device, checks without run | SQL against the live QA database after real enroll + scan |
+| New-feature persistence | ✅ Enrollment wrote the device, spec (incl. MAC), consumed token, `logs`, and `activity_logs`. Scan wrote `diagnostic_runs` + `diagnostic_checks`. | L |
+| Changes in this review | None. No schema or migration change was required. | – |
 
-## Sensitive Data Protection Validation
+## Apple platform readiness
 
-User-facing and administrative email values use a shared server-side masking helper. Usernames, device names, dashboard labels, MAC addresses, and monitoring labels remain fully visible and operational. Verified administrator views may receive full account details; audit details are masked server-side before presentation.
+### macOS (agent exists: `device_agent_unix.py` + `agents/macos/`)
 
-| Location | Validation |
+| Requirement | Finding |
 |---|---|
-| User listings | Administrator access is re-verified; authorized listings receive full usernames and display masked emails when masking is required. |
-| Dashboard/device views | Full usernames, device names, ownership labels, MAC addresses, and operational values remain visible. |
-| Device details and monitoring | No username or operational label masking is applied. |
-| Audit logs and exports | Audit details mask embedded email values. Export operations remain permission-gated and are audited. |
+| Packaging | PyInstaller `.app` in a universal2 `.dmg` (`build_macos.sh`), built on GitHub `macos-latest` by `publish-agents.yml` / `build-apple-agents.yml`. Cannot be built on Windows. |
+| Installer / download | DMG → drag to Applications. Ad-hoc signed unless the Developer ID secrets are set. Without notarization, macOS 15 requires *System Settings → Privacy & Security → Open Anyway* once. **Recommendation:** Apple Developer Program + Developer ID + notarization before public release. |
+| Permissions | None required. `sysctl`, `vm_stat`, `system_profiler`, and `ifconfig` run as the user. Only the `devmonitor://` URL scheme is registered (Info.plist `CFBundleURLTypes`). Entitlement: `disable-library-validation` (PyInstaller). No Full Disk Access, admin rights, or kernel extension. |
+| Collection limits | CPU/chip, cores, RAM total/used, data volume, GPUs, model identifier, macOS version, adapters, IPs, MAC (en0) are available. Not collected: SMART/disk health, temperatures, serial (deliberately). |
+| Scanner compatibility | **Registration only.** The health scanner is Windows-only (QA-09). The GUI already avoids a terminal and receives links via Apple events (`::tk::mac::LaunchURL`), so it has the same single-window behaviour as the Windows fix. Collection blocks the UI (QA-08). |
+| Status | ⏸ Not run on a Mac in this review. Ready for CI build; needs notarization and a hardware acceptance pass. |
 
-## Access Control and User Privacy Testing
+### iOS / iPadOS (agent exists: SwiftUI app in `agents/ios/`)
 
-- Standard users cannot open `/admin` or call `/api/admin/*`; they receive HTTP 403 for protected API resources.
-- Administrator role checks are enforced independently of a successful password login.
-- Sensitive device and account fields are masked before serialization where full access is not established.
-- Phone and MAC masking helpers are retained for future fields and consistently use the same readable format.
-- Browser-side rendering escapes values and does not grant authorization; all checks remain server-side.
-
-## Audit Logging Validation
-
-The audit trail now records administrator verification requests/success/failure, verified and denied panel access, sensitive user/list/audit/device viewing, and database export denied/start/success/failure events. Records include actor identity, event type, timestamp, IP address, and a success/failure or reason field. Passwords, submitted codes, and export credential values are not written to audit details.
-
-## Session Persistence Validation
-
-Administrator verification is session-bound to the signed-in user and is not an 15-minute frontend state. Entering `/admin` requires a fresh username/password/role check. Refreshing or reopening `/admin` invalidates the panel verification and redirects back to `/admin/verify`; browser restart or session reload has no verification marker and follows the same backend check. Protected `/api/admin/*` routes independently require the verification marker and role.
-
-## Email Masking Validation
-
-| Area | Expected behavior | Validation |
-|---|---|---|
-| Admin → User Accounts | Email addresses are masked server-side; usernames stay unchanged. | The `/api/users` response masks email values before rendering and uses the same value across refresh/navigation. |
-| User Management/Edit | The masked email is shown without returning a full address through the listing endpoint. | New accounts accept a full email; editing requires entering a new email explicitly rather than re-submitting a masked value. |
-| Dashboard/device views | Operational user and device fields remain unmasked. | Dashboard serialization retains device names and ownership/display values. |
-
-Email example: `exampletesting@gmail.com` becomes `e*********g****.com`. Masking is produced during server serialization and is not restored or exposed by frontend state.
-
-## Device Registration Navigation Validation
-
-| Check | Result |
+| Requirement | Finding |
 |---|---|
-| My Devices Register Device link | The standard-user button now links directly to `/device-verification`. |
-| Device Verification | Existing QR, token, confirmation, agent download, scan, registration, and dashboard routes remain unchanged. |
-| Navigation labels | The add/register action no longer opens the legacy manual device modal. |
-| Regression | Existing device list, detail, archive, restore, scan, and dashboard workflows remain covered. |
+| Deployment | Only App Store, TestFlight (public link via `IOS_DISTRIBUTION_URL`), Ad Hoc (≤100 registered UDIDs per year), or Apple Business Manager custom apps. An `.ipa` cannot be a normal website download. The site offers an OTA `itms-services://` link only for valid Ad Hoc/Enterprise IPAs over HTTPS. Requires the Apple Developer Program. |
+| Platform restrictions | Sandboxed. No arbitrary process execution, no system-wide telemetry, no background scanning without a qualifying background mode. App Transport Security requires HTTPS (a `localhost` exception only). |
+| Permissions | None requested; the app uses only public `UIDevice`/`ProcessInfo` APIs. The `devmonitor://` scheme receives the link. Local Network permission is needed only for a LAN (non-HTTPS-domain) server, which ATS blocks anyway. |
+| Unsupported by iOS security | MAC address (returns a constant), serial number, IMEI, system-wide RAM usage, other apps' or processes' data, GPU details, device name (iOS 16+ without an entitlement), and free/total disk off-device (required-reason API policy). Health scanning equivalent to Windows is not possible. |
+| Recommended compliant approach | Keep the iOS app as an **inventory-only registration client** distributed via TestFlight → App Store. Keep the existing privacy manifest (`agents/ios/Resources/PrivacyInfo.xcprivacy`) in step with every required-reason API the collector uses. Fleet-managed iPhones should be handled through **MDM** (Apple Business Manager + an MDM server) rather than a custom agent: MDM is the only Apple-sanctioned route to serials, compliance state, and inventory. |
+| Status | ⏸ Not built or run in this review (needs Xcode on macOS). |
 
-## Device Specification UI Validation
+## Regression testing summary
 
-The Detected Device Specifications view no longer displays `Installed Network Adapters`. Server-rendered fields and browser detail rendering were both updated. Network adapter collection and database persistence remain unchanged so registration and monitoring behavior is not affected. CPU, RAM, storage, GPU, motherboard, operating system, IP, MAC, status, and health information remain available.
-
-## Registration and Specification User Acceptance Testing
-
-1. Sign in as a standard user and open My Devices.
-2. Select Register Device and confirm navigation to Device Verification.
-3. Generate or reuse the registration flow, download the scanner, complete a scan, and confirm redirect/dashboard behavior.
-4. Open a registered device's Detected Device Specifications view.
-5. Confirm Installed Network Adapters is absent and all remaining specification fields render correctly.
-
-## Device Diagnostics Removal and Workflow Consolidation
-
-| Area | Validation |
+| Suite / check | Result |
 |---|---|
-| Legacy diagnostics routes | `/api/device-agent/diagnostics/<run_id>` and `/api/devices/<id>/diagnostics` aliases are removed. Scanner submission remains available only through scanner routes. |
-| Scanner UI | My Devices no longer renders a repeated Device Scan button or scanner modal. Scanner activity remains part of the verification and registration workflow. |
-| Reports and navigation | Diagnostic/download/navigation labels and status polling components are removed; saved scanner results remain shown as Device Scan Results. |
-| Database | Existing scanner run and check tables remain intact for database integrity and historical results. |
-| User acceptance | Register a device through verification, run the approved scanner, confirm saved results and dashboard navigation. |
+| `python -m unittest discover -s device_monitoring_prototype/tests` (baseline, before changes) | 137 passed |
+| Same, after QA-01 | 143 passed |
+| Same, after QA-01 + QA-02 (final) | 143 passed |
+| Authentication, registration, admin, CSRF, masking, export | Pass (A) |
+| Device registration, verification, dashboard lock/unlock | Pass (A + L) |
+| Device scanner submission and history | Pass (A + L) |
+| My Devices, specifications, scan results (desktop + 375 px) | Pass (L) |
+| Downloads: builder flags, workflow text, package validators, release manifest | Pass (A); packaged EXE built and run (L) |
+| Database operations: enroll, scan, orphan queries | Pass (L) |
+| Security controls bypassed | None. Tokens, CSRF, ownership, and admin checks unchanged. |
 
-## System Cleanup and Regression Testing
+## User acceptance (remaining live checks)
 
-- No diagnostic EXE download or diagnostics `/diagnostics` route remains.
-- No Device Scan action remains in device cards or My Devices modals.
-- Browser detail views and specifications retain inventory and scanner health fields without diagnostics navigation.
-- The full regression suite must confirm registration, scanner submission, dashboard, and database history still pass.
-- Final automated regression: 61 tests passed after diagnostics UI, route, modal, and module cleanup.
+1. On a clean Windows 11 PC, sign in on the deployed site, download from **Downloads**, and double-click. Expect SmartScreen (QA-07), then **only** the DevMonitor Device Scanner window. There must be no console at any point.
+2. Generic build: the browser opens `/device-link/open`; choose **Open**. Expect no second window, and the open scanner shows "Scan complete".
+3. Select **Register This Device**. Expect the success window, then the dashboard unlocks.
+4. Open **My Devices → View Device Specifications** on a desktop monitor and a phone. All text must be clearly legible.
+5. Real Gmail SMTP sign-up, production MySQL `check-db` after migrations, and a macOS DMG install on hardware.
 
-## User Acceptance Testing
+## Recommended git commits
 
-Recommended acceptance pass:
-
-1. Sign in as a standard user and attempt direct `/admin` and admin API URLs.
-2. Sign in as an administrator, confirm `/admin` redirects to credential verification, and test wrong username/password/role states.
-3. Verify that a successful administrator check opens user, device, monitoring, log, export, and settings areas.
-4. Confirm email, username, phone, and MAC examples remain readable and are masked in listings, dashboard, details, logs, and previews.
-5. Confirm an owner can view their own record while a non-owner cannot.
-6. Review audit entries for verification, access, sensitive viewing, and export operations.
-7. Download and run the Device Scanner on Windows; confirm its report is saved, the dashboard opens, and no local folder window appears.
-8. Open Create Account and confirm there is no Save Credentials option; submit valid details and complete email and authenticator verification.
-9. Refresh Sign Up before and after registration submission; confirm it stays on Sign Up and only opens verification after a successful submission.
-10. Confirm failed registration or email delivery displays an error on the form and does not open the verification dialog.
-
-**Acceptance status:** Automated workflow checks are covered by the regression suite. Browser, production database, SMTP, and live Windows workstation checks remain deployment validations.
-
-## Security and verification limits
-
-Device ownership, administrator route protection, CSRF, one-use enrollment and scan tokens, and database constraints must remain server-enforced. Schedules must not run privileged endpoint code without an enrolled agent and an explicit, bounded monitoring policy. Excel exports contain sensitive user and device data and must require a fresh administrator credential check, be generated in memory, and never be written to a public/static directory.
-
-Automated tests use an isolated SQLite database and mocked mail/build boundaries. They do not establish live MariaDB upgrade safety, real SMTP delivery, cross-platform endpoint collection, browser permission behavior, or a successful user acceptance session. Those checks must be reported separately and never inferred from unit tests.
+| Commit | Scope |
+|---|---|
+| `f2ce57a` Open the scanner window when the Windows agent is launched | QA-01 |
+| `1945459` Make device specifications readable on desktop | QA-02 |
+| Update the QA report for the scanner window and readability fixes | This report + `FEATURES_AND_FUTURE_WORK.md` |
 
 ## Run the regression suite
 
