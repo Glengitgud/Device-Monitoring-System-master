@@ -4,6 +4,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const emailPattern = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
     const usernamePattern = /^[A-Za-z0-9_.-]{3,64}$/;
 
+    document.querySelectorAll('[data-password-toggle]').forEach(toggle => {
+        const input = document.getElementById(toggle.dataset.passwordToggle);
+        const icon = toggle.querySelector('i');
+        if (!input || !icon) return;
+        toggle.addEventListener('click', () => {
+            const showPassword = input.type === 'password';
+            input.type = showPassword ? 'text' : 'password';
+            icon.className = showPassword ? 'bi bi-eye-slash' : 'bi bi-eye';
+            toggle.setAttribute('aria-pressed', String(showPassword));
+            toggle.setAttribute(
+                'aria-label',
+                `${showPassword ? 'Hide' : 'Show'} ${
+                    input.id === 'confirm_password' ? 'confirmation password' : 'password'
+                }`
+            );
+        });
+    });
+
     function usernameError(value) {
         if (!usernamePattern.test(value)) {
             return 'Use 3-64 letters, numbers, dots, dashes, or underscores.';

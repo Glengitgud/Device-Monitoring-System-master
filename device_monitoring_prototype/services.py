@@ -646,25 +646,38 @@ def register_agent_device(token, data):
     return device
 
 
-def update_device(device, data):
+def update_device(device, data, *, actor):
+    allowed_fields = {"name", "hostname", "owner_user_id"}
+    if set(data) - allowed_fields:
+        raise ValidationError(
+            "Only device name, hostname, and assigned user can be updated."
+        )
+    name = _required_text(data, "name", limit=120) if "name" in data else None
+    hostname = _required_text(data, "hostname", limit=255) if "hostname" in data else None
+    owner = None
+    if "owner_user_id" in data:
+        owner_id = data["owner_user_id"]
+        if isinstance(owner_id, bool) or not (
+            isinstance(owner_id, int)
+            or isinstance(owner_id, str)
+            and len(owner_id) <= 19
+            and owner_id.isdecimal()
+        ):
+            raise ValidationError("Select an active assigned user.")
+        owner = db.session.get(User, int(owner_id))
+        if owner is None:
+            raise ValidationError("Select an active assigned user.")
+        if not actor.is_admin and owner.id not in (actor.id, device.owner_user_id):
+            raise ValidationError("You may only assign a device to your own account.")
+        if not owner.is_active and owner.id != device.owner_user_id:
+            raise ValidationError("Select an active assigned user.")
+
     if "name" in data:
-        device.device_name = _required_text(data, "name", limit=120)
+        device.device_name = name
     if "hostname" in data:
-        device.hostname = _required_text(data, "hostname", limit=255)
-    if "type" in data:
-        device_type = _required_text(data, "type", limit=64)
-        if device_type not in MANUAL_DEVICE_TYPES:
-            raise ValidationError("Select a supported device type.")
-        device.device_type = device_type
-    if "os" in data:
-        device.operating_system = _required_text(data, "os", limit=120)
-    if "status" in data:
-        status = data["status"]
-        if not isinstance(status, str) or status.lower() not in {
-            "online", "offline", "maintenance", "unknown"
-        }:
-            raise ValidationError("Invalid device status.")
-        device.status = status.lower()
+        device.hostname = hostname
+    if owner is not None:
+        device.owner_user_id = owner.id
     _log_device_event(device, "Device updated")
     _log("device.updated", "device", device.id)
     db.session.commit()

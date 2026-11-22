@@ -346,6 +346,10 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'id="registerForm"', response.data)
         self.assertIn(b'id="confirm_password"', response.data)
+        self.assertIn(b'type="password"', response.data)
+        self.assertIn(b'data-password-toggle="password"', response.data)
+        self.assertIn(b'data-password-toggle="confirm_password"', response.data)
+        self.assertIn(b'aria-pressed="false"', response.data)
         self.assertIn(b'id="registerEmailValidation"', response.data)
         self.assertIn(b'id="registerPasswordStrength"', response.data)
         self.assertIn(b'id="registrationVerificationDialog"', response.data)
@@ -361,6 +365,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
         register_script = (
             Path(__file__).resolve().parents[1] / "static" / "js" / "register.js"
         ).read_text(encoding="utf-8")
+        self.assertIn("input.type = showPassword ? 'text' : 'password';", register_script)
         self.assertIn("verificationDialog.close()", register_script)
         self.assertIn("full_name: fullName.value", register_script)
         self.assertNotIn("restoreRegistrationState", register_script)
@@ -376,6 +381,85 @@ class DatabaseIntegrationTest(unittest.TestCase):
         # The only cancel is the explicit "Cancel and start over" button.
         self.assertEqual(register_script.count("/api/registration/cancel"), 1)
         self.assertIn("startOverRegistrationBtn", register_script)
+
+    def test_device_edits_allow_only_name_hostname_and_scoped_assignment(self):
+        token = self.register_and_login()
+        self.complete_qr_enrollment(token)
+        with self.app.app_context():
+            owner = User.query.filter_by(username="testuser").one()
+            owner_id = owner.id
+            other_owner = User(
+                username="otherowner",
+                email="otherowner@example.com",
+                full_name="Other Owner",
+                password_hash=generate_password_hash("OtherOwner1!"),
+                status="active",
+                email_verified=True,
+            )
+            other_owner.roles.append(Role.query.filter_by(name="User").one())
+            device = Device(
+                asset_tag="DM-EDITABLE-DEVICE",
+                device_name="Editable Device",
+                hostname="editable-device",
+                device_type="Laptop",
+                operating_system="Windows",
+                status="online",
+                is_verified=True,
+                owner=other_owner,
+                registered_by=owner,
+            )
+            db.session.add_all([other_owner, device])
+            db.session.commit()
+            device_id = device.id
+            other_owner_id = other_owner.id
+
+        updated = self.client.patch(
+            f"/api/devices/{device_id}",
+            headers={"X-CSRF-Token": token},
+            json={
+                "name": "Renamed Device",
+                "hostname": "renamed-device",
+                "owner_user_id": other_owner_id,
+            },
+        )
+        self.assertEqual(updated.status_code, 200, updated.get_data(as_text=True))
+        self.assertEqual(updated.json["name"], "Renamed Device")
+        self.assertEqual(updated.json["hostname"], "renamed-device")
+        self.assertEqual(updated.json["owner_id"], other_owner_id)
+
+        assigned_to_self = self.client.patch(
+            f"/api/devices/{device_id}",
+            headers={"X-CSRF-Token": token},
+            json={"owner_user_id": owner_id},
+        )
+        self.assertEqual(
+            assigned_to_self.status_code,
+            200,
+            assigned_to_self.get_data(as_text=True),
+        )
+        self.assertEqual(assigned_to_self.json["owner_id"], owner_id)
+
+        for forbidden_field in ("type", "os", "status"):
+            with self.subTest(field=forbidden_field):
+                rejected = self.client.patch(
+                    f"/api/devices/{device_id}",
+                    headers={"X-CSRF-Token": token},
+                    json={forbidden_field: "modified"},
+                )
+                self.assertEqual(rejected.status_code, 400)
+
+        reassigned = self.client.patch(
+            f"/api/devices/{device_id}",
+            headers={"X-CSRF-Token": token},
+            json={"owner_user_id": other_owner_id},
+        )
+        self.assertEqual(reassigned.status_code, 400)
+        with self.app.app_context():
+            saved = db.session.get(Device, device_id)
+            self.assertEqual(saved.owner.username, "testuser")
+            self.assertEqual(saved.device_type, "Laptop")
+            self.assertEqual(saved.operating_system, "Windows")
+            self.assertEqual(saved.status, "online")
 
     def test_login_accepts_registered_email_and_rejects_unknown_email(self):
         csrf = self.register_and_login(
@@ -2345,6 +2429,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
             db.session.add_all([administrator, owner, device])
             db.session.commit()
             device_id = device.id
+            administrator_id = administrator.id
 
         self.client.get("/login")
         with self.client.session_transaction() as session:
@@ -2428,6 +2513,13 @@ class DatabaseIntegrationTest(unittest.TestCase):
             json={"name": "Updated Owner Workstation"},
         )
         self.assertEqual(updated.status_code, 200, updated.get_data(as_text=True))
+        reassigned = self.client.patch(
+            f"/api/devices/{device_id}",
+            headers={"X-CSRF-Token": token},
+            json={"owner_user_id": administrator_id},
+        )
+        self.assertEqual(reassigned.status_code, 200, reassigned.get_data(as_text=True))
+        self.assertEqual(reassigned.json["owner_id"], administrator_id)
         archived = self.client.post(
             f"/api/devices/{device_id}/archive",
             headers={"X-CSRF-Token": token},

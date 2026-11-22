@@ -714,6 +714,7 @@ def create_app(test_config=None):
             "email": mask_email(user.email),
             "role": user.role_name,
             "status": user.status.capitalize(),
+            "isActive": user.is_active,
         }
 
     def verified_device_count(user_id):
@@ -2308,7 +2309,7 @@ def create_app(test_config=None):
         device = db.get_or_404(Device, device_id)
         can_manage_device(device)
         try:
-            update_device(device, api_data())
+            update_device(device, api_data(), actor=current_user)
         except ValidationError as error:
             return api_error(error)
         return jsonify(serialize_device(device))

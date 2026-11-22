@@ -15,7 +15,8 @@
     <!-- Custom Stylesheet -->
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 </head>
-<body data-is-admin="{{ 'true' if current_user.is_admin else 'false' }}">
+<body data-is-admin="{{ 'true' if current_user.is_admin else 'false' }}"
+      data-current-user-id="{{ current_user.id }}">
 
     <!-- ======================================================
          SIDEBAR NAVIGATION

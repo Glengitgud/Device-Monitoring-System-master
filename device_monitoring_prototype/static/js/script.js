@@ -559,8 +559,34 @@ async function openDeviceModal(mode, deviceId) {
     form.classList.toggle('d-none', mode === 'view');
     document.getElementById('deviceFormMode').value = mode;
     document.getElementById('deviceFormId').value = deviceId || '';
-    document.getElementById('deviceFormOwner').value =
-        document.getElementById('currentUserDisplay')?.textContent || '';
+    const ownerField = document.getElementById('deviceFormOwner');
+    const currentUserId = Number(document.body.dataset.currentUserId);
+    const currentUserName = document.getElementById('currentUserDisplay')?.textContent.trim()
+        || 'Current user';
+    let assignableUsers = [{ id: currentUserId, fullName: currentUserName }];
+    if (mode === 'edit' && isAdministrator) {
+        try {
+            assignableUsers = (await api('/api/users'))
+                .filter(user => user.isActive);
+        } catch (error) {
+            showToast(error.message, 'danger');
+            return;
+        }
+    }
+    if (requestId !== deviceDetailsRequestId) return;
+    if (device && !assignableUsers.some(user => user.id === device.owner_id)) {
+        assignableUsers.push({
+            id: device.owner_id,
+            fullName: device.owner || 'Current assignee'
+        });
+    }
+    ownerField.replaceChildren(...assignableUsers.map(user => {
+        const option = document.createElement('option');
+        option.value = String(user.id);
+        option.textContent = user.fullName || user.username || 'Unnamed user';
+        return option;
+    }));
+    ownerField.value = String(device?.owner_id ?? currentUserId);
     document.getElementById('deviceModalTitle').textContent =
         mode === 'add' ? 'Register Device' : mode === 'view' ? 'Device Details' : 'Edit Device';
     if (device) {
@@ -571,13 +597,14 @@ async function openDeviceModal(mode, deviceId) {
         document.getElementById('deviceFormCPU').value = device.cpu;
         document.getElementById('deviceFormRAM').value = device.ram;
         document.getElementById('deviceFormStorage').value = device.storage;
-        document.getElementById('deviceFormOwner').value = device.owner;
         document.getElementById('deviceFormStatus').value = device.status.toLowerCase();
     }
     const readOnly = mode === 'view';
-    ['deviceFormName', 'deviceFormHostname', 'deviceFormType', 'deviceFormOS',
-        'deviceFormStatus', 'deviceFormOwner'].forEach(id => {
-        document.getElementById(id).disabled = readOnly || id === 'deviceFormOwner';
+    ['deviceFormName', 'deviceFormHostname', 'deviceFormOwner'].forEach(id => {
+        document.getElementById(id).disabled = readOnly;
+    });
+    ['deviceFormType', 'deviceFormOS', 'deviceFormStatus'].forEach(id => {
+        document.getElementById(id).disabled = mode !== 'add';
     });
     document.getElementById('saveDeviceBtn').classList.toggle('d-none', readOnly);
     document.getElementById('deviceModalFooter').querySelector('.btn-secondary').textContent =
@@ -632,6 +659,37 @@ function renderDeviceDetails(device) {
                 <div class="device-information-grid">${visibleItems.map(([label, item]) => card(label, item)).join('')}</div>
             </section>`;
     };
+    const activityHistory = `
+        <section class="device-information-section">
+            <h6 class="device-information-heading">Activity History</h6>
+            <div class="table-responsive">
+                <table class="table table-sm table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th scope="col">Activity ID</th>
+                            <th scope="col">Actor User ID</th>
+                            <th scope="col">Event</th>
+                            <th scope="col">Entity</th>
+                            <th scope="col">Actor</th>
+                            <th scope="col">Details</th>
+                            <th scope="col">Occurred At</th>
+                        </tr>
+                    </thead>
+                    <tbody>${(device.activity_logs || []).map(entry => `
+                        <tr>
+                            <td>${escapeHTML(value(entry.id))}</td>
+                            <td>${escapeHTML(value(entry.actor_user_id))}</td>
+                            <td>${escapeHTML(value(entry.event))}</td>
+                            <td>${escapeHTML(value(entry.entity_type))}</td>
+                            <td>${escapeHTML(value(entry.actor))}</td>
+                            <td>${escapeHTML(value(entry.details))}</td>
+                            <td>${escapeHTML(value(entry.occurred_at))}</td>
+                        </tr>`).join('') || `
+                        <tr><td colspan="7" class="text-center text-muted">No records available</td></tr>`}
+                    </tbody>
+                </table>
+            </div>
+        </section>`;
     const owner = device.owner || {};
     const registrant = device.registered_by || {};
     const specification = device.specification || {};
@@ -749,12 +807,7 @@ function renderDeviceDetails(device) {
             ['Log ID', log.id], ['Device ID', log.device_id],
             ['Event', log.event], ['Timestamp', log.timestamp],
         ])),
-        section('Activity History', (device.activity_logs || []).flatMap(entry => [
-            ['Activity ID', entry.id], ['Actor User ID', entry.actor_user_id],
-            ['Event', entry.event], ['Entity', entry.entity_type],
-            ['Actor', entry.actor], ['Details', JSON.stringify(entry.details)],
-            ['Occurred At', entry.occurred_at],
-        ])),
+        activityHistory,
     ];
     return sections.join('') + `<p class="mt-3 mb-0"><a class="btn btn-sm btn-outline-primary"
         href="/devices/${encodeURIComponent(device.id || selectedDeviceId)}/specifications">
@@ -845,15 +898,28 @@ async function startAgentDownload(event) {
 
 async function saveDevice() {
     const mode = document.getElementById('deviceFormMode').value;
-    const data = {
+    const data = mode === 'add' ? {
         name: document.getElementById('deviceFormName').value.trim(),
         hostname: document.getElementById('deviceFormHostname').value.trim(),
         type: document.getElementById('deviceFormType').value,
         os: document.getElementById('deviceFormOS').value,
         status: document.getElementById('deviceFormStatus').value
+    } : {
+        name: document.getElementById('deviceFormName').value.trim(),
+        hostname: document.getElementById('deviceFormHostname').value.trim(),
+        owner_user_id: document.getElementById('deviceFormOwner').value
     };
-    if (!data.name || !data.type || !data.os) {
-        showToast('Device name, type, and operating system are required.', 'danger');
+    if (!data.name || (mode === 'add' && (!data.type || !data.os))) {
+        showToast(
+            mode === 'add'
+                ? 'Device name, type, and operating system are required.'
+                : 'Device name is required.',
+            'danger'
+        );
+        return;
+    }
+    if (mode === 'edit' && !/^\d+$/.test(data.owner_user_id)) {
+        showToast('Select an assigned user.', 'danger');
         return;
     }
     try {
