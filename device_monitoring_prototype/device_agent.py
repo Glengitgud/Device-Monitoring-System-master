@@ -1761,9 +1761,10 @@ def resolve_link_enrollment(link, *, interactive):
 # Opt-in live monitoring
 # ---------------------------------------------------------------------------
 # Runs only after the device user agrees (consent prompt after registration).
-# It is visible and stoppable: a "DevMonitor Live Monitoring" startup entry
-# (Task Manager > Startup apps), a minimised console window titled as such,
-# the "Stop live monitoring" button on the website, and "--stop-monitoring".
+# It has no window. It is visible and stoppable through Task Manager only: the
+# "DevMonitor Live Monitoring" process (Processes, End task pauses it until the
+# next sign-in) and startup entry (Startup apps, Disable turns it off), plus the
+# "Stop live monitoring" button on the website and "--stop-monitoring".
 # Only usage figures are sent: CPU, memory, storage and network throughput.
 #
 # Platform-specific pieces are the five functions marked "platform hook";
@@ -1776,10 +1777,10 @@ HEARTBEAT_INTERVAL_SECONDS = 30
 MONITOR_STARTUP_NAME = "DevMonitor Live Monitoring"
 MONITOR_CONFIG_NAME = "monitoring.json"
 MONITOR_PID_NAME = "monitoring.pid"
-MONITOR_EXECUTABLE_NAME = "devmonitor-device-agent.exe"
+# The process name Task Manager shows; matches the startup entry's name.
+MONITOR_EXECUTABLE_NAME = f"{MONITOR_STARTUP_NAME}.exe"
 MONITOR_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 MONITOR_MUTEX_NAME = "Local\\DevMonitorLiveMonitoring"
-MONITOR_CONSOLE_TITLE = "DevMonitor live monitoring is ON"
 _MONITOR_MUTEX = None
 CONSENT_TEXT = (
     "DevMonitor can keep this device's dashboard up to date. When turned on it "
@@ -1788,9 +1789,10 @@ CONSENT_TEXT = (
     f"{HEARTBEAT_INTERVAL_SECONDS} seconds.\n\n"
     "It does not collect files, keystrokes, screenshots, browsing history or "
     "the contents of your network traffic.\n\n"
-    "You can stop it at any time: click \"Stop live monitoring\" on this "
-    "device's page in DevMonitor, or run this agent with --stop-monitoring. "
-    f"It appears as \"{MONITOR_STARTUP_NAME}\" in Task Manager > Startup apps."
+    "It runs without a window. You can find it in Task Manager as "
+    f"\"{MONITOR_STARTUP_NAME}\": under Processes (End task pauses it until you "
+    "next sign in) and under Startup apps (Disable turns it off). You can also "
+    "click \"Stop live monitoring\" on this device's page in DevMonitor."
 )
 
 
@@ -1893,33 +1895,25 @@ def _acquire_single_instance():  # platform hook
     return True
 
 
-def _show_monitor_console():
-    """Keep the monitor visible but out of the way: titled and minimised."""
+def _hide_monitor_console():
+    """The monitor shows no window; Task Manager is where it is seen and stopped.
+
+    The packaged agent has no console at all. A console-based copy (an older
+    build, or the script run by python.exe) hides the console only when it
+    belongs to the monitor alone, so a terminal it was started from stays open.
+    """
     if os.name != "nt":
         return
     try:
         kernel32 = ctypes.windll.kernel32
-        if not kernel32.GetConsoleWindow() and kernel32.AllocConsole():
-            # The agent is built without a console; the monitor opens its own
-            # so it stays visible and can be closed to pause it.
-            sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
-            sys.stderr = sys.stdout
-        ctypes.windll.kernel32.SetConsoleTitleW(
-            f"{MONITOR_CONSOLE_TITLE} - close this window to pause until next sign-in"
-        )
-        window = ctypes.windll.kernel32.GetConsoleWindow()
-        if window:
-            import time
-
-            # A console opened with AllocConsole can still be appearing; retry
-            # until Windows reports it minimised.
-            for _attempt in range(20):
-                ctypes.windll.user32.ShowWindow(window, 6)  # SW_MINIMIZE
-                if ctypes.windll.user32.IsIconic(window):
-                    break
-                time.sleep(0.05)
+        window = kernel32.GetConsoleWindow()
+        if not window:
+            return
+        processes = (ctypes.wintypes.DWORD * 4)()
+        if kernel32.GetConsoleProcessList(processes, 4) == 1:
+            ctypes.windll.user32.ShowWindow(window, 0)  # SW_HIDE
     except (AttributeError, OSError):
-        LOGGER.warning("Could not adjust the monitoring console window.", exc_info=True)
+        LOGGER.warning("Could not hide the monitoring console window.", exc_info=True)
 
 
 def _monitor_command():
@@ -1942,14 +1936,9 @@ def _monitor_command():
 def _launch_monitor(arguments):
     import subprocess
 
-    startup = None
-    flags = 0
-    if os.name == "nt":
-        startup = subprocess.STARTUPINFO()
-        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startup.wShowWindow = 7  # SW_SHOWMINNOACTIVE
-        flags = subprocess.CREATE_NEW_CONSOLE
-    subprocess.Popen(arguments, creationflags=flags, startupinfo=startup, close_fds=True)
+    # No window: the monitor is seen and stopped in Task Manager.
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    subprocess.Popen(arguments, creationflags=flags, close_fds=True)
 
 
 def save_monitoring_config(server, device_id, token):
@@ -2122,16 +2111,12 @@ def run_monitor(sleep=None, max_beats=None):
     if not _acquire_single_instance():
         print("DevMonitor live monitoring is already running.")
         return 0
-    _show_monitor_console()
+    _hide_monitor_console()
     pid_path = monitoring_directory() / MONITOR_PID_NAME
     try:
         pid_path.write_text(str(os.getpid()), encoding="ascii")
     except OSError:
         LOGGER.warning("Could not record the monitoring process ID.", exc_info=True)
-    print(MONITOR_CONSOLE_TITLE + ".")
-    print(f"Sending CPU, memory, storage and network usage to {config['server']} "
-          f"every {HEARTBEAT_INTERVAL_SECONDS} seconds.")
-    print("Stop it from the device page in DevMonitor or run this agent with --stop-monitoring.")
     LOGGER.info("Live monitoring started (device_id=%s).", config.get("device_id"))
 
     sampler = LiveMetricSampler()
@@ -2219,8 +2204,8 @@ def enable_live_monitoring(server, device_id, token):
         return False
     LOGGER.info("Live monitoring enabled (device_id=%s).", device_id)
     print(
-        f"Live monitoring is ON. It starts automatically when you sign in "
-        f"(\"{MONITOR_STARTUP_NAME}\" in Task Manager > Startup apps)."
+        f"Live monitoring is ON. It runs without a window and starts when you sign in; "
+        f"find \"{MONITOR_STARTUP_NAME}\" in Task Manager (Processes and Startup apps)."
     )
     return True
 

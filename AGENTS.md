@@ -56,6 +56,7 @@ python -m flask --app device_monitoring_prototype.app check-mail
 
 ## Live monitoring (opt-in, continuous)
 - Continuous monitoring is allowed only after the device user explicitly opts in. It must stay transparent, authorized and stoppable; never add hidden or silent monitoring, and never enable it by default (the consent prompt defaults to "Not now"; `--yes` runs need `--enable-monitoring`).
+- On the device the monitor has no window. Its transparency comes from the consent text (which says so), the "DevMonitor Live Monitoring" process and startup entry in Task Manager (End task pauses, Disable turns off), and the website's status and Stop button. Keep those names in step (`MONITOR_STARTUP_NAME`, `MONITOR_EXECUTABLE_NAME`).
 - Flow: enrollment returns an inactive per-device credential only when the agent sends `X-DevMonitor-Monitoring: supported`; it activates via `POST /api/device-agent/monitoring/enable` within 15 minutes, after consent. Only the SHA-256 hash is stored (`devices.monitoring_token_hash`).
 - Heartbeats: `POST /api/device-agent/heartbeat` every 30 s (bearer credential, CSRF-exempt, minimum 10 s spacing) storing a `device_metrics` row: CPU/memory/storage percentages and network bytes per second computed on the device from byte-counter differences.
 - Status: monitored devices go Offline after 90 s without a heartbeat (`MONITORING_OFFLINE_AFTER`); unmonitored devices keep the 5-minute rule. Offline detection runs on read requests, not a background job, so it works on serverless hosts.

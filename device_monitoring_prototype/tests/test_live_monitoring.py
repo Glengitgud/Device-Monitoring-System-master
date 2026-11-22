@@ -1,6 +1,7 @@
 """Opt-in live monitoring: consent, heartbeats, Online/Offline, stopping, retention."""
 
 import json
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -507,7 +508,7 @@ class LiveMonitoringAgentTest(unittest.TestCase):
         with (
             patch.object(device_agent, "load_monitoring_config", return_value=config),
             patch.object(device_agent, "_acquire_single_instance", return_value=True),
-            patch.object(device_agent, "_show_monitor_console"),
+            patch.object(device_agent, "_hide_monitor_console"),
             patch.object(device_agent, "LiveMetricSampler", sampler),
             patch.object(device_agent, "send_heartbeat", side_effect=["ok", "retry", "revoked"]) as send,
             patch.object(device_agent, "remove_local_monitoring") as remove,
@@ -575,6 +576,25 @@ class LiveMonitoringAgentTest(unittest.TestCase):
         save.assert_called_once_with(server, 7, token)
         autostart.assert_called_once_with(command[1])
         launch.assert_called_once_with(command[0])
+
+    def test_monitor_starts_without_a_window_and_is_named_for_task_manager(self):
+        with patch("subprocess.Popen") as popen:
+            device_agent._launch_monitor(["agent.exe", "--monitor"])
+        flags = popen.call_args.kwargs["creationflags"]
+        if os.name == "nt":
+            import subprocess
+
+            self.assertTrue(flags & subprocess.CREATE_NO_WINDOW)
+            self.assertFalse(flags & subprocess.CREATE_NEW_CONSOLE)
+        self.assertNotIn("startupinfo", popen.call_args.kwargs)
+        # Task Manager shows the process and the startup entry under the same name.
+        self.assertEqual(
+            device_agent.MONITOR_EXECUTABLE_NAME, device_agent.MONITOR_STARTUP_NAME + ".exe"
+        )
+        consent = device_agent.CONSENT_TEXT.format(server="devmonitor.example")
+        self.assertIn("without a window", consent)
+        self.assertIn("Task Manager", consent)
+        self.assertIn(device_agent.MONITOR_STARTUP_NAME, consent)
 
     def test_failed_local_setup_turns_monitoring_back_off(self):
         calls = []
