@@ -502,10 +502,13 @@ function updatePendingEnrollmentNotice(pending) {
 
 // Opened by an installed app that is not linked yet: hand the one-use link straight
 // back to it. The button and copy box remain in case the browser blocks the hand-off.
+// Once the app has registered the device, this tab shows it and continues to the
+// dashboard (same tab, like the Link a Device page).
 function initDeviceLinkOpenPage() {
     const button = document.getElementById('openDeviceLinkBtn');
     const link = button?.dataset.deviceLink;
     if (link && link.startsWith('devmonitor://enroll?')) {
+        watchDeviceLinkOpenRegistration();
         window.setTimeout(() => { window.location.href = link; }, 300);
     }
     document.getElementById('copyOpenDeviceLinkBtn')?.addEventListener('click', async () => {
@@ -518,6 +521,36 @@ function initDeviceLinkOpenPage() {
             showToast('Select the link and copy it manually.', 'warning');
         }
     });
+}
+
+async function watchDeviceLinkOpenRegistration() {
+    const success = document.getElementById('deviceLinkOpenSuccess');
+    const pending = document.getElementById('deviceLinkOpenPending');
+    if (!success || !pending) return;
+    let baselineId;
+    try {
+        // The newest device before this link was used; anything newer is the one
+        // the app just registered.
+        baselineId = (await api('/api/device-verification-status')).latest_device?.id ?? null;
+    } catch (error) {
+        baselineId = null;
+    }
+    const timer = window.setInterval(async () => {
+        if (document.hidden) return;
+        let latest;
+        try {
+            latest = (await api('/api/device-verification-status')).latest_device;
+        } catch (error) {
+            return;
+        }
+        if (latest?.id == null || latest.id === baselineId) return;
+        window.clearInterval(timer);
+        const name = document.getElementById('deviceLinkOpenDeviceName');
+        if (name && latest.name) name.textContent = latest.name;
+        pending.hidden = true;
+        success.hidden = false;
+        window.setTimeout(() => window.location.replace('/dashboard'), 1500);
+    }, 3000);
 }
 
 function initDeviceVerificationPage() {

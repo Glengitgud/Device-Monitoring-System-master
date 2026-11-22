@@ -15,12 +15,14 @@ import ipaddress
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import socket
 import ssl
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -112,6 +114,12 @@ def link_open_url():
         return validate_server_url(server) + LINK_OPEN_PATH
     except AgentError:
         return ""
+
+
+def dashboard_url(submission_url):
+    """The website's dashboard for an enrollment's submission URL."""
+    parsed = urllib.parse.urlsplit(submission_url or "")
+    return validate_server_url(f"{parsed.scheme}://{parsed.netloc}") + "/dashboard"
 
 
 def embedded_enrollment():
@@ -618,18 +626,54 @@ def run_gui(enrollment, collector):  # pragma: no cover - needs a display
     form = ttk.Frame(frame)
     ttk.Label(form, text="Device name").grid(row=0, column=0, sticky="w")
     ttk.Entry(form, textvariable=name_var, width=36).grid(row=0, column=1, sticky="we", padx=8)
-    button = ttk.Button(frame, text="Register This Device")
+    progress = ttk.Progressbar(frame, mode="indeterminate")
+    buttons = ttk.Frame(frame)
+    button = ttk.Button(buttons, text="Register This Device")
+    done_button = ttk.Button(buttons, text="Done", command=root.destroy)
+
+    # Collecting (system_profiler) and submitting can take several seconds, so
+    # both run on worker threads; the window stays responsive and they report
+    # back through this queue, which the Tk thread drains.
+    events = queue.Queue()
+
+    def in_background(kind, work):
+        def run():
+            try:
+                events.put((kind, work()))
+            except AgentError as error:
+                events.put(("error", error))
+            except Exception as error:  # keep the window usable if a collector fails
+                events.put(("error", AgentError(f"Something went wrong: {error}")))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def busy(message):
+        status.set(message)
+        button.state(["disabled"])
+        progress.pack(fill="x", pady=(8, 0), before=buttons)
+        progress.start(12)
+
+    def idle():
+        progress.stop()
+        progress.pack_forget()
+        button.state(["!disabled"])
 
     def show_details():
+        link_frame.pack_forget()
+        busy("Scanning this Mac...")
+        in_background("scanned", collector.collect)
+
+    def on_scanned(specifications):
+        idle()
+        state["specifications"] = specifications
         server = urllib.parse.urlsplit(state["enrollment"][0]).netloc
-        state["specifications"] = collector.collect()
         details.configure(state="normal")
         details.delete("1.0", "end")
-        details.insert("end", f"Server: {server}\n\n" + "\n".join(summary_lines(state["specifications"])))
+        details.insert("end", f"Server: {server}\n\n" + "\n".join(summary_lines(specifications)))
         details.configure(state="disabled")
-        link_frame.pack_forget()
-        details.pack(fill="both", expand=True, pady=10)
-        form.pack(fill="x")
+        details.pack(fill="both", expand=True, pady=10, before=buttons)
+        form.pack(fill="x", before=buttons)
+        button.configure(text="Register This Device")
         status.set("Review the details, then select Register This Device.")
 
     def register():
@@ -641,22 +685,57 @@ def run_gui(enrollment, collector):  # pragma: no cover - needs a display
                 return
             show_details()
             return
-        button.state(["disabled"])
-        status.set("Registering...")
-        root.update_idletasks()
-        try:
-            result = submit_registration(
-                state["enrollment"][0],
-                state["enrollment"][1],
-                build_payload(name_var.get().strip() or "My Mac", collector.device_type(), state["specifications"]),
-            )
-        except AgentError as error:
-            status.set(str(error))
-            button.state(["!disabled"])
+        if state["specifications"] is None:
             return
-        status.set(f"Registered “{result.get('name', '')}”. Return to the website to open your dashboard.")
-        button.configure(text="Close", command=root.destroy)
-        button.state(["!disabled"])
+        submission_url, token = state["enrollment"]
+        payload = build_payload(
+            name_var.get().strip() or "My Mac", collector.device_type(), state["specifications"]
+        )
+        busy("Registering...")
+        in_background("registered", lambda: submit_registration(submission_url, token, payload))
+
+    def on_registered(result):
+        idle()
+        state["dashboard"] = dashboard_url(state["enrollment"][0])
+        details.pack_forget()
+        form.pack_forget()
+        status.set(
+            f"Registered “{result.get('name', '')}”. Your DevMonitor page in the browser "
+            "now opens your dashboard. Not open there? Select Open Dashboard."
+        )
+        button.configure(text="Open Dashboard", command=open_dashboard)
+        done_button.pack(side="right", padx=(0, 8))
+
+    def open_dashboard():
+        import webbrowser
+
+        try:
+            webbrowser.open(state["dashboard"], new=2)
+        except webbrowser.Error:
+            status.set(f"Open {state['dashboard']} in your browser to see your dashboard.")
+            return
+        root.destroy()
+
+    def scan_again():
+        button.configure(command=register)
+        show_details()
+
+    def on_error(error):
+        idle()
+        status.set(str(error))
+        if state["specifications"] is None and state["enrollment"] is not None:
+            button.configure(text="Scan again", command=scan_again)
+
+    handlers = {"scanned": on_scanned, "registered": on_registered, "error": on_error}
+
+    def poll():
+        try:
+            while True:
+                kind, value = events.get_nowait()
+                handlers[kind](value)
+        except queue.Empty:
+            pass
+        root.after(150, poll)
 
     def receive_link(*urls):
         """macOS delivers devmonitor:// links to the running app as an Apple event."""
@@ -668,25 +747,26 @@ def run_gui(enrollment, collector):  # pragma: no cover - needs a display
             except AgentError as error:
                 status.set(str(error))
                 continue
-            button.configure(text="Register This Device")
-            show_details()
             root.deiconify()
             root.lift()
+            show_details()
             return
 
     if sys.platform == "darwin":
         root.createcommand("::tk::mac::LaunchURL", receive_link)
 
     button.configure(command=register)
+    buttons.pack(fill="x", pady=(12, 0))
+    button.pack(side="right")
     if enrollment is None:
-        link_frame.pack(fill="x")
+        link_frame.pack(fill="x", before=buttons)
         button.configure(text="Continue")
         if website:
             root.after(400, open_website)
     else:
         show_details()
-    button.pack(anchor="e", pady=(12, 0))
     ttk.Label(frame, textvariable=status, wraplength=480, foreground="#334").pack(anchor="w", pady=(10, 0))
+    root.after(150, poll)
     root.mainloop()
     return 0
 

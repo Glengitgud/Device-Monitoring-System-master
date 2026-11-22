@@ -202,6 +202,18 @@ def make_ipa(signed=True, profile="ad-hoc"):
 
 
 class UnixAgentUnitTest(unittest.TestCase):
+    def test_dashboard_url_comes_from_the_link_server(self):
+        self.assertEqual(
+            agent.dashboard_url("https://monitor.example.edu/api/device-agent/enroll"),
+            "https://monitor.example.edu/dashboard",
+        )
+        self.assertEqual(
+            agent.dashboard_url("http://localhost:5000/api/device-agent/enroll"),
+            "http://localhost:5000/dashboard",
+        )
+        with self.assertRaises(agent.AgentError):
+            agent.dashboard_url("http://evil.example/api/device-agent/enroll")
+
     def test_linux_collector_reports_valid_specifications(self):
         with tempfile.TemporaryDirectory() as directory:
             collector = agent.LinuxCollector(
@@ -633,6 +645,10 @@ class DownloadHubIntegrationTest(unittest.TestCase):
         html = page.get_data(as_text=True)
         link = re.search(r'data-device-link="([^"]+)"', html).group(1).replace("&amp;", "&")
         self.assertTrue(link.startswith("devmonitor://enroll?server="))
+        # Once the app registers the device, this tab offers the dashboard.
+        self.assertIn('id="deviceLinkOpenSuccess"', html)
+        self.assertIn('id="deviceLinkOpenDashboardBtn"', html)
+        self.assertIn('href="/dashboard"', html)
         # The link is a real one-use enrollment for this account.
         enrollment = agent.parse_enrollment_link(link)
         laptop = {
