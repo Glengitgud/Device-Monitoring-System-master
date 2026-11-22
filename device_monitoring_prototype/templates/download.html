@@ -72,32 +72,31 @@
             <li class="dl-card {{ 'is-available' if platform.available else 'is-pending' }}"
                 data-platform="{{ platform.key }}">
                 <span class="dl-recommended" hidden>Recommended for this device</span>
-                <div class="dl-card-top">
-                    <span class="dl-icon" aria-hidden="true"><i class="bi {{ platform.icon }}"></i></span>
-                    <span class="dl-status">
-                        {% if platform.available %}
-                            <i class="bi bi-circle-fill" aria-hidden="true"></i>Available
-                        {% elif platform.build_ready %}
-                            <i class="bi bi-tools" aria-hidden="true"></i>Build ready
-                        {% else %}
-                            <i class="bi bi-hourglass-split" aria-hidden="true"></i>In development
-                        {% endif %}
-                    </span>
-                </div>
-                <h3 class="dl-name">{{ platform.name }}</h3>
-                <p class="dl-req">{{ platform.requirement }}</p>
-                <div class="dl-formats" aria-label="Package types">
-                    {% for format in platform.formats %}<span class="dl-format">{{ format }}</span>{% endfor %}
-                </div>
-
-                <div class="dl-actions">
+                <div class="dl-card-body">
+                    <div class="dl-card-top">
+                        <span class="dl-icon" aria-hidden="true"><i class="bi {{ platform.icon }}"></i></span>
+                        <span class="dl-status">
+                            {% if platform.available %}
+                                <i class="bi bi-circle-fill" aria-hidden="true"></i>Available
+                            {% elif platform.build_ready %}
+                                <i class="bi bi-tools" aria-hidden="true"></i>Build ready
+                            {% else %}
+                                <i class="bi bi-hourglass-split" aria-hidden="true"></i>In development
+                            {% endif %}
+                        </span>
+                    </div>
+                    <h3 class="dl-name">{{ platform.name }}</h3>
+                    <p class="dl-req">{{ platform.requirement }}</p>
+                    <div class="dl-formats" aria-label="Package types">
+                        {% for format in platform.formats %}<span class="dl-format">{{ format }}</span>{% endfor %}
+                    </div>
                     {% if platform.problem %}
                         <p class="dl-problem" role="note"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>{{ platform.problem }}</p>
                     {% endif %}
+                    {# Notes, hints and checklists sit above the buttons so every
+                       card's buttons line up along the bottom. #}
+                    <div class="dl-notes">
                     {% if not platform.available %}
-                        <button type="button" class="btn dl-btn dl-btn-pending" disabled aria-disabled="true">
-                            {{ platform.pending_label }}
-                        </button>
                         <p class="dl-hint">{{ platform.pending }}</p>
                         {% if platform.progress %}
                         <ul class="dl-progress" aria-label="{{ platform.name }} build progress">
@@ -111,10 +110,33 @@
                         </ul>
                         {% endif %}
                     {% elif per_user_blocked %}
+                        <p class="dl-hint">Administrators cannot register devices.</p>
+                    {% elif platform.kind == 'per_user' %}
+                        <p class="dl-hint">{{ platform.file_hint }}</p>
+                    {% elif platform.kind == 'package' %}
+                        <p class="dl-hint">
+                            {{ platform.file_hint }}<br>
+                            <span class="dl-meta">{{ platform.details.size_mb }} ·
+                                <abbr title="SHA-256 {{ platform.details.sha256 }}">SHA-256 {{ platform.details.sha256[:12] }}…</abbr></span>
+                        </p>
+                    {% else %}
+                        {% if platform.ota %}
+                        <p class="dl-hint">{{ platform.ota.note }} · v{{ platform.details.version }}</p>
+                        {% endif %}
+                        <p class="dl-hint">{{ platform.file_hint }}</p>
+                    {% endif %}
+                    </div>
+                </div>
+
+                <div class="dl-actions">
+                    {% if not platform.available %}
+                        <button type="button" class="btn dl-btn dl-btn-pending" disabled aria-disabled="true">
+                            {{ platform.pending_label }}
+                        </button>
+                    {% elif per_user_blocked %}
                         <button type="button" class="btn dl-btn dl-btn-pending" disabled aria-disabled="true">
                             Standard accounts only
                         </button>
-                        <p class="dl-hint">Administrators cannot register devices.</p>
                     {% elif platform.kind == 'per_user' %}
                         <form method="post" action="{{ platform.action }}" class="dl-form"
                               data-agent-download data-platform="{{ platform.key }}"
@@ -137,18 +159,12 @@
                             </button>
                         </form>
                         {% endif %}
-                        <p class="dl-hint">{{ platform.file_hint }}</p>
                     {% elif platform.kind == 'package' %}
                         <a class="btn btn-primary dl-btn" href="{{ platform.action }}" download
                            id="download{{ platform.name }}AgentLink">
                             <i class="bi bi-download" aria-hidden="true"></i>
                             <span class="dl-btn-label">{{ platform.button_label }}</span>
                         </a>
-                        <p class="dl-hint">
-                            {{ platform.file_hint }}<br>
-                            <span class="dl-meta">{{ platform.details.size_mb }} ·
-                                <abbr title="SHA-256 {{ platform.details.sha256 }}">SHA-256 {{ platform.details.sha256[:12] }}…</abbr></span>
-                        </p>
                     {% else %}
                         {% if platform.action %}
                         <a class="btn btn-primary dl-btn" href="{{ platform.action }}"
@@ -163,9 +179,7 @@
                             <i class="bi bi-phone" aria-hidden="true"></i>
                             <span class="dl-btn-label">{{ platform.ota.label }}</span>
                         </a>
-                        <p class="dl-hint">{{ platform.ota.note }} · v{{ platform.details.version }}</p>
                         {% endif %}
-                        <p class="dl-hint">{{ platform.file_hint }}</p>
                     {% endif %}
                 </div>
             </li>
