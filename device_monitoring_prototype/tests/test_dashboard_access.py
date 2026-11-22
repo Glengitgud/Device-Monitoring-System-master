@@ -2,8 +2,11 @@
 
 import hashlib
 import io
+import json
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -411,6 +414,87 @@ class WindowsAgentConsoleTest(unittest.TestCase):
         with patch.object(self.agent, "input", create=True) as prompt:
             self.agent._pause_before_closing()
         prompt.assert_not_called()
+
+
+class WindowsAgentScannerWindowTest(unittest.TestCase):
+    """A double-clicked agent opens the scanner window, never a console workflow."""
+
+    def setUp(self):
+        from device_monitoring_prototype import device_agent
+        self.agent = device_agent
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        handoff_path = Path(self.scratch.name) / "agent-handoff.json"
+        patcher = patch.object(self.agent, "_handoff_path", return_value=handoff_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def args(self, *argv):
+        return self.agent._parse_arguments(list(argv))
+
+    def test_packaged_double_click_uses_the_window(self):
+        with patch.object(self.agent.sys, "frozen", True, create=True), \
+                patch.object(self.agent.sys, "stdin", None):
+            self.assertTrue(self.agent._wants_window(self.args()))
+            # Automation flags keep the text flow.
+            for flag in ("--yes", "--print-specs", "--cli"):
+                with self.subTest(flag=flag):
+                    self.assertFalse(self.agent._wants_window(self.args(flag)))
+        # Running the script (tests, developers) keeps the text flow.
+        self.assertFalse(self.agent._wants_window(self.args()))
+
+    def test_main_opens_the_window_instead_of_prompting(self):
+        with patch.object(self.agent, "_wants_window", return_value=True), \
+                patch.object(self.agent, "configure_logging", return_value=None), \
+                patch.object(self.agent, "REGISTRATION_TOKEN", "T" * 43), \
+                patch.object(self.agent, "run_scanner_window", return_value=0) as window, \
+                patch.object(self.agent, "input", create=True) as prompt:
+            self.assertEqual(self.agent.main([]), 0)
+        window.assert_called_once_with(None, linked_with_link=False)
+        prompt.assert_not_called()
+
+    def test_link_is_handed_to_the_open_window(self):
+        received = []
+        handoff = self.agent.LinkHandoff(received.append)
+        self.assertTrue(handoff.start())
+        try:
+            self.assertTrue(self.agent.hand_off_link("devmonitor://enroll?token=x"))
+        finally:
+            handoff.stop()
+        self.assertEqual(received, ["devmonitor://enroll?token=x"])
+        # The listener cleans up after itself; with no open window the hand-off fails.
+        self.assertFalse(self.agent._handoff_path().exists())
+        self.assertFalse(self.agent.hand_off_link("devmonitor://enroll?token=x"))
+
+    def test_hand_off_with_the_wrong_key_is_ignored(self):
+        received = []
+        handoff = self.agent.LinkHandoff(received.append)
+        handoff.start()
+        try:
+            path = self.agent._handoff_path()
+            details = json.loads(path.read_text(encoding="utf-8"))
+            path.write_text(json.dumps({"port": details["port"], "key": "wrong"}), encoding="utf-8")
+            self.assertFalse(self.agent.hand_off_link("devmonitor://enroll?token=x"))
+        finally:
+            handoff.stop()
+        self.assertEqual(received, [])
+
+    def test_second_launch_with_a_link_exits_without_a_window(self):
+        with patch.object(self.agent, "register_link_handler"), \
+                patch.object(self.agent, "hand_off_link", return_value=True), \
+                patch.object(self.agent, "ScannerWindow") as window:
+            self.assertEqual(
+                self.agent.run_scanner_window("devmonitor://enroll?x", linked_with_link=True), 0
+            )
+        window.assert_not_called()
+
+    def test_print_specs_can_write_to_a_file(self):
+        output = Path(self.scratch.name) / "specs.json"
+        with patch.object(self.agent, "collect_specifications", return_value={"cpu_name": "CPU"}), \
+                patch.object(self.agent, "configure_logging", return_value=None):
+            self.assertEqual(self.agent.main(["--print-specs", "--output", str(output)]), 0)
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["specifications"],
+                         {"cpu_name": "CPU"})
 
 
 if __name__ == "__main__":

@@ -497,8 +497,8 @@ function updatePendingEnrollmentNotice(pending) {
     }
     const time = value => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     text.textContent = `An agent or app link prepared at ${time(pending.prepared_at)} has not `
-        + 'submitted a device yet. Run it, review the details and type yes (or tap Register '
-        + `in the app). It stays valid until ${time(pending.expires_at)}. This page updates by itself.`;
+        + 'submitted a device yet. Open it, review the scan and select Register This Device '
+        + `(Linux terminal: type yes). It stays valid until ${time(pending.expires_at)}. This page updates by itself.`;
     notice.hidden = false;
 }
 
@@ -777,8 +777,8 @@ function downloadFilename(response, fallback) {
 const AGENT_DOWNLOAD_MESSAGES = {
     windows: {
         preparing: 'Building your Windows Device Agent. This can take a few seconds...',
-        done: name => `Download started. Run ${name} on this Windows PC and approve the `
-            + 'detected specifications. It works once and expires after 30 minutes.',
+        done: name => `Download started. Open ${name} on this Windows PC: the scanner window `
+            + 'scans the device, then select Register This Device. It works once and expires after 30 minutes.',
     },
     linux: {
         preparing: 'Preparing your Linux package...',

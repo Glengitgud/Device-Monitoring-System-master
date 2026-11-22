@@ -65,7 +65,7 @@ jobs:
       - name: Build the generic agent
         run: |
           python agents/ci/set_server_url.py device_monitoring_prototype/device_agent.py "$DEVMONITOR_SERVER_URL"
-          python -m PyInstaller --onefile --console --clean --noconfirm \
+          python -m PyInstaller --onefile --noconsole --clean --noconfirm \
             --name DevMonitor-Agent-Windows --distpath dist \
             --workpath "$RUNNER_TEMP/pyi-work" --specpath "$RUNNER_TEMP/pyi-spec" \
             device_monitoring_prototype/device_agent.py
@@ -73,7 +73,8 @@ jobs:
 
       - name: Agent collects valid specifications on real Windows
         run: |
-          dist/DevMonitor-Agent-Windows.exe --print-specs > windows-specs.json
+          # Windowed EXE: write the JSON to a file rather than relying on stdout.
+          dist/DevMonitor-Agent-Windows.exe --print-specs --output windows-specs.json
           python agents/ci/ci_backend.py validate-specs windows-specs.json
 
       - name: End-to-end - the packaged agent enrolls this PC with a real backend
