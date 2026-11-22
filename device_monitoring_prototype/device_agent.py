@@ -10,6 +10,7 @@ Two builds come from this file:
 """
 
 import argparse
+import hmac
 import ipaddress
 import ctypes
 import ctypes.wintypes
@@ -19,11 +20,14 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import platform
+import queue
 import re
+import secrets
 import socket
 import ssl
 import sys
 import tempfile
+import threading
 from datetime import datetime
 import urllib.error
 from urllib.parse import parse_qs, urlsplit
@@ -1057,9 +1061,10 @@ def _health_issue(title, score, description, root_cause, recommendation, steps):
     }
 
 
-def show_registration_success():
+def show_registration_success(dashboard_url=None):
     import tkinter as tk
 
+    dashboard_url = dashboard_url or DASHBOARD_URL
     root = tk.Tk()
     root.title("Device Registered Successfully")
     root.geometry("430x300")
@@ -1086,7 +1091,7 @@ def show_registration_success():
     card.pack(fill="x", padx=28, pady=18)
 
     def redirect():
-        webbrowser.open(DASHBOARD_URL)
+        webbrowser.open(dashboard_url)
         root.destroy()
 
     card.bind("<Button-1>", lambda _event: redirect())
@@ -1328,8 +1333,577 @@ def _parse_arguments(argv):
         action="store_true",
         help="print the detected specifications as JSON and exit (nothing is sent)",
     )
+    parser.add_argument("--output", help="with --print-specs: write the JSON to this file")
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="use text prompts instead of the scanner window",
+    )
     args, _unknown = parser.parse_known_args(argv)
     return args
+
+
+class SubmissionError(RuntimeError):
+    """The server refused a submission or could not be reached; str() is user-facing."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
+def submit_payload(submission_url, authorization_token, payload, *, scanner_mode, linked_with_link):
+    """POST a registration or scan payload and return the server's JSON result."""
+    response_key = "run_id" if scanner_mode else "device_id"
+    try:
+        report = payload.get("report") if isinstance(payload, dict) else None
+        LOGGER.info(
+            "Submitting payload (mode=%s, url=%s, payload_keys=%s, report_keys=%s).",
+            "scanner" if scanner_mode else "registration",
+            submission_url,
+            sorted(payload.keys()) if isinstance(payload, dict) else [],
+            sorted(report.keys()) if isinstance(report, dict) else [],
+        )
+        request = urllib.request.Request(
+            submission_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {authorization_token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response_status = getattr(response, "status", None) or response.getcode()
+            result = json.loads(response.read().decode("utf-8"))
+        LOGGER.info(
+            "Submission response received (status=%s, keys=%s).",
+            response_status,
+            sorted(result.keys()) if isinstance(result, dict) else [],
+        )
+        if not isinstance(result, dict) or response_key not in result:
+            raise ValueError("The server returned an invalid submission response.")
+        return result
+    except urllib.error.HTTPError as error:
+        LOGGER.exception("Device agent submission failed with HTTP %s.", error.code)
+        message = error.read().decode("utf-8", errors="replace")
+        try:
+            message = json.loads(message).get("error") or message
+        except (ValueError, AttributeError):
+            pass
+        if error.code == 401 and linked_with_link:
+            message = (
+                "Submission failed: this registration link has expired or was already used.\n"
+                "Click \"Link this device\" on the DevMonitor website to get a new one."
+            )
+        elif error.code == 401 and not scanner_mode:
+            message = (
+                "Submission failed: this download has expired or was already used.\n"
+                "Download the agent again from the DevMonitor website (Downloads page) "
+                "and run the new copy."
+            )
+        else:
+            message = f"Submission failed ({error.code}): {message}"
+        raise SubmissionError(message, error.code) from error
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as error:
+        LOGGER.exception("Device agent submission could not be completed.")
+        raise SubmissionError(f"Could not submit the information: {error}") from error
+
+
+# --------------------------------------------------------------------------
+# Link hand-off between agent processes
+# --------------------------------------------------------------------------
+#
+# A generic build gets its one-use link from the website, which hands it back by
+# starting this program again with a devmonitor:// argument. Instead of a second
+# window, that process forwards the link to the window that is already open (over
+# loopback, with a per-run key kept in the user's own profile) and exits.
+
+HANDOFF_MAX_BYTES = 4096
+
+
+def _handoff_path():
+    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return base / "DevMonitor" / "agent-handoff.json"
+
+
+def _read_message(connection, limit=HANDOFF_MAX_BYTES):
+    chunks, size = [], 0
+    while size < limit:
+        chunk = connection.recv(limit - size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
+class LinkHandoff:
+    """Receives devmonitor:// links from re-launched copies of this agent."""
+
+    def __init__(self, on_link):
+        self._on_link = on_link
+        self._key = secrets.token_urlsafe(32)
+        self._socket = None
+        self._path = _handoff_path()
+
+    def start(self):
+        try:
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._socket.bind(("127.0.0.1", 0))
+            self._socket.listen(2)
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(
+                json.dumps({"port": self._socket.getsockname()[1], "key": self._key}),
+                encoding="utf-8",
+            )
+        except OSError:
+            LOGGER.warning("The link hand-off listener could not start.", exc_info=True)
+            self.stop()
+            return False
+        threading.Thread(target=self._serve, name="devmonitor-link-handoff", daemon=True).start()
+        return True
+
+    def _serve(self):
+        while self._socket is not None:
+            try:
+                connection, _address = self._socket.accept()
+            except (OSError, AttributeError):
+                return
+            with connection:
+                try:
+                    connection.settimeout(5)
+                    message = json.loads(_read_message(connection).decode("utf-8"))
+                    if not hmac.compare_digest(str(message.get("key", "")), self._key):
+                        LOGGER.warning("Ignored a link hand-off with the wrong key.")
+                        continue
+                    self._on_link(str(message.get("link", "")))
+                    connection.sendall(b"ok")
+                except (OSError, ValueError, AttributeError):
+                    LOGGER.warning("Ignored an invalid link hand-off.", exc_info=True)
+
+    def stop(self):
+        if self._socket is not None:
+            try:
+                self._socket.close()
+            except OSError:
+                pass
+            self._socket = None
+        try:
+            if json.loads(self._path.read_text(encoding="utf-8")).get("key") == self._key:
+                self._path.unlink()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
+def hand_off_link(link):
+    """Give `link` to an agent window that is already open; False when there is none."""
+    try:
+        details = json.loads(_handoff_path().read_text(encoding="utf-8"))
+        with socket.create_connection(("127.0.0.1", int(details["port"])), timeout=3) as connection:
+            connection.sendall(json.dumps({"key": details["key"], "link": link}).encode("utf-8"))
+            connection.shutdown(socket.SHUT_WR)
+            accepted = _read_message(connection, 16) == b"ok"
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    LOGGER.info("Handed the registration link to the open scanner window (accepted=%s).", accepted)
+    return accepted
+
+
+# --------------------------------------------------------------------------
+# Scanner window
+# --------------------------------------------------------------------------
+
+WINDOW_COLORS = {
+    "background": "#0d0221",
+    "panel": "#1a0b45",
+    "text": "#f8fafc",
+    "muted": "#cbd5e1",
+    "error": "#fca5a5",
+    "link": "#93c5fd",
+    "accent": "#3458a8",
+    "accent_active": "#26408b",
+}
+
+
+def specification_lines(specifications):
+    """(label, value) pairs for the reviewed specifications, in display order."""
+    lines = []
+    for label, key in FIELD_LABELS:
+        value = specifications.get(key)
+        if (
+            key in {"storage_total_bytes", "storage_available_bytes"}
+            and not specifications.get("storage_devices")
+        ):
+            value = UNAVAILABLE
+        lines.append((label, display_value(key, value)))
+    return lines
+
+
+class ScannerWindow:  # pragma: no cover - needs a display
+    """What a downloaded agent opens: the device is scanned, reviewed and registered.
+
+    Scanning starts with the window. Enrollment runs in the background: a per-download
+    build already carries its token, and a generic build asks the website (where the
+    user is signed in) for a one-use link that comes back through LinkHandoff.
+    Nothing is sent until the user selects Register This Device.
+    """
+
+    def __init__(self, enrollment, *, linked_with_link):
+        import tkinter as tk
+        from tkinter import ttk
+
+        self.enrollment = enrollment
+        self.linked_with_link = linked_with_link
+        self.specifications = None
+        self.registered_dashboard = None
+        self.waiting_message = ""
+        self.events = queue.Queue()
+        self.handoff = None
+        colors = WINDOW_COLORS
+        plain = {"background": colors["background"], "foreground": colors["text"]}
+        field = {
+            "background": colors["panel"],
+            "foreground": colors["text"],
+            "insertbackground": colors["text"],
+            "relief": "flat",
+        }
+        secondary = {
+            "background": colors["panel"],
+            "foreground": colors["text"],
+            "activebackground": colors["accent_active"],
+            "activeforeground": "#ffffff",
+            "relief": "flat",
+            "padx": 14,
+            "pady": 8,
+        }
+
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
+        except (AttributeError, OSError):
+            pass
+        root = self.root = tk.Tk()
+        root.title("DevMonitor Device Scanner")
+        root.geometry("640x660")
+        root.minsize(520, 540)
+        root.configure(background=colors["background"])
+        style = ttk.Style(root)
+        try:
+            style.theme_use("clam")  # the native theme ignores the dark colours below
+        except tk.TclError:
+            pass
+        style.configure(
+            "Scanner.TCombobox",
+            fieldbackground=colors["panel"],
+            background=colors["panel"],
+            foreground=colors["text"],
+            arrowcolor=colors["text"],
+        )
+        style.map(
+            "Scanner.TCombobox",
+            fieldbackground=[("readonly", colors["panel"])],
+            foreground=[("readonly", colors["text"])],
+            selectbackground=[("readonly", colors["panel"])],
+            selectforeground=[("readonly", colors["text"])],
+        )
+        style.configure(
+            "Scanner.Horizontal.TProgressbar",
+            background=colors["accent"],
+            troughcolor=colors["panel"],
+        )
+
+        tk.Label(
+            root, text="DevMonitor Device Scanner", font=("Segoe UI", 16, "bold"), **plain
+        ).pack(anchor="w", padx=20, pady=(18, 2))
+        self.status = tk.StringVar(value="Scanning this device...")
+        self.status_label = tk.Label(
+            root, textvariable=self.status, font=("Segoe UI", 10), wraplength=590,
+            justify="left", background=colors["background"], foreground=colors["muted"],
+        )
+        self.status_label.pack(anchor="w", padx=20)
+        self.progress = ttk.Progressbar(
+            root, mode="indeterminate", style="Scanner.Horizontal.TProgressbar"
+        )
+        self.progress.pack(fill="x", padx=20, pady=(8, 4))
+        self.progress.start(12)
+
+        details_frame = tk.Frame(root, background=colors["panel"])
+        details_frame.pack(fill="both", expand=True, padx=20, pady=8)
+        scrollbar = tk.Scrollbar(details_frame)
+        scrollbar.pack(side="right", fill="y")
+        self.details = tk.Text(
+            details_frame, wrap="word", height=14, font=("Segoe UI", 10),
+            padx=12, pady=10, yscrollcommand=scrollbar.set, **field,
+        )
+        self.details.pack(fill="both", expand=True)
+        scrollbar.configure(command=self.details.yview)
+        self.details.tag_configure("label", foreground=colors["muted"])
+        self.details.configure(state="disabled")
+
+        form = tk.Frame(root, background=colors["background"])
+        form.pack(fill="x", padx=20, pady=(4, 0))
+        form.columnconfigure(1, weight=1)
+        tk.Label(form, text="Device name", **plain).grid(row=0, column=0, sticky="w", pady=3)
+        self.name = tk.StringVar(value=platform.node())
+        tk.Entry(form, textvariable=self.name, **field).grid(
+            row=0, column=1, sticky="we", padx=(10, 0), pady=3, ipady=4
+        )
+        tk.Label(form, text="Device type", **plain).grid(row=1, column=0, sticky="w", pady=3)
+        self.device_type = tk.StringVar(value=_guess_device_type())
+        ttk.Combobox(
+            form, textvariable=self.device_type, values=("Desktop", "Laptop"),
+            state="readonly", style="Scanner.TCombobox", width=12,
+        ).grid(row=1, column=1, sticky="w", padx=(10, 0), pady=3)
+        tk.Label(
+            root,
+            text=(
+                "Only the details above and your device name and type are sent "
+                "to your DevMonitor account."
+            ),
+            wraplength=590, justify="left", font=("Segoe UI", 9),
+            background=colors["background"], foreground=colors["muted"],
+        ).pack(anchor="w", padx=20, pady=(8, 0))
+
+        self.buttons = tk.Frame(root, background=colors["background"])
+        self.buttons.pack(fill="x", padx=20, pady=(12, 18))
+        self.link_frame = tk.Frame(root, background=colors["background"])
+        self.pasted_link = tk.StringVar()
+        tk.Label(
+            self.link_frame, text="Paste the link shown on the DevMonitor website:", **plain
+        ).pack(anchor="w")
+        row = tk.Frame(self.link_frame, background=colors["background"])
+        row.pack(fill="x", pady=(4, 0))
+        tk.Entry(row, textvariable=self.pasted_link, **field).pack(
+            side="left", fill="x", expand=True, ipady=4
+        )
+        tk.Button(row, text="Use link", command=self._use_pasted_link, **secondary).pack(
+            side="left", padx=(8, 0)
+        )
+        self.trouble = tk.Label(
+            self.buttons, text="Having trouble linking?", cursor="hand2",
+            font=("Segoe UI", 9, "underline"),
+            background=colors["background"], foreground=colors["link"],
+        )
+        self.trouble.bind("<Button-1>", lambda _event: self._show_link_entry())
+        self.register_button = tk.Button(
+            self.buttons, text="Register This Device", command=self._register,
+            state="disabled", background=colors["accent"], foreground="#ffffff",
+            activebackground=colors["accent_active"], activeforeground="#ffffff",
+            disabledforeground=colors["muted"], relief="flat", padx=18, pady=8,
+        )
+        self.register_button.pack(side="right")
+        tk.Button(self.buttons, text="Close", command=root.destroy, **secondary).pack(
+            side="right", padx=(0, 8)
+        )
+
+    def run(self):
+        threading.Thread(target=self._scan, name="devmonitor-scan", daemon=True).start()
+        if self.enrollment is None:
+            self._request_link()
+        self.root.after(100, self._poll)
+        try:
+            self.root.mainloop()
+        finally:
+            if self.handoff is not None:
+                self.handoff.stop()
+        if self.registered_dashboard is None:
+            return 0
+        try:
+            show_registration_success(self.registered_dashboard)
+        except (ImportError, OSError, RuntimeError):
+            LOGGER.exception("The registration success window could not be displayed.")
+        return 0
+
+    # -- background work (worker threads only post to self.events) ----------
+
+    def _scan(self):
+        try:
+            self.events.put(("scanned", collect_specifications()))
+        except (OSError, RuntimeError) as error:
+            LOGGER.exception("Device inventory could not be collected.")
+            self.events.put(("scan_failed", f"Could not collect device information: {error}"))
+
+    def _request_link(self):
+        """Generic build: the signed-in website hands this window a one-use link."""
+        if self.handoff is None:
+            self.handoff = LinkHandoff(lambda link: self.events.put(("link", link)))
+            self.handoff.start()
+        if open_website_to_link():
+            self.waiting_message = (
+                "Connecting to your DevMonitor account. Sign in on the website if your "
+                "browser asks, and allow it to open DevMonitor Agent."
+            )
+        else:
+            self.waiting_message = (
+                "Sign in on the DevMonitor website on this computer and select "
+                "Link this device on the Link a Device page."
+            )
+            self._show_link_entry()
+        self._refresh()
+
+    def _poll(self):
+        try:
+            while True:
+                kind, value = self.events.get_nowait()
+                getattr(self, f"_on_{kind}")(value)
+        except queue.Empty:
+            pass
+        self.root.after(150, self._poll)
+
+    # -- events (run on the Tk thread) ---------------------------------------
+
+    def _on_scanned(self, specifications):
+        self.specifications = specifications
+        self.progress.stop()
+        self.progress.pack_forget()
+        self.details.configure(state="normal")
+        self.details.delete("1.0", "end")
+        for label, value in specification_lines(specifications):
+            self.details.insert("end", f"{label}\n", "label")
+            self.details.insert("end", f"{value}\n\n")
+        self.details.configure(state="disabled")
+        self._refresh()
+
+    def _on_scan_failed(self, message):
+        self.progress.stop()
+        self.progress.pack_forget()
+        self._set_status(message, error=True)
+
+    def _on_link(self, link):
+        if self.enrollment is not None:
+            return
+        try:
+            self.enrollment = parse_enrollment_link(link)
+        except ValueError as error:
+            self._set_status(str(error), error=True)
+            return
+        LOGGER.info("Using a registration link for %s.", self.enrollment[0])
+        self.link_frame.pack_forget()
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self._refresh()
+
+    def _on_submitted(self, dashboard_url):
+        self.registered_dashboard = dashboard_url
+        self.root.destroy()
+
+    def _on_submit_failed(self, error):
+        if error.status == 401 and self.linked_with_link:
+            # The link expired or was used already: fetch a fresh one in the background.
+            self.enrollment = None
+            self._request_link()
+            self._set_status(
+                "That link has expired or was already used. Getting a new one from "
+                "the DevMonitor website...",
+                error=True,
+            )
+            return
+        self.register_button.configure(state="normal")
+        self._set_status(str(error), error=True)
+
+    # -- user actions --------------------------------------------------------
+
+    def _use_pasted_link(self):
+        self._on_link(self.pasted_link.get())
+
+    def _show_link_entry(self):
+        if self.enrollment is None:
+            self.link_frame.pack(fill="x", padx=20, pady=(8, 0), before=self.buttons)
+
+    def _register(self):
+        name = (self.name.get().strip() or platform.node() or "").strip()
+        if not name or len(name) > 120:
+            self._set_status("Enter a device name between 1 and 120 characters.", error=True)
+            return
+        device_type = self.device_type.get()
+        if device_type not in {"Desktop", "Laptop"}:
+            self._set_status("Choose Desktop or Laptop.", error=True)
+            return
+        if self.enrollment is None or self.specifications is None:
+            return
+        submission_url, token, dashboard_url = self.enrollment
+        payload = {"name": name, "device_type": device_type, "specifications": self.specifications}
+        self.register_button.configure(state="disabled")
+        self._set_status("Registering this device...")
+
+        def submit():
+            try:
+                result = submit_payload(
+                    submission_url, token, payload,
+                    scanner_mode=False, linked_with_link=self.linked_with_link,
+                )
+            except SubmissionError as error:
+                self.events.put(("submit_failed", error))
+                return
+            LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
+            self.events.put(("submitted", dashboard_url))
+
+        threading.Thread(target=submit, name="devmonitor-submit", daemon=True).start()
+
+    # -- presentation --------------------------------------------------------
+
+    def _refresh(self):
+        ready = self.specifications is not None and self.enrollment is not None
+        self.register_button.configure(state="normal" if ready else "disabled")
+        if self.enrollment is None:
+            self.trouble.pack(side="left")
+        else:
+            self.trouble.pack_forget()
+        if ready:
+            server = urlsplit(self.enrollment[0]).netloc
+            self._set_status(
+                "Scan complete. Review the details, then select Register This Device "
+                f"to add it to your account on {server}."
+            )
+        elif self.specifications is None:
+            self._set_status(" ".join(filter(None, ("Scanning this device...", self.waiting_message))))
+        else:
+            self._set_status(self.waiting_message)
+
+    def _set_status(self, text, *, error=False):
+        self.status.set(text)
+        self.status_label.configure(
+            foreground=WINDOW_COLORS["error"] if error else WINDOW_COLORS["muted"]
+        )
+
+
+def _wants_window(args):
+    """A packaged agent opened by double-click (no console) shows the scanner window.
+
+    Scripts, tests and CI keep the text flow (`--yes`, `--print-specs`, `--cli`).
+    """
+    if args.yes or args.print_specs or args.cli or not getattr(sys, "frozen", False):
+        return False
+    return sys.stdin is None or sys.stdout is None or not sys.stdin.isatty()
+
+
+def run_scanner_window(link, *, linked_with_link):
+    """Open the scanner window; returns the process exit code."""
+    if linked_with_link:
+        register_link_handler()
+        if link and hand_off_link(link):
+            return 0  # the window that is already open continues with this link
+        enrollment = None
+    else:
+        enrollment = (SUBMISSION_URL, REGISTRATION_TOKEN, DASHBOARD_URL)
+    try:
+        import tkinter
+    except ImportError:
+        LOGGER.exception("The scanner window is unavailable (tkinter is missing).")
+        return 1
+    try:
+        window = ScannerWindow(enrollment, linked_with_link=linked_with_link)
+    except (tkinter.TclError, OSError, RuntimeError):
+        LOGGER.exception("The scanner window could not be opened.")
+        return 1
+    if link:
+        window.events.put(("link", link))
+    return window.run()
 
 
 def main(argv=None):
@@ -1339,20 +1913,30 @@ def main(argv=None):
     log_path = configure_logging()
     if args.print_specs:
         try:
-            print(json.dumps(
+            text = json.dumps(
                 {"device_type": _guess_device_type(), "specifications": collect_specifications()},
                 indent=2,
                 default=str,
-            ))
+            )
         except RuntimeError as error:
             print(f"Could not collect device information: {error}", file=sys.stderr)
             return 1
+        if args.output:
+            try:
+                Path(args.output).write_text(text + "\n", encoding="utf-8")
+            except OSError as error:
+                print(f"Could not write {args.output}: {error}", file=sys.stderr)
+                return 1
+        else:
+            print(text)
         return 0
     scanner_mode = (
         SCAN_RUN_ID not in {"__SCAN_RUN_ID__", ""}
         or "/api/device-agent/scans/" in SUBMISSION_URL
     )
     linked_with_link = not scanner_mode and not _embedded(REGISTRATION_TOKEN)
+    if not scanner_mode and _wants_window(args):
+        return run_scanner_window(args.link, linked_with_link=linked_with_link)
     if linked_with_link:
         # Generic build: the one-use token comes from a "Link this device" link.
         register_link_handler()
@@ -1377,14 +1961,8 @@ def main(argv=None):
         authorization_token = SCAN_TOKEN
     else:
         print("\nDetected device specifications (review before submission):")
-        for label, key in FIELD_LABELS:
-            value = specifications.get(key)
-            if (
-                key in {"storage_total_bytes", "storage_available_bytes"}
-                and not specifications["storage_devices"]
-            ):
-                value = UNAVAILABLE
-            print(f"  {label}: {display_value(key, value)}")
+        for label, value in specification_lines(specifications):
+            print(f"  {label}: {value}")
         _show_log_location(log_path)
         if args.yes:
             name = (args.name or platform.node() or "").strip()
@@ -1418,67 +1996,15 @@ def main(argv=None):
         authorization_token = REGISTRATION_TOKEN
 
     try:
-        payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
-        report_keys = sorted(report.keys()) if scanner_mode and isinstance(report, dict) else []
-        LOGGER.info(
-            "Submitting payload (mode=%s, url=%s, payload_keys=%s, report_keys=%s).",
-            "scanner" if scanner_mode else "registration",
+        result = submit_payload(
             SUBMISSION_URL,
-            payload_keys,
-            report_keys,
+            authorization_token,
+            payload,
+            scanner_mode=scanner_mode,
+            linked_with_link=linked_with_link,
         )
-        request = urllib.request.Request(
-            SUBMISSION_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {authorization_token}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            response_status = getattr(response, "status", None) or response.getcode()
-            result = json.loads(response.read().decode("utf-8"))
-        LOGGER.info(
-            "Submission response received (status=%s, keys=%s).",
-            response_status,
-            sorted(result.keys()) if isinstance(result, dict) else [],
-        )
-        response_key = "run_id" if scanner_mode else "device_id"
-        if not isinstance(result, dict) or response_key not in result:
-            raise ValueError("The server returned an invalid submission response.")
-    except urllib.error.HTTPError as error:
-        LOGGER.exception("Device agent submission failed with HTTP %s.", error.code)
-        message = error.read().decode("utf-8", errors="replace")
-        try:
-            message = json.loads(message).get("error") or message
-        except (ValueError, AttributeError):
-            pass
-        if error.code == 401 and linked_with_link:
-            print(
-                "Submission failed: this registration link has expired or was already used.\n"
-                "Click \"Link this device\" on the DevMonitor website to get a new one.",
-                file=sys.stderr,
-            )
-        elif error.code == 401 and not scanner_mode:
-            print(
-                "Submission failed: this download has expired or was already used.\n"
-                "Download the agent again from the DevMonitor website (Downloads page) "
-                "and run the new copy.",
-                file=sys.stderr,
-            )
-        else:
-            print(f"Submission failed ({error.code}): {message}", file=sys.stderr)
-        _show_log_location(log_path)
-        return 1
-    except (
-        urllib.error.URLError,
-        TimeoutError,
-        json.JSONDecodeError,
-        ValueError,
-    ) as error:
-        LOGGER.exception("Device agent submission could not be completed.")
-        print(f"Could not submit the information: {error}", file=sys.stderr)
+    except SubmissionError as error:
+        print(str(error), file=sys.stderr)
         _show_log_location(log_path)
         return 1
 
@@ -1516,7 +2042,7 @@ def main(argv=None):
 
 
 def _pause_before_closing():
-    """Keep the console window of the packaged EXE open so results stay readable."""
+    """Keep the console window of a console-launched agent open so results stay readable."""
     if getattr(sys, "frozen", False) and sys.stdin is not None and sys.stdin.isatty():
         try:
             input("\nPress Enter to close this window...")
@@ -1526,6 +2052,8 @@ def _pause_before_closing():
 
 if __name__ == "__main__":
     exit_code = main()
-    if "--yes" not in sys.argv[1:] and "--print-specs" not in sys.argv[1:]:
+    if not ({"--yes", "--print-specs"} & set(sys.argv[1:])) and not _wants_window(
+        _parse_arguments(sys.argv[1:])
+    ):
         _pause_before_closing()
     raise SystemExit(exit_code)

@@ -77,8 +77,12 @@ as partially implemented are operational only within documented limitations.
 ### Windows Device Agent and Scanner
 
 - The application host can build one-file Windows executables with PyInstaller.
-- Registration mode is a console executable that displays the detected
-  inventory and submits it only after user approval.
+- Registration mode is a windowed executable: launching it opens the
+  DevMonitor Device Scanner, which scans immediately, shows the detected
+  inventory, and submits it only after the user selects Register This Device.
+  Linking to the account happens in the background; no console is shown.
+  Text prompts remain available for automation (`--yes`, `--print-specs`,
+  `--cli`).
 - Scanner mode is a silent, no-console executable with a short-lived bearer
   token and an explicit submission endpoint.
 - Collector components are best-effort: a failed hardware or network check does

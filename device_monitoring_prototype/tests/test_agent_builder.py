@@ -70,7 +70,9 @@ class DeviceAgentBuilderTest(unittest.TestCase):
         self.assertNotIn("__REGISTRATION_TOKEN__", captured["source"])
         self.assertNotIn("__SUBMISSION_URL__", captured["source"])
         self.assertIn("--onefile", captured["command"])
-        self.assertIn("--console", captured["command"])
+        # The downloaded agent opens its scanner window; no console window appears.
+        self.assertIn("--noconsole", captured["command"])
+        self.assertNotIn("--console", captured["command"])
         self.assertEqual(captured["kwargs"]["timeout"], 240)
         run.assert_called_once()
 

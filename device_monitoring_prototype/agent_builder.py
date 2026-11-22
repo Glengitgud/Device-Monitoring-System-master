@@ -67,7 +67,9 @@ def build_agent_executable(
                 "-m",
                 "PyInstaller",
                 "--onefile",
-                "--console" if mode == "registration" else "--noconsole",
+                # Both modes are windowed: registration opens the scanner window,
+                # scanner mode runs silently. No console window is ever shown.
+                "--noconsole",
                 "--clean",
                 "--noconfirm",
                 "--name",
