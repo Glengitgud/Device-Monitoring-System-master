@@ -157,18 +157,6 @@ code {
     color: #9a9a9a !important;
 }
 
-.login-card .input-group .btn-outline-secondary {
-    border-color: var(--dm-border);
-    color: var(--dm-text-muted);
-    background: var(--dm-darkest);
-}
-
-.login-card .input-group .btn-outline-secondary:hover {
-    background: var(--dm-accent);
-    border-color: var(--dm-accent);
-    color: #ffffff;
-}
-
 .login-btn {
     padding: 0.7rem;
     font-weight: 600;
@@ -1616,6 +1604,27 @@ code {
     padding-top: 1rem;
 }
 
+/* Line the cards up section by section: every card in a grid row shares the
+   same five tracks (top, name, requirement, formats, actions), so the
+   download buttons sit at the same height however long the text above is. */
+@supports (grid-template-rows: subgrid) {
+    .dl-card {
+        display: grid;
+        grid-row: span 5;
+        grid-template-rows: subgrid;
+        row-gap: 0;
+    }
+
+    .dl-req {
+        min-height: 0;
+    }
+
+    .dl-actions {
+        margin-top: 0;
+        justify-content: flex-start;
+    }
+}
+
 .dl-form {
     margin: 0;
 }
@@ -1626,9 +1635,18 @@ code {
     justify-content: center;
     gap: 0.4rem;
     width: 100%;
+    min-height: 2.75rem;
+    padding: 0.55rem 1rem;
     font-size: 0.9rem;
     font-weight: 600;
+    line-height: 1.2;
     white-space: nowrap;
+}
+
+.dl-btn-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .dl-btn-pending,
@@ -1991,6 +2009,61 @@ code {
     color: #f87171;
 }
 
+/* Password show/hide toggle sitting inside the input's right edge */
+.password-field {
+    position: relative;
+}
+
+.password-field .form-control {
+    padding-right: 3rem;
+}
+
+/* Hide the browser's own reveal/clear buttons so only one eye is shown */
+.password-field .form-control::-ms-reveal,
+.password-field .form-control::-ms-clear {
+    display: none;
+}
+
+.password-toggle {
+    position: absolute;
+    top: 50%;
+    right: 0.4rem;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--dm-text-muted);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.password-toggle:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.password-toggle:focus-visible {
+    outline: none;
+    color: #ffffff;
+    box-shadow: 0 0 0 2px var(--dm-border-focus);
+}
+
+.password-toggle[aria-pressed="true"] {
+    color: #60a5fa;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .password-toggle { transition: none; }
+}
+
 .link-card-note {
     color: var(--dm-text-dim);
 }
@@ -2028,7 +2101,7 @@ code {
 }
 
 .dl-problem {
-    margin: 0 0 0.35rem;
+    margin: 0.2rem 0 0;
     padding: 0.4rem 0.5rem;
     border: 1px solid rgba(252, 165, 165, 0.35);
     border-radius: 0.5rem;

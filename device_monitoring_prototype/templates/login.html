@@ -57,13 +57,14 @@
                         <span aria-hidden="true">*</span>
                         <span class="visually-hidden">required</span>
                     </label>
-                    <div class="input-group">
+                    <div class="password-field">
                         <input type="password" class="form-control" id="passwordInput"
                                name="password" placeholder="Enter your password" required
                                autocomplete="current-password" aria-required="true">
-                        <button class="btn btn-outline-secondary" type="button"
-                                id="togglePassword" title="Show/Hide password">
-                            <i class="bi bi-eye"></i>
+                        <button type="button" class="password-toggle"
+                                data-password-toggle="passwordInput" aria-controls="passwordInput"
+                                aria-label="Show password" aria-pressed="false" title="Show password">
+                            <i class="bi bi-eye" aria-hidden="true"></i>
                         </button>
                     </div>
                 </div>
@@ -116,5 +117,6 @@
     </script>
     <script src="{{ url_for('static', filename='js/script.js') }}"></script>
     <script src="{{ url_for('static', filename='js/register.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/password-toggle.js') }}" defer></script>
 </body>
 </html>

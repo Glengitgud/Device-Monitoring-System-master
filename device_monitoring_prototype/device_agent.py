@@ -1057,64 +1057,506 @@ def _health_issue(title, score, description, root_cause, recommendation, steps):
     }
 
 
-def show_registration_success():
-    import tkinter as tk
+# Colours shared by the agent's windows; they follow the website's dark purple theme.
+AGENT_THEME = {
+    "background": "#0d0221",
+    "surface": "#120636",
+    "surface_alt": "#1a0b4a",
+    "border": "#2c1d6b",
+    "accent": "#3458a8",
+    "accent_active": "#26408b",
+    "accent_light": "#93c5fd",
+    "text": "#f8fafc",
+    "muted": "#cbd5e1",
+    "dim": "#94a3b8",
+    "track": "#2a1d5c",
+    "success": "#16a34a",
+    "error": "#fca5a5",
+}
+FONT_FAMILY = "Segoe UI"
 
-    root = tk.Tk()
-    root.title("Device Registered Successfully")
-    root.geometry("430x300")
-    root.resizable(False, False)
-    root.configure(background="#0d0221")
-    tk.Label(
-        root, text="✓", font=("Segoe UI", 42, "bold"),
-        foreground="#16a34a", background="#0d0221",
-    ).pack(pady=(18, 0))
-    tk.Label(
-        root, text="Device Registered Successfully",
-        font=("Segoe UI", 16, "bold"), foreground="#f8fafc",
-        background="#0d0221",
-    ).pack(pady=(2, 4))
-    tk.Label(
-        root, text="You may now proceed to the Dashboard.",
-        foreground="#cbd5e1", background="#0d0221",
-    ).pack()
-    card = tk.Label(
-        root, text="Open DevMonitor Dashboard",
-        font=("Segoe UI", 11, "bold"), foreground="#93c5fd",
-        background="#120636", cursor="hand2", padx=18, pady=14,
+
+def _enable_dpi_awareness():
+    """Draw Tk windows sharply on scaled (125%/150%) Windows displays."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
+def _pixel_scale(root):
+    """Pixels per 96-dpi pixel, so paddings grow with the display's text scaling."""
+    try:
+        return max(float(root.winfo_fpixels("1i")) / 96.0, 1.0)
+    except Exception:  # pragma: no cover - Tk without a real display
+        return 1.0
+
+
+def _work_area(root):
+    """(left, top, right, bottom) of the screen area not covered by the taskbar."""
+    if os.name == "nt":
+        try:
+            rect = ctypes.wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                return rect.left, rect.top, rect.right, rect.bottom
+        except (AttributeError, OSError):
+            pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+
+
+def _place_window(root, width, height):
+    """Centre the window in the work area so it never runs under the taskbar.
+
+    ``width``/``height`` are the client size; the title bar and borders are
+    added by Windows, so room is kept for them.
+    """
+    left, top, right, bottom = _work_area(root)
+    chrome = int(round(48 * _pixel_scale(root)))
+    width = min(width, right - left - chrome // 2)
+    height = min(height, bottom - top - chrome)
+    x = left + max((right - left - width) // 2, 0)
+    y = top + max((bottom - top - chrome - height) // 3, 0)
+    root.geometry(f"{width}x{height}+{x}+{y}")
+
+
+def _bring_to_front(root):
+    # Map the window first: setting -topmost on an unmapped window makes
+    # Windows ignore the position chosen by _place_window.
+    root.update()
+    root.lift()
+    try:
+        root.attributes("-topmost", True)
+        root.after(400, lambda: root.attributes("-topmost", False))
+    except Exception:  # pragma: no cover - window manager without -topmost
+        pass
+    root.focus_force()
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _format_gb(value):
+    if not _is_number(value) or value < 0:
+        return UNAVAILABLE
+    return f"{value / (1024 ** 3):,.1f} GB"
+
+
+def _usage_fraction(used, total):
+    if not (_is_number(used) and _is_number(total)) or total <= 0:
+        return None
+    return min(max(used / total, 0.0), 1.0)
+
+
+def _usage_color(fraction):
+    if fraction >= 0.9:
+        return "#dc2626"
+    if fraction >= 0.75:
+        return "#eab308"
+    return "#16a34a"
+
+
+def _plain_value(value):
+    if value is None or value == "" or value == [] or value == [UNAVAILABLE]:
+        return UNAVAILABLE
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value if str(item).strip()) or UNAVAILABLE
+    return str(value)
+
+
+def specification_sections(specifications):
+    """Group the detected specifications into titled sections for the review window.
+
+    Each section is ``(title, rows)``; each row is a dict with ``label``,
+    ``value`` (display text), ``fraction`` (0-1 for a usage bar, or None) and
+    ``detail`` (True for per-drive rows). Every FIELD_LABELS label appears once.
+    """
+    specs = specifications or {}
+
+    def row(label, value, fraction=None, detail=False):
+        return {"label": label, "value": value, "fraction": fraction, "detail": detail}
+
+    capacity = specs.get("ram_capacity_bytes")
+    used = specs.get("ram_usage_bytes")
+    ram_fraction = _usage_fraction(used, capacity)
+    ram_usage = _format_gb(used)
+    if ram_fraction is not None:
+        ram_usage = f"{ram_usage} in use ({ram_fraction:.0%})"
+
+    drives = [item for item in specs.get("storage_devices") or [] if isinstance(item, dict)]
+    total = specs.get("storage_total_bytes") if drives else None
+    available = specs.get("storage_available_bytes") if drives else None
+    storage_fraction = (
+        _usage_fraction(total - available, total)
+        if _is_number(total) and _is_number(available) else None
     )
-    card.pack(fill="x", padx=28, pady=18)
+    drive_rows = []
+    for drive in drives:
+        drive_total = drive.get("total_bytes")
+        drive_free = drive.get("available_bytes")
+        drive_rows.append(row(
+            str(drive.get("name") or "Drive"),
+            f"{_format_gb(drive_free)} free of {_format_gb(drive_total)}",
+            _usage_fraction(drive_total - drive_free, drive_total)
+            if _is_number(drive_total) and _is_number(drive_free) else None,
+            detail=True,
+        ))
+    drive_count = len(drives)
+    storage_summary = (
+        f"{drive_count} drive{'' if drive_count == 1 else 's'}" if drives else UNAVAILABLE
+    )
 
-    def redirect():
-        webbrowser.open(DASHBOARD_URL)
+    return [
+        ("Processor", [
+            row("CPU name", _plain_value(specs.get("cpu_name"))),
+            row("Number of CPU cores", _plain_value(specs.get("cpu_cores"))),
+        ]),
+        ("Memory", [
+            row("RAM capacity", _format_gb(capacity)),
+            row("RAM usage", ram_usage, ram_fraction),
+        ]),
+        ("Storage", [
+            row("Total storage capacity", _format_gb(total)),
+            row(
+                "Available storage capacity",
+                f"{_format_gb(available)} free" if _is_number(available) else UNAVAILABLE,
+                storage_fraction,
+            ),
+            row("Storage devices", storage_summary),
+            *drive_rows,
+        ]),
+        ("Graphics", [
+            row("GPU information", _plain_value(specs.get("gpu_information"))),
+        ]),
+        ("System", [
+            row("Motherboard brand", _plain_value(specs.get("motherboard_brand"))),
+            row("Operating system name", _plain_value(specs.get("operating_system_name"))),
+            row("Operating system version", _plain_value(specs.get("operating_system_version"))),
+        ]),
+        ("Network", [
+            row("Installed network adapters", _plain_value(specs.get("network_adapters"))),
+            row("IP address", _plain_value(specs.get("ip_addresses"))),
+            row("MAC address", _plain_value(specs.get("mac_address"))),
+        ]),
+    ]
+
+
+def review_specifications_window(
+    specifications, *, default_name, default_type, server=""
+):  # pragma: no cover - needs a display
+    """Show the detected specifications and ask the user to approve them.
+
+    Returns ``{"name": ..., "device_type": ...}`` when the user clicks
+    Register, or None when they cancel or close the window. Nothing is sent
+    from here; the caller submits only after an approval.
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    theme = AGENT_THEME
+    _enable_dpi_awareness()
+    root = tk.Tk()
+    root.title("DevMonitor Agent - Review this device")
+    root.configure(background=theme["background"])
+    scale = _pixel_scale(root)
+
+    def px(value):
+        return int(round(value * scale))
+
+    result = {}
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(1, weight=1)
+
+    # Header -----------------------------------------------------------------
+    header = tk.Frame(root, background=theme["background"], padx=px(24), pady=px(18))
+    header.grid(row=0, column=0, sticky="ew")
+    tk.Label(
+        header, text="Review this device", font=(FONT_FAMILY, 17, "bold"),
+        foreground=theme["text"], background=theme["background"],
+    ).pack(anchor="w")
+    tk.Label(
+        header,
+        text=(
+            "DevMonitor detected the details below. Nothing is sent until you "
+            "click Register this device."
+        ),
+        font=(FONT_FAMILY, 10), foreground=theme["muted"],
+        background=theme["background"], justify="left", wraplength=px(640),
+    ).pack(anchor="w", pady=(px(4), 0))
+    if server:
+        tk.Label(
+            header, text=f"Server: {server}", font=(FONT_FAMILY, 9),
+            foreground=theme["dim"], background=theme["background"],
+        ).pack(anchor="w", pady=(px(2), 0))
+
+    # Scrollable grid of specification cards ---------------------------------
+    body = tk.Frame(root, background=theme["background"])
+    body.grid(row=1, column=0, sticky="nsew", padx=(px(18), px(6)))
+    body.rowconfigure(0, weight=1)
+    body.columnconfigure(0, weight=1)
+    canvas = tk.Canvas(body, background=theme["background"], highlightthickness=0, borderwidth=0)
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")  # the native Windows scrollbar ignores colours
+    except tk.TclError:
+        pass
+    style.configure(
+        "Agent.Vertical.TScrollbar", background=theme["border"],
+        troughcolor=theme["background"], bordercolor=theme["background"],
+        lightcolor=theme["border"], darkcolor=theme["border"],
+        arrowcolor=theme["muted"], gripcount=0,
+    )
+    style.map("Agent.Vertical.TScrollbar", background=[("active", theme["accent"])])
+    scrollbar = ttk.Scrollbar(
+        body, orient="vertical", command=canvas.yview, style="Agent.Vertical.TScrollbar"
+    )
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    cards = tk.Frame(canvas, background=theme["background"])
+    cards_window = canvas.create_window((0, 0), window=cards, anchor="nw")
+    cards.columnconfigure((0, 1), weight=1, uniform="cards")
+    cards.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda event: canvas.itemconfigure(cards_window, width=event.width))
+
+    def on_mousewheel(event):
+        canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
+
+    root.bind_all("<MouseWheel>", on_mousewheel)
+    value_wrap = px(290)
+
+    for index, (title, rows) in enumerate(specification_sections(specifications)):
+        card = tk.Frame(
+            cards, background=theme["surface"], padx=px(16), pady=px(14),
+            highlightbackground=theme["border"], highlightthickness=1,
+        )
+        card.grid(row=index // 2, column=index % 2, sticky="nsew", padx=px(6), pady=px(6))
+        tk.Label(
+            card, text=title.upper(), font=(FONT_FAMILY, 9, "bold"),
+            foreground=theme["accent_light"], background=theme["surface"],
+        ).pack(anchor="w", pady=(0, px(6)))
+        for spec_row in rows:
+            indent = px(12) if spec_row["detail"] else 0
+            tk.Label(
+                card, text=spec_row["label"],
+                font=(FONT_FAMILY, 9 if spec_row["detail"] else 8),
+                foreground=theme["muted"] if spec_row["detail"] else theme["dim"],
+                background=theme["surface"],
+            ).pack(anchor="w", padx=(indent, 0), pady=(px(6), 0))
+            unavailable = spec_row["value"] == UNAVAILABLE
+            tk.Label(
+                card, text=spec_row["value"],
+                font=(FONT_FAMILY, 10, "italic" if unavailable else "normal"),
+                foreground=theme["dim"] if unavailable else theme["text"],
+                background=theme["surface"], justify="left", anchor="w",
+                wraplength=value_wrap - indent,
+            ).pack(anchor="w", fill="x", padx=(indent, 0))
+            if spec_row["fraction"] is not None:
+                track = tk.Frame(card, background=theme["track"], height=px(6))
+                track.pack(fill="x", padx=(indent, 0), pady=(px(4), px(2)))
+                tk.Frame(track, background=_usage_color(spec_row["fraction"])).place(
+                    relx=0, rely=0, relheight=1, relwidth=max(spec_row["fraction"], 0.01)
+                )
+
+    # Footer: name, type, approve ---------------------------------------------
+    footer = tk.Frame(
+        root, background=theme["surface"], padx=px(24), pady=px(16),
+        highlightbackground=theme["border"], highlightthickness=1,
+    )
+    footer.grid(row=2, column=0, sticky="ew", pady=(px(10), 0))
+    footer.columnconfigure(1, weight=1)
+
+    tk.Label(
+        footer, text="Device name", font=(FONT_FAMILY, 10, "bold"),
+        foreground=theme["text"], background=theme["surface"],
+    ).grid(row=0, column=0, sticky="w", padx=(0, px(12)))
+    name_var = tk.StringVar(value=default_name)
+    name_entry = tk.Entry(
+        footer, textvariable=name_var, font=(FONT_FAMILY, 10),
+        background=theme["surface_alt"], foreground=theme["text"],
+        insertbackground=theme["text"], relief="flat",
+        highlightthickness=1, highlightbackground=theme["border"],
+        highlightcolor=theme["accent_light"],
+    )
+    name_entry.grid(row=0, column=1, columnspan=2, sticky="ew", ipady=px(5))
+
+    tk.Label(
+        footer, text="Device type", font=(FONT_FAMILY, 10, "bold"),
+        foreground=theme["text"], background=theme["surface"],
+    ).grid(row=1, column=0, sticky="w", padx=(0, px(12)), pady=(px(10), 0))
+    type_var = tk.StringVar(
+        value=default_type if default_type in {"Desktop", "Laptop"} else "Desktop"
+    )
+    types = tk.Frame(footer, background=theme["surface"])
+    types.grid(row=1, column=1, sticky="w", pady=(px(10), 0))
+    for choice in ("Desktop", "Laptop"):
+        tk.Radiobutton(
+            types, text=choice, value=choice, variable=type_var, indicatoron=False,
+            font=(FONT_FAMILY, 10), width=9, padx=px(10), pady=px(5),
+            background=theme["surface_alt"], foreground=theme["muted"],
+            selectcolor=theme["accent"], activebackground=theme["accent_active"],
+            activeforeground=theme["text"], relief="flat", borderwidth=0,
+            highlightthickness=0, cursor="hand2",
+        ).pack(side="left", padx=(0, px(6)))
+
+    error = tk.Label(
+        footer, text="", font=(FONT_FAMILY, 9), foreground=theme["error"],
+        background=theme["surface"], anchor="w",
+    )
+    error.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(px(6), 0))
+    tk.Label(
+        footer,
+        text="Only the details above and this name and type are sent to your account.",
+        font=(FONT_FAMILY, 9), foreground=theme["dim"], background=theme["surface"],
+        anchor="w", justify="left", wraplength=px(380),
+    ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(px(4), 0))
+
+    def register(_event=None):
+        name = name_var.get().strip()
+        if not name or len(name) > 120:
+            error.configure(text="Enter a device name between 1 and 120 characters.")
+            name_entry.focus_set()
+            return
+        result.update(name=name, device_type=type_var.get())
         root.destroy()
 
-    card.bind("<Button-1>", lambda _event: redirect())
-    countdown = tk.Label(
-        root, text="", foreground="#cbd5e1", background="#0d0221"
-    )
-    countdown.pack()
+    def cancel(_event=None):
+        result.clear()
+        root.destroy()
 
-    def tick(seconds=5):
-        countdown.configure(text=f"Redirecting to Dashboard in {seconds} seconds...")
-        if seconds <= 0:
+    buttons = tk.Frame(footer, background=theme["surface"])
+    buttons.grid(row=3, column=2, sticky="e", pady=(px(4), 0))
+    button_style = dict(
+        font=(FONT_FAMILY, 10, "bold"), relief="flat", borderwidth=0,
+        padx=px(20), pady=px(8), cursor="hand2",
+    )
+    tk.Button(
+        buttons, text="Cancel", command=cancel,
+        background=theme["surface_alt"], foreground=theme["muted"],
+        activebackground=theme["border"], activeforeground=theme["text"],
+        **button_style,
+    ).pack(side="left", padx=(0, px(8)))
+    tk.Button(
+        buttons, text="Register this device", command=register,
+        background=theme["accent"], foreground="#ffffff",
+        activebackground=theme["accent_active"], activeforeground="#ffffff",
+        **button_style,
+    ).pack(side="left")
+
+    root.bind("<Return>", register)
+    root.bind("<Escape>", cancel)
+    root.protocol("WM_DELETE_WINDOW", cancel)
+
+    root.update_idletasks()
+    width = max(
+        cards.winfo_reqwidth() + scrollbar.winfo_reqwidth() + px(30),
+        footer.winfo_reqwidth(),
+        px(720),
+    )
+    height = (
+        header.winfo_reqheight() + cards.winfo_reqheight()
+        + footer.winfo_reqheight() + px(20)
+    )
+    root.minsize(px(640), px(420))
+    _place_window(root, width, height)
+    _bring_to_front(root)
+    name_entry.focus_set()
+    name_entry.icursor("end")
+    root.mainloop()
+    return dict(result) if result else None
+
+
+def show_registration_success(seconds=5):  # pragma: no cover - needs a display
+    import tkinter as tk
+
+    theme = AGENT_THEME
+    _enable_dpi_awareness()
+    root = tk.Tk()
+    root.title("Device Registered Successfully")
+    root.resizable(False, False)
+    root.configure(background=theme["background"])
+    scale = _pixel_scale(root)
+
+    def px(value):
+        return int(round(value * scale))
+
+    # The window is sized from its content (below), so nothing is clipped at
+    # any display scaling.
+    body = tk.Frame(root, background=theme["background"], padx=px(40), pady=px(28))
+    body.pack(fill="both", expand=True)
+    tk.Label(
+        body, text="✓", font=(FONT_FAMILY, 40, "bold"),
+        foreground=theme["success"], background=theme["background"],
+    ).pack()
+    tk.Label(
+        body, text="Device Registered Successfully",
+        font=(FONT_FAMILY, 16, "bold"), foreground=theme["text"],
+        background=theme["background"],
+    ).pack(pady=(px(2), px(6)))
+    tk.Label(
+        body, text="You may now proceed to the Dashboard.",
+        font=(FONT_FAMILY, 10), foreground=theme["muted"],
+        background=theme["background"], wraplength=px(360), justify="center",
+    ).pack()
+    countdown = tk.Label(
+        body, text="", font=(FONT_FAMILY, 10, "bold"),
+        foreground=theme["muted"], background=theme["background"],
+    )
+    countdown.pack(pady=(px(14), 0))
+
+    state = {"done": False, "timer": None}
+
+    def redirect(_event=None):
+        if state["done"]:
+            return
+        state["done"] = True
+        if state["timer"] is not None:
+            root.after_cancel(state["timer"])
+        if DASHBOARD_URL:
+            webbrowser.open(DASHBOARD_URL, new=2)
+        root.destroy()
+
+    def tick(remaining=seconds):
+        if state["done"]:
+            return
+        countdown.configure(text=f"Redirecting to Dashboard in {remaining} seconds...")
+        if remaining <= 0:
             redirect()
         else:
-            root.after(1000, tick, seconds - 1)
+            state["timer"] = root.after(1000, tick, remaining - 1)
 
-    tk.Button(
-        root,
+    button = tk.Button(
+        body,
         text="Go to Dashboard Now",
         command=redirect,
-        background="#3458a8",
+        font=(FONT_FAMILY, 11, "bold"),
+        background=theme["accent"],
         foreground="#ffffff",
-        activebackground="#26408b",
+        activebackground=theme["accent_active"],
         activeforeground="#ffffff",
         relief="flat",
-        padx=18,
-        pady=8,
-    ).pack(pady=(8, 14))
-    root.after(0, tick)
+        borderwidth=0,
+        highlightthickness=0,
+        cursor="hand2",
+        padx=px(28),
+        pady=px(11),
+        anchor="center",
+        justify="center",
+    )
+    button.pack(fill="x", pady=(px(18), 0))
+    root.bind("<Return>", redirect)
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+
+    root.update_idletasks()
+    _place_window(root, max(body.winfo_reqwidth(), px(440)), body.winfo_reqheight())
+    _bring_to_front(root)
+    button.focus_set()
+    tick()
     root.mainloop()
 
 
@@ -1328,8 +1770,26 @@ def _parse_arguments(argv):
         action="store_true",
         help="print the detected specifications as JSON and exit (nothing is sent)",
     )
+    review = parser.add_mutually_exclusive_group()
+    review.add_argument(
+        "--console",
+        action="store_true",
+        help="review the specifications in this console instead of a window",
+    )
+    review.add_argument(
+        "--gui",
+        action="store_true",
+        help="review the specifications in a window (the default for the packaged EXE)",
+    )
     args, _unknown = parser.parse_known_args(argv)
     return args
+
+
+def _use_review_window(args):
+    """The packaged EXE reviews in a window; running the script keeps the console."""
+    if args.yes or args.console:
+        return False
+    return bool(args.gui or getattr(sys, "frozen", False))
 
 
 def main(argv=None):
@@ -1372,9 +1832,41 @@ def main(argv=None):
         return 1
 
     report = collect_health_report(specifications)
+    reviewed = None
+    if not scanner_mode and _use_review_window(args):
+        # The packaged EXE shows the specifications in a window; if Tk cannot
+        # open one, the console review below is used instead.
+        print("\nReview the detected device details in the DevMonitor window.")
+        try:
+            reviewed = review_specifications_window(
+                specifications,
+                default_name=(platform.node() or "").strip(),
+                default_type=_guess_device_type(),
+                server=urlsplit(SUBMISSION_URL).netloc,
+            )
+        except Exception:
+            LOGGER.exception("The review window could not be displayed; using the console.")
+            print("The review window could not be opened; continuing in this console.")
+        else:
+            if reviewed is None:
+                LOGGER.info("Submission cancelled in the review window; nothing was sent.")
+                print("Submission cancelled; no device was registered.")
+                print(
+                    "Run this agent again and click Register this device "
+                    "to link the device to your account."
+                )
+                return 0
+
     if scanner_mode:
         payload = {"report": report, "specifications": specifications}
         authorization_token = SCAN_TOKEN
+    elif reviewed is not None:
+        payload = {
+            "name": reviewed["name"],
+            "device_type": reviewed["device_type"],
+            "specifications": specifications,
+        }
+        authorization_token = REGISTRATION_TOKEN
     else:
         print("\nDetected device specifications (review before submission):")
         for label, key in FIELD_LABELS:

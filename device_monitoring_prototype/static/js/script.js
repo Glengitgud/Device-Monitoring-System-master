@@ -1283,15 +1283,6 @@ document.addEventListener('DOMContentLoaded', () => {
     initSidebar();
     document.getElementById('confirmDeleteDeviceBtn')?.addEventListener('click', archiveSelectedDevice);
     const page = getCurrentPage();
-    if (page === 'login') {
-        const toggle = document.getElementById('togglePassword');
-        const input = document.getElementById('passwordInput');
-        toggle?.addEventListener('click', () => {
-            const showPassword = input.type === 'password';
-            input.type = showPassword ? 'text' : 'password';
-            toggle.querySelector('i').className = showPassword ? 'bi bi-eye-slash' : 'bi bi-eye';
-        });
-    }
     if (page === 'dashboard') {
         initDashboard();
         window.setInterval(() => {

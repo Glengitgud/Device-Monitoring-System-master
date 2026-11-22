@@ -90,10 +90,10 @@
                     {% for format in platform.formats %}<span class="dl-format">{{ format }}</span>{% endfor %}
                 </div>
 
+                {# The primary button is always the first thing in .dl-actions, and
+                   .dl-actions starts on the same grid row in every card, so the
+                   buttons line up. Hints, progress and problems go below it. #}
                 <div class="dl-actions">
-                    {% if platform.problem %}
-                        <p class="dl-problem" role="note"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>{{ platform.problem }}</p>
-                    {% endif %}
                     {% if not platform.available %}
                         <button type="button" class="btn dl-btn dl-btn-pending" disabled aria-disabled="true">
                             {{ platform.pending_label }}
@@ -166,6 +166,9 @@
                         <p class="dl-hint">{{ platform.ota.note }} · v{{ platform.details.version }}</p>
                         {% endif %}
                         <p class="dl-hint">{{ platform.file_hint }}</p>
+                    {% endif %}
+                    {% if platform.problem %}
+                        <p class="dl-problem" role="note"><i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>{{ platform.problem }}</p>
                     {% endif %}
                 </div>
             </li>

@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -399,6 +400,81 @@ class WindowsAgentConsoleTest(unittest.TestCase):
         self.assertIn("this download has expired or was already used", output)
         self.assertIn("Download the agent again", output)
         self.assertNotIn('{"error"', output)
+
+    def test_review_window_sections_show_every_specification(self):
+        specs = dict(self.specs)
+        specs.update(
+            ram_capacity_bytes=16 * 1024 ** 3,
+            ram_usage_bytes=8 * 1024 ** 3,
+            storage_devices=[{"name": "C:\\", "total_bytes": 100 * 1024 ** 3,
+                              "available_bytes": 25 * 1024 ** 3}],
+            storage_total_bytes=100 * 1024 ** 3,
+            storage_available_bytes=25 * 1024 ** 3,
+        )
+        sections = self.agent.specification_sections(specs)
+        rows = {row["label"]: row for _title, section in sections for row in section}
+        for label, _key in self.agent.FIELD_LABELS:
+            self.assertIn(label, rows)
+        self.assertEqual(rows["RAM usage"]["value"], "8.0 GB in use (50%)")
+        self.assertAlmostEqual(rows["RAM usage"]["fraction"], 0.5)
+        self.assertEqual(rows["C:\\"]["value"], "25.0 GB free of 100.0 GB")
+        self.assertAlmostEqual(rows["C:\\"]["fraction"], 0.75)
+        self.assertTrue(rows["C:\\"]["detail"])
+        # Missing values are shown as Unavailable instead of crashing the window.
+        empty = {row["label"]: row["value"]
+                 for _t, section in self.agent.specification_sections({}) for row in section}
+        self.assertEqual(empty["Total storage capacity"], "Unavailable")
+        self.assertEqual(empty["CPU name"], "Unavailable")
+
+    def test_packaged_exe_reviews_in_a_window_and_script_uses_console(self):
+        parse = self.agent._parse_arguments
+        self.assertFalse(self.agent._use_review_window(parse([])))
+        self.assertTrue(self.agent._use_review_window(parse(["--gui"])))
+        with patch.object(self.agent.sys, "frozen", True, create=True):
+            self.assertTrue(self.agent._use_review_window(parse([])))
+            self.assertFalse(self.agent._use_review_window(parse(["--console"])))
+            self.assertFalse(self.agent._use_review_window(parse(["--yes"])))
+
+    def test_review_window_approval_submits_without_console_prompts(self):
+        class Response(io.BytesIO):
+            status = 201
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+
+        sent = []
+
+        def urlopen(request, timeout):
+            sent.append(json.loads(request.data))
+            return Response(b'{"device_id": 9}')
+
+        approved = {"name": "Lab PC", "device_type": "Laptop"}
+        with patch.object(self.agent, "_use_review_window", return_value=True), \
+                patch.object(self.agent, "review_specifications_window", return_value=approved) as window, \
+                patch.object(self.agent, "show_registration_success") as success:
+            code, output, _log, _ = self.run_main([], urlopen=urlopen)
+        self.assertEqual(code, 0)
+        window.assert_called_once()
+        success.assert_called_once()
+        self.assertEqual((sent[0]["name"], sent[0]["device_type"]), ("Lab PC", "Laptop"))
+        self.assertNotIn("Detected device specifications", output)
+
+    def test_review_window_cancel_sends_nothing_and_failure_falls_back(self):
+        with patch.object(self.agent, "_use_review_window", return_value=True), \
+                patch.object(self.agent, "review_specifications_window", return_value=None):
+            code, output, log, _ = self.run_main([])
+        self.assertEqual(code, 0)
+        self.assertIn("Submission cancelled", output)
+        self.assertNotIn("Submitting payload", log)
+
+        with patch.object(self.agent, "_use_review_window", return_value=True), \
+                patch.object(self.agent, "review_specifications_window", side_effect=RuntimeError("no display")):
+            code, output, log, _ = self.run_main(["", "Laptop", "no"])
+        self.assertEqual(code, 0)
+        self.assertIn("continuing in this console", output)
+        self.assertIn("Detected device specifications", output)
+        self.assertNotIn("Submitting payload", log)
 
     def test_packaged_console_waits_for_enter_before_closing(self):
         with patch.object(self.agent.sys, "frozen", True, create=True), \
