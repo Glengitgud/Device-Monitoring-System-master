@@ -8,13 +8,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from sqlalchemy import or_, update
+from sqlalchemy import delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash
 
 from device_monitoring_prototype.models import (
     ActivityLog,
     Device,
+    DeviceMetric,
     DeviceRegistrationToken,
     DeviceSpecification,
     Log,
@@ -64,6 +65,14 @@ class ValidationError(ValueError):
 
 class RegistrationTokenError(ValidationError):
     """Raised when a one-time device enrollment token cannot be accepted."""
+
+
+class MonitoringCredentialError(ValidationError):
+    """Raised when a device heartbeat credential is invalid, revoked, or expired."""
+
+
+class HeartbeatRateLimitError(ValidationError):
+    """Raised when a device sends heartbeats faster than the allowed spacing."""
 
 
 class DatabaseSetupError(RuntimeError):
@@ -681,6 +690,7 @@ def archive_device(device):
     device.archived_by_user_id = (
         current_user.id if current_user.is_authenticated else None
     )
+    stop_device_monitoring(device, reason="device_archived", commit=False)
     _log_device_event(device, "Device archived")
     _log("device.archived", "device", device.id)
     db.session.commit()
@@ -704,7 +714,230 @@ def soft_delete_device(device):
         raise ValidationError("This device is already deleted.")
     device.lifecycle_status = "deleted"
     device.deleted_at = db.func.current_timestamp()
+    stop_device_monitoring(device, reason="device_deleted", commit=False)
     _log_device_event(device, "Device marked deleted")
     _log("device.deleted", "device", device.id)
     db.session.commit()
 
+
+
+# ---------------------------------------------------------------------------
+# Opt-in live monitoring
+# ---------------------------------------------------------------------------
+# A device only reports live metrics after its user consents in the Device
+# Agent. The agent then holds a random credential (stored here as SHA-256) and
+# sends one heartbeat every HEARTBEAT_INTERVAL_SECONDS. The owner, an
+# administrator, or the device itself can stop monitoring at any time, which
+# clears the credential so further heartbeats are refused.
+
+HEARTBEAT_INTERVAL_SECONDS = 30
+# A monitored device is Offline after this long without a successful heartbeat.
+MONITORING_OFFLINE_AFTER = timedelta(seconds=90)
+METRIC_RETENTION = timedelta(days=7)
+# The agent must confirm consent this soon after the device is linked.
+MONITORING_ACTIVATION_WINDOW = timedelta(minutes=15)
+# Heartbeats closer together than this are refused (protects the database).
+MIN_HEARTBEAT_SPACING = timedelta(seconds=10)
+# Old samples are pruned on roughly one heartbeat in this many (~hourly per device).
+METRIC_PRUNE_EVERY = 120
+MONITORING_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{40,64}")
+HEARTBEAT_PERCENT_KEYS = ("cpu_percent", "memory_percent", "storage_percent")
+HEARTBEAT_BYTE_KEYS = (
+    "memory_used_bytes",
+    "storage_used_bytes",
+    "network_rx_bytes",
+    "network_tx_bytes",
+    "network_rx_bytes_per_sec",
+    "network_tx_bytes_per_sec",
+)
+
+
+def _as_utc(value):
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _monitoring_token_hash(token):
+    if not isinstance(token, str) or not MONITORING_TOKEN_PATTERN.fullmatch(token):
+        return None
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+def _device_for_monitoring_token(token):
+    token_hash = _monitoring_token_hash(token)
+    if token_hash is None:
+        return None
+    return Device.query.filter_by(monitoring_token_hash=token_hash).one_or_none()
+
+
+def _record_status_change(device, status, reason):
+    device.status = status
+    _log_device_event(device, f"Device status changed to {status}")
+    db.session.add(
+        ActivityLog(
+            event_type=f"device.status_{status}",
+            entity_type="device",
+            entity_id=device.id,
+            details={"reason": reason},
+        )
+    )
+
+
+def issue_monitoring_credential(device):
+    """Create a heartbeat credential that stays inactive until the user consents."""
+    token = secrets.token_urlsafe(32)
+    device.monitoring_token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    device.monitoring_enabled_at = None
+    device.monitoring_stopped_at = None
+    db.session.commit()
+    return token
+
+
+def enable_device_monitoring(token, *, now=None):
+    """Activate monitoring after the device user agreed in the Device Agent."""
+    now = now or datetime.now(timezone.utc)
+    device = _device_for_monitoring_token(token)
+    if device is None:
+        raise MonitoringCredentialError("This monitoring credential is invalid or was revoked.")
+    if device.monitoring_enabled_at is not None:
+        return device
+    registered_at = _as_utc(device.registered_at) or now
+    if (
+        now - registered_at > MONITORING_ACTIVATION_WINDOW
+        or device.lifecycle_status != "active"
+        or device.owner.status != "active"
+    ):
+        device.monitoring_token_hash = None
+        db.session.commit()
+        raise MonitoringCredentialError(
+            "Live monitoring can no longer be enabled with this credential. "
+            "Link the device again to enable it."
+        )
+    device.monitoring_enabled_at = now
+    device.monitoring_stopped_at = None
+    _log_device_event(device, "Live monitoring enabled by the device user")
+    db.session.add(
+        ActivityLog(
+            actor=device.owner,
+            event_type="device.monitoring_enabled",
+            entity_type="device",
+            entity_id=device.id,
+            details={"heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS},
+        )
+    )
+    db.session.commit()
+    return device
+
+
+def stop_device_monitoring(device, *, actor=None, reason, commit=True):
+    """Revoke the heartbeat credential. Returns False when monitoring was already off."""
+    if device.monitoring_token_hash is None and device.monitoring_enabled_at is None:
+        return False
+    was_active = device.monitoring_active
+    device.monitoring_token_hash = None
+    device.monitoring_enabled_at = None
+    device.monitoring_stopped_at = datetime.now(timezone.utc)
+    if was_active:
+        _log_device_event(device, "Live monitoring stopped")
+        db.session.add(
+            ActivityLog(
+                actor=actor,
+                event_type="device.monitoring_stopped",
+                entity_type="device",
+                entity_id=device.id,
+                details={"reason": reason},
+            )
+        )
+        if device.status == "online":
+            _record_status_change(device, "offline", "Live monitoring was stopped.")
+    if commit:
+        db.session.commit()
+    return was_active
+
+
+def stop_monitoring_from_agent(token):
+    """The device user ran "--stop-monitoring" on the device itself."""
+    device = _device_for_monitoring_token(token)
+    if device is None:
+        return None
+    stop_device_monitoring(device, actor=device.owner, reason="stopped_on_device")
+    return device
+
+
+def validate_heartbeat(data):
+    if not isinstance(data, dict):
+        raise ValidationError("A heartbeat must be a JSON object.")
+    allowed = set(HEARTBEAT_PERCENT_KEYS) | set(HEARTBEAT_BYTE_KEYS)
+    unknown = set(data) - allowed
+    if unknown:
+        raise ValidationError(f"Unsupported heartbeat fields: {', '.join(sorted(unknown))}.")
+    values = {}
+    for key in HEARTBEAT_PERCENT_KEYS:
+        value = data.get(key)
+        if value is None:
+            values[key] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+            raise ValidationError(f"{key} must be a number.")
+        if not 0 <= value <= 100:
+            raise ValidationError(f"{key} must be between 0 and 100.")
+        values[key] = round(float(value), 2)
+    for key in HEARTBEAT_BYTE_KEYS:
+        value = data.get(key)
+        if value is None:
+            values[key] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValidationError(f"{key} must be a whole number of bytes.")
+        if not 0 <= value <= 2**63 - 1:
+            raise ValidationError(f"{key} is out of range.")
+        values[key] = value
+    if values["cpu_percent"] is None and values["memory_percent"] is None:
+        raise ValidationError("A heartbeat must include CPU or memory usage.")
+    return values
+
+
+def prune_device_metrics(device_id, *, now=None):
+    """Delete samples older than the retention period for one device."""
+    cutoff = (now or datetime.now(timezone.utc)) - METRIC_RETENTION
+    result = db.session.execute(
+        delete(DeviceMetric)
+        .where(DeviceMetric.device_id == device_id, DeviceMetric.collected_at < cutoff)
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount or 0
+
+
+def record_device_heartbeat(token, data, *, now=None):
+    """Store one live sample and mark the device online."""
+    now = now or datetime.now(timezone.utc)
+    values = validate_heartbeat(data)
+    device = _device_for_monitoring_token(token)
+    if device is None or not device.monitoring_active:
+        raise MonitoringCredentialError("Live monitoring is not enabled for this credential.")
+    if (
+        device.lifecycle_status != "active"
+        or device.status == "retired"
+        or device.owner.status != "active"
+    ):
+        stop_device_monitoring(device, reason="device_or_owner_inactive")
+        raise MonitoringCredentialError("Live monitoring is not enabled for this credential.")
+
+    last_sample = _as_utc(
+        db.session.query(func.max(DeviceMetric.collected_at))
+        .filter(DeviceMetric.device_id == device.id)
+        .scalar()
+    )
+    if last_sample is not None and now - last_sample < MIN_HEARTBEAT_SPACING:
+        raise HeartbeatRateLimitError("Heartbeats are arriving too quickly.")
+
+    sample = DeviceMetric(device=device, collected_at=now, **values)
+    db.session.add(sample)
+    device.last_seen_at = now
+    if device.status in {"offline", "unknown"}:
+        _record_status_change(device, "online", "Live monitoring heartbeat received.")
+    if secrets.randbelow(METRIC_PRUNE_EVERY) == 0:
+        prune_device_metrics(device.id, now=now)
+    db.session.commit()
+    return device, sample

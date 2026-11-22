@@ -743,6 +743,8 @@ function renderDeviceDetails(device) {
             ['Storage Used (bytes)', metric.storage_used_bytes],
             ['Network Received (bytes)', metric.network_rx_bytes],
             ['Network Sent (bytes)', metric.network_tx_bytes],
+            ['Download Speed', formatRate(metric.network_rx_bytes_per_sec)],
+            ['Upload Speed', formatRate(metric.network_tx_bytes_per_sec)],
             ['Collected At', metric.collected_at],
         ])),
         section('System Logs', (device.logs || []).flatMap(log => [
@@ -1234,6 +1236,203 @@ async function deactivateSelectedUser() {
     }
 }
 
+/* ---------------------------------------------------------------
+   Live monitoring (opt-in heartbeats from the Device Agent)
+   --------------------------------------------------------------- */
+const LIVE_HISTORY_MINUTES = 60;
+
+function usageColor(percent) {
+    if (percent == null) return '#64748b';
+    if (percent >= 90) return '#f87171';
+    if (percent >= 75) return '#fbbf24';
+    return '#4ade80';
+}
+
+function formatPercent(value) {
+    return value == null ? '—' : `${Math.round(value)}%`;
+}
+
+function formatRate(bytesPerSecond) {
+    if (bytesPerSecond == null) return '—';
+    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    let value = bytesPerSecond;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+    }
+    return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function liveMeter(label, percent) {
+    const width = percent == null ? 0 : Math.max(0, Math.min(100, percent));
+    return `<div class="live-meter">
+        <span class="live-meter-label">${label}</span>
+        <span class="live-meter-track"><span class="live-meter-fill"
+            style="width:${width}%;background:${usageColor(percent)}"></span></span>
+        <span class="live-meter-value">${formatPercent(percent)}</span>
+    </div>`;
+}
+
+function liveUsageCell(device) {
+    if (!device.monitoring || !device.monitoring.enabled) {
+        return '<span class="live-off">Monitoring off</span>';
+    }
+    const live = device.live;
+    if (!live) return '<span class="live-off">Waiting for first update…</span>';
+    const stale = String(device.status).toLowerCase() !== 'online';
+    return `<div class="live-usage${stale ? ' is-stale' : ''}"
+            title="${stale ? 'Last values before the device went offline' : 'Updated ' + escapeHTML(new Date(live.collectedAt).toLocaleTimeString())}">
+        ${liveMeter('CPU', live.cpuPercent)}
+        ${liveMeter('RAM', live.memoryPercent)}
+        <div class="live-net">
+            <span><i class="bi bi-arrow-down" aria-hidden="true"></i><span class="visually-hidden">Download</span> ${formatRate(live.networkRxBytesPerSec)}</span>
+            <span><i class="bi bi-arrow-up" aria-hidden="true"></i><span class="visually-hidden">Upload</span> ${formatRate(live.networkTxBytesPerSec)}</span>
+        </div>
+    </div>`;
+}
+
+function drawSparkline(svg, series, { max = 100, colors = ['#60a5fa'] } = {}) {
+    // series: array of value arrays (one line per array), oldest first.
+    const width = 120;
+    const height = 36;
+    const longest = Math.max(0, ...series.map(values => values.length));
+    if (longest < 2) {
+        svg.innerHTML = '';
+        return;
+    }
+    const top = Math.max(max, ...series.flat().filter(value => value != null), 1);
+    const step = width / (longest - 1);
+    svg.innerHTML = series.map((values, index) => {
+        const points = values
+            .map((value, i) => value == null ? null
+                : `${(i * step).toFixed(1)},${(height - 2 - (value / top) * (height - 4)).toFixed(1)}`)
+            .filter(Boolean);
+        if (points.length < 2) return '';
+        const color = colors[index % colors.length];
+        const area = index === 0
+            ? `<polygon points="${points[0].split(',')[0]},${height} ${points.join(' ')} ${points.at(-1).split(',')[0]},${height}"
+                 fill="${color}" fill-opacity="0.14"></polygon>`
+            : '';
+        return `${area}<polyline points="${points.join(' ')}" fill="none" stroke="${color}"
+                 stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"
+                 vector-effect="non-scaling-stroke"></polyline>`;
+    }).join('');
+}
+
+function initLiveMonitoringPanel() {
+    const panel = document.getElementById('liveMonitoringPanel');
+    if (!panel) return;
+    const deviceId = panel.dataset.deviceId;
+    const intervalSeconds = Number(panel.dataset.interval) || 30;
+    const offlineAfter = Number(panel.dataset.offlineAfter) || 90;
+    const meta = document.getElementById('liveMonitoringMeta');
+    const state = document.getElementById('liveMonitoringState');
+    let samples = [];
+    let busy = false;
+    let stopped = false;
+
+    const tile = key => panel.querySelector(`[data-live-metric="${key}"]`);
+    const setTile = (key, value, note, color) => {
+        const element = tile(key);
+        element.querySelector('[data-live-value]').textContent = value;
+        element.querySelector('[data-live-value]').style.color = color || '';
+        element.querySelector('[data-live-note]').textContent = note || '';
+    };
+
+    const render = result => {
+        const latest = samples.at(-1);
+        const online = String(result.status).toLowerCase() === 'online';
+        // "Waiting" only until the first heartbeat after monitoring was enabled;
+        // older samples may simply be outside the one-hour window.
+        const seenAt = latest ? latest.collectedAt : result.last_seen_at;
+        const enabledAt = result.monitoring.enabledAt;
+        const waiting = !latest
+            && (!seenAt || !enabledAt || new Date(seenAt) < new Date(enabledAt));
+        if (state) {
+            state.classList.toggle('is-off', !online);
+            state.lastChild.textContent = online ? 'On · Online' : waiting ? 'On · Waiting' : 'On · Offline';
+        }
+        const lastSeen = seenAt ? new Date(seenAt).toLocaleString() : '';
+        meta.textContent = waiting
+            ? `Enabled by the device user. Waiting for the first heartbeat (sent every ${intervalSeconds} s).`
+            : online
+                ? `Enabled by the device user. Heartbeat every ${intervalSeconds} s · last update ${lastSeen}.`
+                : `No heartbeat for over ${offlineAfter} s, so the device is Offline. Last update ${lastSeen}.`;
+        panel.classList.toggle('is-stale', !online && !waiting);
+        if (!latest) return;
+        const memoryNote = latest.memoryUsedBytes != null
+            ? `${(latest.memoryUsedBytes / 1024 ** 3).toFixed(1)} GB in use` : '';
+        const storageNote = latest.storageUsedBytes != null
+            ? `${(latest.storageUsedBytes / 1024 ** 3).toFixed(0)} GB used` : '';
+        setTile('cpu', formatPercent(latest.cpuPercent), 'Last hour', usageColor(latest.cpuPercent));
+        setTile('memory', formatPercent(latest.memoryPercent), memoryNote, usageColor(latest.memoryPercent));
+        setTile('storage', formatPercent(latest.storagePercent), storageNote, usageColor(latest.storagePercent));
+        setTile('network',
+            `↓ ${formatRate(latest.networkRxBytesPerSec)}`,
+            `↑ ${formatRate(latest.networkTxBytesPerSec)} upload`);
+        const pick = field => samples.map(sample => sample[field]);
+        drawSparkline(tile('cpu').querySelector('svg'), [pick('cpuPercent')], { colors: ['#60a5fa'] });
+        drawSparkline(tile('memory').querySelector('svg'), [pick('memoryPercent')], { colors: ['#a78bfa'] });
+        drawSparkline(tile('storage').querySelector('svg'), [pick('storagePercent')], { colors: ['#38bdf8'] });
+        drawSparkline(tile('network').querySelector('svg'),
+            [pick('networkRxBytesPerSec'), pick('networkTxBytesPerSec')],
+            { max: 1, colors: ['#4ade80', '#f472b6'] });
+    };
+
+    const refresh = async () => {
+        if (busy || stopped) return;
+        busy = true;
+        try {
+            const since = samples.at(-1)?.collectedAt;
+            const query = new URLSearchParams({ minutes: String(LIVE_HISTORY_MINUTES) });
+            if (since) query.set('since', since);
+            const result = await api(`/api/devices/${encodeURIComponent(deviceId)}/metrics?${query}`,
+                { cache: 'no-store' });
+            if (!result.monitoring.enabled) {
+                stopped = true;
+                window.location.reload();
+                return;
+            }
+            const cutoff = Date.now() - LIVE_HISTORY_MINUTES * 60 * 1000;
+            samples = samples.concat(result.samples)
+                .filter(sample => new Date(sample.collectedAt).getTime() >= cutoff);
+            render(result);
+        } catch (error) {
+            meta.textContent = `Could not refresh live data: ${error.message}`;
+        } finally {
+            busy = false;
+        }
+    };
+
+    refresh();
+    window.setInterval(() => {
+        if (!document.hidden) refresh();
+    }, DASHBOARD_REFRESH_MS);
+
+    document.getElementById('stopLiveMonitoringBtn')?.addEventListener('click', async event => {
+        const confirmed = window.confirm(
+            'Stop live monitoring for this device?\n\n' +
+            'The device will stop sending usage data within 30 seconds and remove its ' +
+            'startup entry. To turn it on again, the device must be linked again with the user\'s consent.'
+        );
+        if (!confirmed) return;
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+            await api(`/api/devices/${encodeURIComponent(deviceId)}/monitoring/stop`, { method: 'POST' });
+            stopped = true;
+            showToast('Live monitoring stopped for this device.');
+            window.setTimeout(() => window.location.reload(), 800);
+        } catch (error) {
+            button.disabled = false;
+            showToast(error.message, 'danger');
+        }
+    });
+}
+
+const DASHBOARD_REFRESH_MS = 30000;
+
 function initDashboard(notifyOnError = true) {
     const scanCompleted = new URLSearchParams(window.location.search).get('scan');
     if (dashboardRefreshPromise) return dashboardRefreshPromise;
@@ -1259,13 +1458,19 @@ function initDashboard(notifyOnError = true) {
             return `<tr><td class="fw-semibold">${escapeHTML(device.name)}</td>
                 <td>${escapeHTML(device.owner)}</td><td>${escapeHTML(device.os)}</td>
                 <td>${escapeHTML(device.cpu)}</td><td>${escapeHTML(device.ram)}</td>
+                <td><a class="live-usage-link" href="/devices/${encodeURIComponent(device.id)}/specifications#live-monitoring">
+                    ${liveUsageCell(device)}</a></td>
                 <td><a href="/devices/${encodeURIComponent(device.id)}/specifications#health-report"
                     style="color:${color}">
                     ${escapeHTML(value)}
                 </a></td>
                 <td>${deviceStatusBadge(device.status)}</td></tr>`;
         }).join('') :
-            '<tr><td colspan="7" class="text-center text-muted py-4">No registered devices yet.</td></tr>';
+            '<tr><td colspan="8" class="text-center text-muted py-4">No registered devices yet.</td></tr>';
+        const indicatorText = document.getElementById('liveRefreshText');
+        if (indicatorText) {
+            indicatorText.textContent = `Live · ${result.monitored || 0} monitored · refreshing every ${result.refresh_seconds || 30} s`;
+        }
         if (scanCompleted === 'complete') {
             showToast('Device scan completed successfully. Dashboard data is up to date.');
             window.history.replaceState({}, '', window.location.pathname);
@@ -1283,21 +1488,13 @@ document.addEventListener('DOMContentLoaded', () => {
     initSidebar();
     document.getElementById('confirmDeleteDeviceBtn')?.addEventListener('click', archiveSelectedDevice);
     const page = getCurrentPage();
-    if (page === 'login') {
-        const toggle = document.getElementById('togglePassword');
-        const input = document.getElementById('passwordInput');
-        toggle?.addEventListener('click', () => {
-            const showPassword = input.type === 'password';
-            input.type = showPassword ? 'text' : 'password';
-            toggle.querySelector('i').className = showPassword ? 'bi bi-eye-slash' : 'bi bi-eye';
-        });
-    }
     if (page === 'dashboard') {
         initDashboard();
         window.setInterval(() => {
             if (!document.hidden) initDashboard(false);
-        }, 10000);
+        }, DASHBOARD_REFRESH_MS);
     }
+    initLiveMonitoringPanel();
     if (page === 'devices') initDevicesPage();
     if (page === 'device-verification') initDeviceVerificationPage();
     if (page === 'device-link-open') initDeviceLinkOpenPage();

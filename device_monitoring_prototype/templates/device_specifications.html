@@ -12,7 +12,7 @@
         </a>
     </div>
     <div class="content-card-body">
-        <p class="text-muted">
+        <p class="device-meta">
             Device ID {{ device.id }} · {{ device.device_type }} ·
             {{ device.status|capitalize }} · Owner {{ device.owner.full_name }}
         </p>
@@ -41,6 +41,63 @@
             <div class="alert alert-info mb-0">
                 No device information available yet.
             </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="content-card mb-4" id="live-monitoring">
+    <div class="content-card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <h6 class="mb-0"><i class="bi bi-activity me-2"></i>Live Monitoring</h6>
+        <div class="d-flex align-items-center gap-2">
+            {% if monitoring.enabled %}
+                <span class="live-indicator" id="liveMonitoringState" role="status">
+                    <span class="live-indicator-dot" aria-hidden="true"></span>On
+                </span>
+                <button type="button" class="btn btn-sm btn-outline-danger" id="stopLiveMonitoringBtn">
+                    <i class="bi bi-stop-circle me-1" aria-hidden="true"></i>Stop live monitoring
+                </button>
+            {% else %}
+                <span class="live-indicator is-off" role="status">Off</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="content-card-body">
+        {% if monitoring.enabled %}
+            <div id="liveMonitoringPanel" data-device-id="{{ device.id }}"
+                 data-interval="{{ monitoring.intervalSeconds }}"
+                 data-offline-after="{{ monitoring.offlineAfterSeconds }}">
+                <p class="live-meta small mb-3" id="liveMonitoringMeta">
+                    Enabled by the device user. A heartbeat is sent every
+                    {{ monitoring.intervalSeconds }} seconds; the device shows Offline after
+                    {{ monitoring.offlineAfterSeconds }} seconds without one. Waiting for data…
+                </p>
+                <div class="live-grid">
+                    {% for key, label, icon in [
+                        ('cpu', 'CPU usage', 'bi-cpu'),
+                        ('memory', 'Memory usage', 'bi-memory'),
+                        ('storage', 'Storage used', 'bi-device-hdd'),
+                        ('network', 'Network', 'bi-arrow-down-up'),
+                    ] %}
+                    <article class="live-tile" data-live-metric="{{ key }}">
+                        <div class="live-tile-head">
+                            <span class="live-tile-label"><i class="bi {{ icon }} me-1" aria-hidden="true"></i>{{ label }}</span>
+                            <span class="live-tile-value" data-live-value>—</span>
+                        </div>
+                        <svg class="live-sparkline" viewBox="0 0 120 36" preserveAspectRatio="none"
+                             role="img" aria-label="{{ label }} over the last hour" data-live-chart></svg>
+                        <span class="live-tile-note" data-live-note></span>
+                    </article>
+                    {% endfor %}
+                </div>
+            </div>
+        {% else %}
+            <p class="mb-2">Live monitoring is off for this device.</p>
+            <p class="text-muted small mb-0">
+                Monitoring runs only with the device user's consent. To turn it on, link this
+                computer again with the latest DevMonitor Agent for Windows and choose
+                <strong>Turn on live monitoring</strong> when asked. It can be stopped at any
+                time from this page or on the device.
+            </p>
         {% endif %}
     </div>
 </div>
@@ -145,7 +202,7 @@
                 endpoint assessment; unavailable sensors and unsupported checks are identified in the report.
             </p>
         {% else %}
-            <p class="text-muted mb-0">No completed Device Scanner results are available yet.</p>
+            <p class="device-empty-state mb-0">No completed Device Scanner results are available yet.</p>
         {% endif %}
     </div>
 </div>
@@ -183,7 +240,7 @@
                 </table>
             </div>
         {% else %}
-            <p class="text-muted mb-0">No device scan history is available yet.</p>
+            <p class="device-empty-state mb-0">No device scan history is available yet.</p>
         {% endif %}
     </div>
 </div>
@@ -208,7 +265,7 @@
                 </table>
             </div>
         {% else %}
-            <p class="text-muted mb-0">No device events have been recorded.</p>
+            <p class="device-empty-state mb-0">No device events have been recorded.</p>
         {% endif %}
     </div>
 </div>

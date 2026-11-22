@@ -70,9 +70,16 @@
                         Password <span aria-hidden="true">*</span>
                         <span class="visually-hidden">required</span>
                     </label>
-                    <input id="password" name="password" type="password" class="form-control"
-                           required autocomplete="new-password" aria-required="true"
-                           aria-describedby="registerPasswordRequirements registerPasswordStrength">
+                    <div class="password-field">
+                        <input id="password" name="password" type="password" class="form-control"
+                               required autocomplete="new-password" aria-required="true"
+                               aria-describedby="registerPasswordRequirements registerPasswordStrength">
+                        <button type="button" class="password-toggle"
+                                data-password-toggle="password" aria-controls="password"
+                                aria-label="Show password" aria-pressed="false" title="Show password">
+                            <i class="bi bi-eye" aria-hidden="true"></i>
+                        </button>
+                    </div>
                     <div class="form-text">Use 8-16 characters, including a capital letter and a special character.</div>
                     <ul id="registerPasswordRequirements" class="password-requirements"
                         aria-live="polite">
@@ -90,9 +97,16 @@
                         Confirm Password <span aria-hidden="true">*</span>
                         <span class="visually-hidden">required</span>
                     </label>
-                    <input id="confirm_password" name="confirm_password" type="password"
-                           class="form-control" required autocomplete="new-password"
-                           aria-required="true" aria-describedby="passwordMatchValidation">
+                    <div class="password-field">
+                        <input id="confirm_password" name="confirm_password" type="password"
+                               class="form-control" required autocomplete="new-password"
+                               aria-required="true" aria-describedby="passwordMatchValidation">
+                        <button type="button" class="password-toggle"
+                                data-password-toggle="confirm_password" aria-controls="confirm_password"
+                                aria-label="Show confirm password" aria-pressed="false" title="Show confirm password">
+                            <i class="bi bi-eye" aria-hidden="true"></i>
+                        </button>
+                    </div>
                     <div id="passwordMatchValidation" class="validation-message" aria-live="polite">
                         Re-enter your password to confirm it.
                     </div>
@@ -199,5 +213,6 @@
     </div>
     <script src="{{ url_for('static', filename='js/register.js') }}" defer></script>
     <script src="{{ url_for('static', filename='js/password-strength.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='js/password-toggle.js') }}" defer></script>
 </body>
 </html>

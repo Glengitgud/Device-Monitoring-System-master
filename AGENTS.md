@@ -38,7 +38,7 @@ python -m flask --app device_monitoring_prototype.app check-mail
 - New installs: create schema from `device_monitoring_prototype/schema.sql` or use `init-db` for model-backed creation.
 - Existing installs: apply SQL migrations in order from `device_monitoring_prototype/migrations/` and do not reapply already-run `ALTER TABLE` scripts.
 - `check-db` is read-only and used to validate table/column/index/constraint parity against models.
-- Current schema includes additive auth upgrades in `009_email_and_totp_authentication.sql` and `010_gmail_email_verification.sql`.
+- Current schema includes additive auth upgrades in `009_email_and_totp_authentication.sql` and `010_gmail_email_verification.sql`, and opt-in live monitoring columns in `012_live_device_monitoring.sql`.
 
 ## Authentication and security patterns
 - Account registration flow is staged: email verification code first, then TOTP verification, then user creation (see `authentication.py`, `app.py`).
@@ -51,8 +51,18 @@ python -m flask --app device_monitoring_prototype.app check-mail
 - Standard users complete QR-based device verification before dashboard access.
 - Enrollment tokens are short-lived, one-use, and hashed in storage.
 - Agent binaries are built per enrollment by PyInstaller on a 64-bit Windows host.
-- The agent is user-confirmed and performs one-time collection/diagnostics, not continuous monitoring.
+- Enrollment and diagnostic scans are user-confirmed, one-time collections.
 - Enrollment and scan activity is persisted in `logs` and broader audit records in `activity_logs`.
+
+## Live monitoring (opt-in, continuous)
+- Continuous monitoring is allowed only after the device user explicitly opts in. It must stay transparent, authorized and stoppable; never add hidden or silent monitoring, and never enable it by default (the consent prompt defaults to "Not now"; `--yes` runs need `--enable-monitoring`).
+- Flow: enrollment returns an inactive per-device credential only when the agent sends `X-DevMonitor-Monitoring: supported`; it activates via `POST /api/device-agent/monitoring/enable` within 15 minutes, after consent. Only the SHA-256 hash is stored (`devices.monitoring_token_hash`).
+- Heartbeats: `POST /api/device-agent/heartbeat` every 30 s (bearer credential, CSRF-exempt, minimum 10 s spacing) storing a `device_metrics` row: CPU/memory/storage percentages and network bytes per second computed on the device from byte-counter differences.
+- Status: monitored devices go Offline after 90 s without a heartbeat (`MONITORING_OFFLINE_AFTER`); unmonitored devices keep the 5-minute rule. Offline detection runs on read requests, not a background job, so it works on serverless hosts.
+- Stopping must always remain possible: the owner/administrator (`POST /api/devices/<id>/monitoring/stop`), the device (`--stop-monitoring`), archiving/deleting the device, or an inactive owner all revoke the credential, and the agent removes its startup entry and stored credential on the next refused heartbeat.
+- Retention is 7 days (`METRIC_RETENTION`), pruned during heartbeats. The dashboard polls every 5 s; do not add per-poll audit rows.
+- Windows is the only supported monitoring platform today. Platform specifics live in the agent's "platform hook" functions (credential protection via DPAPI, the per-user `HKCU\...\Run` startup entry, the single-instance mutex); add Linux/macOS by implementing those, not by forking the loop.
+- Constants live in `services.py` (`HEARTBEAT_INTERVAL_SECONDS`, `MONITORING_OFFLINE_AFTER`, `METRIC_RETENTION`, `MONITORING_ACTIVATION_WINDOW`) and `app.py` (`DASHBOARD_REFRESH_SECONDS`); keep the agent's `HEARTBEAT_INTERVAL_SECONDS` in sync.
 
 ## Frontend integration points
 - Templates live in `device_monitoring_prototype/templates/` with `base.html` layout inheritance.
@@ -60,7 +70,7 @@ python -m flask --app device_monitoring_prototype.app check-mail
 - Registration-specific behavior is implemented in `device_monitoring_prototype/static/js/register.js`.
 
 ## Testing
-- Test framework is Python `unittest` (`device_monitoring_prototype/tests/test_database_integration.py`, `device_monitoring_prototype/tests/test_agent_builder.py`).
+- Test framework is Python `unittest` (`device_monitoring_prototype/tests/test_database_integration.py`, `device_monitoring_prototype/tests/test_agent_builder.py`, `device_monitoring_prototype/tests/test_live_monitoring.py`).
 - Typical run command:
 
 ```powershell

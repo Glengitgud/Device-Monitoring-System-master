@@ -1061,65 +1061,508 @@ def _health_issue(title, score, description, root_cause, recommendation, steps):
     }
 
 
-def show_registration_success(dashboard_url=None):
+# Colours shared by the agent's windows; they follow the website's dark purple theme.
+AGENT_THEME = {
+    "background": "#0d0221",
+    "surface": "#120636",
+    "surface_alt": "#1a0b4a",
+    "border": "#2c1d6b",
+    "accent": "#3458a8",
+    "accent_active": "#26408b",
+    "accent_light": "#93c5fd",
+    "text": "#f8fafc",
+    "muted": "#cbd5e1",
+    "dim": "#94a3b8",
+    "track": "#2a1d5c",
+    "success": "#16a34a",
+    "error": "#fca5a5",
+}
+FONT_FAMILY = "Segoe UI"
+
+
+def _enable_dpi_awareness():
+    """Draw Tk windows sharply on scaled (125%/150%) Windows displays."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
+def _pixel_scale(root):
+    """Pixels per 96-dpi pixel, so paddings grow with the display's text scaling."""
+    try:
+        return max(float(root.winfo_fpixels("1i")) / 96.0, 1.0)
+    except Exception:  # pragma: no cover - Tk without a real display
+        return 1.0
+
+
+def _work_area(root):
+    """(left, top, right, bottom) of the screen area not covered by the taskbar."""
+    if os.name == "nt":
+        try:
+            rect = ctypes.wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                return rect.left, rect.top, rect.right, rect.bottom
+        except (AttributeError, OSError):
+            pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
+
+
+def _place_window(root, width, height):
+    """Centre the window in the work area so it never runs under the taskbar.
+
+    ``width``/``height`` are the client size; the title bar and borders are
+    added by Windows, so room is kept for them.
+    """
+    left, top, right, bottom = _work_area(root)
+    chrome = int(round(48 * _pixel_scale(root)))
+    width = min(width, right - left - chrome // 2)
+    height = min(height, bottom - top - chrome)
+    x = left + max((right - left - width) // 2, 0)
+    y = top + max((bottom - top - chrome - height) // 3, 0)
+    root.geometry(f"{width}x{height}+{x}+{y}")
+
+
+def _bring_to_front(root):
+    # Map the window first: setting -topmost on an unmapped window makes
+    # Windows ignore the position chosen by _place_window.
+    root.update()
+    root.lift()
+    try:
+        root.attributes("-topmost", True)
+        root.after(400, lambda: root.attributes("-topmost", False))
+    except Exception:  # pragma: no cover - window manager without -topmost
+        pass
+    root.focus_force()
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _format_gb(value):
+    if not _is_number(value) or value < 0:
+        return UNAVAILABLE
+    return f"{value / (1024 ** 3):,.1f} GB"
+
+
+def _usage_fraction(used, total):
+    if not (_is_number(used) and _is_number(total)) or total <= 0:
+        return None
+    return min(max(used / total, 0.0), 1.0)
+
+
+def _usage_color(fraction):
+    if fraction >= 0.9:
+        return "#dc2626"
+    if fraction >= 0.75:
+        return "#eab308"
+    return "#16a34a"
+
+
+def _plain_value(value):
+    if value is None or value == "" or value == [] or value == [UNAVAILABLE]:
+        return UNAVAILABLE
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value if str(item).strip()) or UNAVAILABLE
+    return str(value)
+
+
+def specification_sections(specifications):
+    """Group the detected specifications into titled sections for the review window.
+
+    Each section is ``(title, rows)``; each row is a dict with ``label``,
+    ``value`` (display text), ``fraction`` (0-1 for a usage bar, or None) and
+    ``detail`` (True for per-drive rows). Every FIELD_LABELS label appears once.
+    """
+    specs = specifications or {}
+
+    def row(label, value, fraction=None, detail=False):
+        return {"label": label, "value": value, "fraction": fraction, "detail": detail}
+
+    capacity = specs.get("ram_capacity_bytes")
+    used = specs.get("ram_usage_bytes")
+    ram_fraction = _usage_fraction(used, capacity)
+    ram_usage = _format_gb(used)
+    if ram_fraction is not None:
+        ram_usage = f"{ram_usage} in use ({ram_fraction:.0%})"
+
+    drives = [item for item in specs.get("storage_devices") or [] if isinstance(item, dict)]
+    total = specs.get("storage_total_bytes") if drives else None
+    available = specs.get("storage_available_bytes") if drives else None
+    storage_fraction = (
+        _usage_fraction(total - available, total)
+        if _is_number(total) and _is_number(available) else None
+    )
+    drive_rows = []
+    for drive in drives:
+        drive_total = drive.get("total_bytes")
+        drive_free = drive.get("available_bytes")
+        drive_rows.append(row(
+            str(drive.get("name") or "Drive"),
+            f"{_format_gb(drive_free)} free of {_format_gb(drive_total)}",
+            _usage_fraction(drive_total - drive_free, drive_total)
+            if _is_number(drive_total) and _is_number(drive_free) else None,
+            detail=True,
+        ))
+    drive_count = len(drives)
+    storage_summary = (
+        f"{drive_count} drive{'' if drive_count == 1 else 's'}" if drives else UNAVAILABLE
+    )
+
+    return [
+        ("Processor", [
+            row("CPU name", _plain_value(specs.get("cpu_name"))),
+            row("Number of CPU cores", _plain_value(specs.get("cpu_cores"))),
+        ]),
+        ("Memory", [
+            row("RAM capacity", _format_gb(capacity)),
+            row("RAM usage", ram_usage, ram_fraction),
+        ]),
+        ("Storage", [
+            row("Total storage capacity", _format_gb(total)),
+            row(
+                "Available storage capacity",
+                f"{_format_gb(available)} free" if _is_number(available) else UNAVAILABLE,
+                storage_fraction,
+            ),
+            row("Storage devices", storage_summary),
+            *drive_rows,
+        ]),
+        ("Graphics", [
+            row("GPU information", _plain_value(specs.get("gpu_information"))),
+        ]),
+        ("System", [
+            row("Motherboard brand", _plain_value(specs.get("motherboard_brand"))),
+            row("Operating system name", _plain_value(specs.get("operating_system_name"))),
+            row("Operating system version", _plain_value(specs.get("operating_system_version"))),
+        ]),
+        ("Network", [
+            row("Installed network adapters", _plain_value(specs.get("network_adapters"))),
+            row("IP address", _plain_value(specs.get("ip_addresses"))),
+            row("MAC address", _plain_value(specs.get("mac_address"))),
+        ]),
+    ]
+
+
+def review_specifications_window(
+    specifications, *, default_name, default_type, server=""
+):  # pragma: no cover - needs a display
+    """Show the detected specifications and ask the user to approve them.
+
+    Returns ``{"name": ..., "device_type": ...}`` when the user clicks
+    Register, or None when they cancel or close the window. Nothing is sent
+    from here; the caller submits only after an approval.
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    theme = AGENT_THEME
+    _enable_dpi_awareness()
+    root = tk.Tk()
+    root.title("DevMonitor Agent - Review this device")
+    root.configure(background=theme["background"])
+    scale = _pixel_scale(root)
+
+    def px(value):
+        return int(round(value * scale))
+
+    result = {}
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(1, weight=1)
+
+    # Header -----------------------------------------------------------------
+    header = tk.Frame(root, background=theme["background"], padx=px(24), pady=px(18))
+    header.grid(row=0, column=0, sticky="ew")
+    tk.Label(
+        header, text="Review this device", font=(FONT_FAMILY, 17, "bold"),
+        foreground=theme["text"], background=theme["background"],
+    ).pack(anchor="w")
+    tk.Label(
+        header,
+        text=(
+            "DevMonitor detected the details below. Nothing is sent until you "
+            "click Register this device."
+        ),
+        font=(FONT_FAMILY, 10), foreground=theme["muted"],
+        background=theme["background"], justify="left", wraplength=px(640),
+    ).pack(anchor="w", pady=(px(4), 0))
+    if server:
+        tk.Label(
+            header, text=f"Server: {server}", font=(FONT_FAMILY, 9),
+            foreground=theme["dim"], background=theme["background"],
+        ).pack(anchor="w", pady=(px(2), 0))
+
+    # Scrollable grid of specification cards ---------------------------------
+    body = tk.Frame(root, background=theme["background"])
+    body.grid(row=1, column=0, sticky="nsew", padx=(px(18), px(6)))
+    body.rowconfigure(0, weight=1)
+    body.columnconfigure(0, weight=1)
+    canvas = tk.Canvas(body, background=theme["background"], highlightthickness=0, borderwidth=0)
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")  # the native Windows scrollbar ignores colours
+    except tk.TclError:
+        pass
+    style.configure(
+        "Agent.Vertical.TScrollbar", background=theme["border"],
+        troughcolor=theme["background"], bordercolor=theme["background"],
+        lightcolor=theme["border"], darkcolor=theme["border"],
+        arrowcolor=theme["muted"], gripcount=0,
+    )
+    style.map("Agent.Vertical.TScrollbar", background=[("active", theme["accent"])])
+    scrollbar = ttk.Scrollbar(
+        body, orient="vertical", command=canvas.yview, style="Agent.Vertical.TScrollbar"
+    )
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    cards = tk.Frame(canvas, background=theme["background"])
+    cards_window = canvas.create_window((0, 0), window=cards, anchor="nw")
+    cards.columnconfigure((0, 1), weight=1, uniform="cards")
+    cards.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda event: canvas.itemconfigure(cards_window, width=event.width))
+
+    def on_mousewheel(event):
+        canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
+
+    root.bind_all("<MouseWheel>", on_mousewheel)
+    value_wrap = px(290)
+
+    for index, (title, rows) in enumerate(specification_sections(specifications)):
+        card = tk.Frame(
+            cards, background=theme["surface"], padx=px(16), pady=px(14),
+            highlightbackground=theme["border"], highlightthickness=1,
+        )
+        card.grid(row=index // 2, column=index % 2, sticky="nsew", padx=px(6), pady=px(6))
+        tk.Label(
+            card, text=title.upper(), font=(FONT_FAMILY, 9, "bold"),
+            foreground=theme["accent_light"], background=theme["surface"],
+        ).pack(anchor="w", pady=(0, px(6)))
+        for spec_row in rows:
+            indent = px(12) if spec_row["detail"] else 0
+            tk.Label(
+                card, text=spec_row["label"],
+                font=(FONT_FAMILY, 9 if spec_row["detail"] else 8),
+                foreground=theme["muted"] if spec_row["detail"] else theme["dim"],
+                background=theme["surface"],
+            ).pack(anchor="w", padx=(indent, 0), pady=(px(6), 0))
+            unavailable = spec_row["value"] == UNAVAILABLE
+            tk.Label(
+                card, text=spec_row["value"],
+                font=(FONT_FAMILY, 10, "italic" if unavailable else "normal"),
+                foreground=theme["dim"] if unavailable else theme["text"],
+                background=theme["surface"], justify="left", anchor="w",
+                wraplength=value_wrap - indent,
+            ).pack(anchor="w", fill="x", padx=(indent, 0))
+            if spec_row["fraction"] is not None:
+                track = tk.Frame(card, background=theme["track"], height=px(6))
+                track.pack(fill="x", padx=(indent, 0), pady=(px(4), px(2)))
+                tk.Frame(track, background=_usage_color(spec_row["fraction"])).place(
+                    relx=0, rely=0, relheight=1, relwidth=max(spec_row["fraction"], 0.01)
+                )
+
+    # Footer: name, type, approve ---------------------------------------------
+    footer = tk.Frame(
+        root, background=theme["surface"], padx=px(24), pady=px(16),
+        highlightbackground=theme["border"], highlightthickness=1,
+    )
+    footer.grid(row=2, column=0, sticky="ew", pady=(px(10), 0))
+    footer.columnconfigure(1, weight=1)
+
+    tk.Label(
+        footer, text="Device name", font=(FONT_FAMILY, 10, "bold"),
+        foreground=theme["text"], background=theme["surface"],
+    ).grid(row=0, column=0, sticky="w", padx=(0, px(12)))
+    name_var = tk.StringVar(value=default_name)
+    name_entry = tk.Entry(
+        footer, textvariable=name_var, font=(FONT_FAMILY, 10),
+        background=theme["surface_alt"], foreground=theme["text"],
+        insertbackground=theme["text"], relief="flat",
+        highlightthickness=1, highlightbackground=theme["border"],
+        highlightcolor=theme["accent_light"],
+    )
+    name_entry.grid(row=0, column=1, columnspan=2, sticky="ew", ipady=px(5))
+
+    tk.Label(
+        footer, text="Device type", font=(FONT_FAMILY, 10, "bold"),
+        foreground=theme["text"], background=theme["surface"],
+    ).grid(row=1, column=0, sticky="w", padx=(0, px(12)), pady=(px(10), 0))
+    type_var = tk.StringVar(
+        value=default_type if default_type in {"Desktop", "Laptop"} else "Desktop"
+    )
+    types = tk.Frame(footer, background=theme["surface"])
+    types.grid(row=1, column=1, sticky="w", pady=(px(10), 0))
+    for choice in ("Desktop", "Laptop"):
+        tk.Radiobutton(
+            types, text=choice, value=choice, variable=type_var, indicatoron=False,
+            font=(FONT_FAMILY, 10), width=9, padx=px(10), pady=px(5),
+            background=theme["surface_alt"], foreground=theme["muted"],
+            selectcolor=theme["accent"], activebackground=theme["accent_active"],
+            activeforeground=theme["text"], relief="flat", borderwidth=0,
+            highlightthickness=0, cursor="hand2",
+        ).pack(side="left", padx=(0, px(6)))
+
+    error = tk.Label(
+        footer, text="", font=(FONT_FAMILY, 9), foreground=theme["error"],
+        background=theme["surface"], anchor="w",
+    )
+    error.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(px(6), 0))
+    tk.Label(
+        footer,
+        text="Only the details above and this name and type are sent to your account.",
+        font=(FONT_FAMILY, 9), foreground=theme["dim"], background=theme["surface"],
+        anchor="w", justify="left", wraplength=px(380),
+    ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(px(4), 0))
+
+    def register(_event=None):
+        name = name_var.get().strip()
+        if not name or len(name) > 120:
+            error.configure(text="Enter a device name between 1 and 120 characters.")
+            name_entry.focus_set()
+            return
+        result.update(name=name, device_type=type_var.get())
+        root.destroy()
+
+    def cancel(_event=None):
+        result.clear()
+        root.destroy()
+
+    buttons = tk.Frame(footer, background=theme["surface"])
+    buttons.grid(row=3, column=2, sticky="e", pady=(px(4), 0))
+    button_style = dict(
+        font=(FONT_FAMILY, 10, "bold"), relief="flat", borderwidth=0,
+        padx=px(20), pady=px(8), cursor="hand2",
+    )
+    tk.Button(
+        buttons, text="Cancel", command=cancel,
+        background=theme["surface_alt"], foreground=theme["muted"],
+        activebackground=theme["border"], activeforeground=theme["text"],
+        **button_style,
+    ).pack(side="left", padx=(0, px(8)))
+    tk.Button(
+        buttons, text="Register this device", command=register,
+        background=theme["accent"], foreground="#ffffff",
+        activebackground=theme["accent_active"], activeforeground="#ffffff",
+        **button_style,
+    ).pack(side="left")
+
+    root.bind("<Return>", register)
+    root.bind("<Escape>", cancel)
+    root.protocol("WM_DELETE_WINDOW", cancel)
+
+    root.update_idletasks()
+    width = max(
+        cards.winfo_reqwidth() + scrollbar.winfo_reqwidth() + px(30),
+        footer.winfo_reqwidth(),
+        px(720),
+    )
+    height = (
+        header.winfo_reqheight() + cards.winfo_reqheight()
+        + footer.winfo_reqheight() + px(20)
+    )
+    root.minsize(px(640), px(420))
+    _place_window(root, width, height)
+    _bring_to_front(root)
+    name_entry.focus_set()
+    name_entry.icursor("end")
+    root.mainloop()
+    return dict(result) if result else None
+
+
+def show_registration_success(seconds=5, dashboard_url=None):  # pragma: no cover - needs a display
     import tkinter as tk
 
     dashboard_url = dashboard_url or DASHBOARD_URL
+
+    theme = AGENT_THEME
+    _enable_dpi_awareness()
     root = tk.Tk()
     root.title("Device Registered Successfully")
-    root.geometry("430x300")
     root.resizable(False, False)
-    root.configure(background="#0d0221")
-    tk.Label(
-        root, text="✓", font=("Segoe UI", 42, "bold"),
-        foreground="#16a34a", background="#0d0221",
-    ).pack(pady=(18, 0))
-    tk.Label(
-        root, text="Device Registered Successfully",
-        font=("Segoe UI", 16, "bold"), foreground="#f8fafc",
-        background="#0d0221",
-    ).pack(pady=(2, 4))
-    tk.Label(
-        root, text="You may now proceed to the Dashboard.",
-        foreground="#cbd5e1", background="#0d0221",
-    ).pack()
-    card = tk.Label(
-        root, text="Open DevMonitor Dashboard",
-        font=("Segoe UI", 11, "bold"), foreground="#93c5fd",
-        background="#120636", cursor="hand2", padx=18, pady=14,
-    )
-    card.pack(fill="x", padx=28, pady=18)
+    root.configure(background=theme["background"])
+    scale = _pixel_scale(root)
 
-    def redirect():
-        webbrowser.open(dashboard_url)
+    def px(value):
+        return int(round(value * scale))
+
+    # The window is sized from its content (below), so nothing is clipped at
+    # any display scaling.
+    body = tk.Frame(root, background=theme["background"], padx=px(40), pady=px(28))
+    body.pack(fill="both", expand=True)
+    tk.Label(
+        body, text="✓", font=(FONT_FAMILY, 40, "bold"),
+        foreground=theme["success"], background=theme["background"],
+    ).pack()
+    tk.Label(
+        body, text="Device Registered Successfully",
+        font=(FONT_FAMILY, 16, "bold"), foreground=theme["text"],
+        background=theme["background"],
+    ).pack(pady=(px(2), px(6)))
+    tk.Label(
+        body, text="You may now proceed to the Dashboard.",
+        font=(FONT_FAMILY, 10), foreground=theme["muted"],
+        background=theme["background"], wraplength=px(360), justify="center",
+    ).pack()
+    countdown = tk.Label(
+        body, text="", font=(FONT_FAMILY, 10, "bold"),
+        foreground=theme["muted"], background=theme["background"],
+    )
+    countdown.pack(pady=(px(14), 0))
+
+    state = {"done": False, "timer": None}
+
+    def redirect(_event=None):
+        if state["done"]:
+            return
+        state["done"] = True
+        if state["timer"] is not None:
+            root.after_cancel(state["timer"])
+        if dashboard_url:
+            webbrowser.open(dashboard_url, new=2)
         root.destroy()
 
-    card.bind("<Button-1>", lambda _event: redirect())
-    countdown = tk.Label(
-        root, text="", foreground="#cbd5e1", background="#0d0221"
-    )
-    countdown.pack()
-
-    def tick(seconds=5):
-        countdown.configure(text=f"Redirecting to Dashboard in {seconds} seconds...")
-        if seconds <= 0:
+    def tick(remaining=seconds):
+        if state["done"]:
+            return
+        countdown.configure(text=f"Redirecting to Dashboard in {remaining} seconds...")
+        if remaining <= 0:
             redirect()
         else:
-            root.after(1000, tick, seconds - 1)
+            state["timer"] = root.after(1000, tick, remaining - 1)
 
-    tk.Button(
-        root,
+    button = tk.Button(
+        body,
         text="Go to Dashboard Now",
         command=redirect,
-        background="#3458a8",
+        font=(FONT_FAMILY, 11, "bold"),
+        background=theme["accent"],
         foreground="#ffffff",
-        activebackground="#26408b",
+        activebackground=theme["accent_active"],
         activeforeground="#ffffff",
         relief="flat",
-        padx=18,
-        pady=8,
-    ).pack(pady=(8, 14))
-    root.after(0, tick)
+        borderwidth=0,
+        highlightthickness=0,
+        cursor="hand2",
+        padx=px(28),
+        pady=px(11),
+        anchor="center",
+        justify="center",
+    )
+    button.pack(fill="x", pady=(px(18), 0))
+    root.bind("<Return>", redirect)
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+
+    root.update_idletasks()
+    _place_window(root, max(body.winfo_reqwidth(), px(440)), body.winfo_reqheight())
+    _bring_to_front(root)
+    button.focus_set()
+    tick()
     root.mainloop()
 
 
@@ -1314,33 +1757,564 @@ def resolve_link_enrollment(link, *, interactive):
         return None
 
 
-def _guess_device_type():
+# ---------------------------------------------------------------------------
+# Opt-in live monitoring
+# ---------------------------------------------------------------------------
+# Runs only after the device user agrees (consent prompt after registration).
+# It is visible and stoppable: a "DevMonitor Live Monitoring" startup entry
+# (Task Manager > Startup apps), a minimised console window titled as such,
+# the "Stop live monitoring" button on the website, and "--stop-monitoring".
+# Only usage figures are sent: CPU, memory, storage and network throughput.
+#
+# Platform-specific pieces are the five functions marked "platform hook";
+# Linux/macOS support can be added by implementing them for those systems.
+
+HEARTBEAT_PATH = "/api/device-agent/heartbeat"
+MONITORING_ENABLE_PATH = "/api/device-agent/monitoring/enable"
+MONITORING_STOP_PATH = "/api/device-agent/monitoring/stop"
+HEARTBEAT_INTERVAL_SECONDS = 30
+MONITOR_STARTUP_NAME = "DevMonitor Live Monitoring"
+MONITOR_CONFIG_NAME = "monitoring.json"
+MONITOR_PID_NAME = "monitoring.pid"
+MONITOR_EXECUTABLE_NAME = "devmonitor-device-agent.exe"
+MONITOR_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+MONITOR_MUTEX_NAME = "Local\\DevMonitorLiveMonitoring"
+MONITOR_CONSOLE_TITLE = "DevMonitor live monitoring is ON"
+_MONITOR_MUTEX = None
+CONSENT_TEXT = (
+    "DevMonitor can keep this device's dashboard up to date. When turned on it "
+    "runs in the background whenever you sign in to Windows and sends this "
+    "device's CPU, memory, storage and network usage to {server} every "
+    f"{HEARTBEAT_INTERVAL_SECONDS} seconds.\n\n"
+    "It does not collect files, keystrokes, screenshots, browsing history or "
+    "the contents of your network traffic.\n\n"
+    "You can stop it at any time: click \"Stop live monitoring\" on this "
+    "device's page in DevMonitor, or run this agent with --stop-monitoring. "
+    f"It appears as \"{MONITOR_STARTUP_NAME}\" in Task Manager > Startup apps."
+)
+
+
+def monitoring_supported():
+    return sys.platform == "win32"
+
+
+def monitoring_directory():
+    return Path(
+        os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+    ) / "DevMonitor"
+
+
+def _server_base(url):
+    """scheme://host[:port] of a DevMonitor URL; HTTPS unless it is local."""
+    parts = urlsplit(url or "")
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("The DevMonitor server address is invalid.")
+    if parts.scheme != "https" and parts.hostname not in LOCAL_HOSTS:
+        raise ValueError("For your security the DevMonitor server must use HTTPS.")
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = [
+        ("cbData", ctypes.wintypes.DWORD),
+        ("pbData", ctypes.POINTER(ctypes.c_char)),
+    ]
+
+
+def _dpapi(data, protect):
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    buffer = ctypes.create_string_buffer(data, len(data))
+    blob_in = _DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+    blob_out = _DataBlob()
+    ui_forbidden = 0x01
+    if protect:
+        ok = crypt32.CryptProtectData(
+            ctypes.byref(blob_in), "DevMonitor monitoring credential",
+            None, None, None, ui_forbidden, ctypes.byref(blob_out),
+        )
+    else:
+        ok = crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None, ui_forbidden,
+            ctypes.byref(blob_out),
+        )
+    if not ok:
+        raise OSError(ctypes.get_last_error(), "Windows could not protect the credential.")
     try:
-        return "Laptop" if psutil.sensors_battery() is not None else "Desktop"
-    except (AttributeError, NotImplementedError, OSError, RuntimeError):
-        return "Desktop"
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(blob_out.pbData, ctypes.c_void_p))
 
 
-def _parse_arguments(argv):
-    parser = argparse.ArgumentParser(description="Register this computer with DevMonitor.")
-    parser.add_argument("link", nargs="?", help="devmonitor://enroll link from the website")
-    parser.add_argument("--yes", action="store_true", help="submit without prompting")
-    parser.add_argument("--name", help="device name to use with --yes")
-    parser.add_argument("--device-type", choices=["Desktop", "Laptop"], help="used with --yes")
-    parser.add_argument("--version", action="version", version=AGENT_VERSION)
-    parser.add_argument(
-        "--print-specs",
-        action="store_true",
-        help="print the detected specifications as JSON and exit (nothing is sent)",
+def _protect_secret(secret):  # platform hook
+    """Encrypt for the signed-in Windows user only (DPAPI)."""
+    import base64
+
+    return base64.b64encode(_dpapi(secret.encode("utf-8"), protect=True)).decode("ascii")
+
+
+def _unprotect_secret(protected):  # platform hook
+    import base64
+
+    return _dpapi(base64.b64decode(protected), protect=False).decode("utf-8")
+
+
+def _register_autostart(command):  # platform hook
+    """Start monitoring at sign-in for this user only (no administrator rights)."""
+    import winreg
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, MONITOR_RUN_KEY) as key:
+        winreg.SetValueEx(key, MONITOR_STARTUP_NAME, 0, winreg.REG_SZ, command)
+
+
+def _remove_autostart():  # platform hook
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, MONITOR_RUN_KEY, 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.DeleteValue(key, MONITOR_STARTUP_NAME)
+    except FileNotFoundError:
+        pass
+
+
+def _acquire_single_instance():  # platform hook
+    """True when this is the only monitor running for the signed-in user."""
+    global _MONITOR_MUTEX
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+    handle = kernel32.CreateMutexW(None, False, MONITOR_MUTEX_NAME)
+    already_exists = ctypes.get_last_error() == 183
+    if not handle or already_exists:
+        return False
+    _MONITOR_MUTEX = handle
+    return True
+
+
+def _show_monitor_console():
+    """Keep the monitor visible but out of the way: titled and minimised."""
+    if os.name != "nt":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        if not kernel32.GetConsoleWindow() and kernel32.AllocConsole():
+            # The agent is built without a console; the monitor opens its own
+            # so it stays visible and can be closed to pause it.
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+            sys.stderr = sys.stdout
+        ctypes.windll.kernel32.SetConsoleTitleW(
+            f"{MONITOR_CONSOLE_TITLE} - close this window to pause until next sign-in"
+        )
+        window = ctypes.windll.kernel32.GetConsoleWindow()
+        if window:
+            import time
+
+            # A console opened with AllocConsole can still be appearing; retry
+            # until Windows reports it minimised.
+            for _attempt in range(20):
+                ctypes.windll.user32.ShowWindow(window, 6)  # SW_MINIMIZE
+                if ctypes.windll.user32.IsIconic(window):
+                    break
+                time.sleep(0.05)
+    except (AttributeError, OSError):
+        LOGGER.warning("Could not adjust the monitoring console window.", exc_info=True)
+
+
+def _monitor_command():
+    """Command line that starts the background monitor from a stable location."""
+    import shutil
+    import subprocess
+
+    if getattr(sys, "frozen", False):
+        target = monitoring_directory() / MONITOR_EXECUTABLE_NAME
+        source = Path(sys.executable).resolve()
+        if source != target.resolve():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        arguments = [str(target), "--monitor"]
+    else:
+        arguments = [sys.executable, str(Path(__file__).resolve()), "--monitor"]
+    return arguments, subprocess.list2cmdline(arguments)
+
+
+def _launch_monitor(arguments):
+    import subprocess
+
+    startup = None
+    flags = 0
+    if os.name == "nt":
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = 7  # SW_SHOWMINNOACTIVE
+        flags = subprocess.CREATE_NEW_CONSOLE
+    subprocess.Popen(arguments, creationflags=flags, startupinfo=startup, close_fds=True)
+
+
+def save_monitoring_config(server, device_id, token):
+    directory = monitoring_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    config = {
+        "server": server,
+        "device_id": device_id,
+        "credential": _protect_secret(token),
+        "enabled_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    (directory / MONITOR_CONFIG_NAME).write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def load_monitoring_config():
+    path = monitoring_directory() / MONITOR_CONFIG_NAME
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            "server": _server_base(config["server"]),
+            "device_id": config.get("device_id"),
+            "token": _unprotect_secret(config["credential"]),
+        }
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        LOGGER.exception("The live monitoring settings could not be read.")
+        return None
+
+
+def remove_local_monitoring():
+    """Remove the startup entry and the stored credential from this device."""
+    try:
+        _remove_autostart()
+    except OSError:
+        LOGGER.exception("Could not remove the live monitoring startup entry.")
+    for name in (MONITOR_CONFIG_NAME, MONITOR_PID_NAME):
+        try:
+            (monitoring_directory() / name).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            LOGGER.exception("Could not delete %s.", name)
+
+
+def _post_agent_json(url, token, payload, timeout=15):
+    """POST JSON with a bearer credential. Returns (status, decoded body)."""
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": f"DevMonitor-Agent/{AGENT_VERSION}",
+        },
+        method="POST",
     )
-    parser.add_argument("--output", help="with --print-specs: write the JSON to this file")
-    parser.add_argument(
-        "--cli",
-        action="store_true",
-        help="use text prompts instead of the scanner window",
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = getattr(response, "status", None) or response.getcode()
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        status, body = error.code, error.read().decode("utf-8", errors="replace")
+    try:
+        return status, json.loads(body) if body else {}
+    except ValueError:
+        return status, {}
+
+
+def _storage_usage():
+    used = total = 0
+    for partition in psutil.disk_partitions(all=False):
+        options = (partition.opts or "").lower()
+        if "cdrom" in options or not partition.fstype:
+            continue
+        try:
+            usage = psutil.disk_usage(partition.mountpoint)
+        except (OSError, PermissionError):
+            continue
+        used += int(usage.used)
+        total += int(usage.total)
+    if not total:
+        return None, None
+    return round(used / total * 100, 2), used
+
+
+def _network_counters():
+    """Bytes received/sent across real adapters (loopback excluded)."""
+    received = sent = 0
+    for name, counters in psutil.net_io_counters(pernic=True).items():
+        lowered = name.lower()
+        if lowered == "lo" or lowered.startswith("loopback"):
+            continue
+        received += int(counters.bytes_recv)
+        sent += int(counters.bytes_sent)
+    return received, sent
+
+
+class LiveMetricSampler:
+    """Collects one heartbeat sample; throughput is the counter delta per second."""
+
+    def __init__(self, clock=None):
+        import time
+
+        self._clock = clock or time.monotonic
+        psutil.cpu_percent(interval=None)  # primes the CPU counter
+        self._previous = self._read_counters()
+
+    def _read_counters(self):
+        try:
+            return (*_network_counters(), self._clock())
+        except (psutil.Error, OSError):
+            LOGGER.exception("Network counters are unavailable.")
+            return None
+
+    def sample(self):
+        sample = {}
+        try:
+            sample["cpu_percent"] = round(float(psutil.cpu_percent(interval=None)), 2)
+        except (psutil.Error, OSError):
+            sample["cpu_percent"] = None
+        try:
+            memory = psutil.virtual_memory()
+            sample["memory_percent"] = round(float(memory.percent), 2)
+            sample["memory_used_bytes"] = int(memory.used)
+        except (psutil.Error, OSError):
+            sample["memory_percent"] = sample["memory_used_bytes"] = None
+        sample["storage_percent"], sample["storage_used_bytes"] = _storage_usage()
+
+        current = self._read_counters()
+        sample["network_rx_bytes_per_sec"] = sample["network_tx_bytes_per_sec"] = None
+        sample["network_rx_bytes"] = current[0] if current else None
+        sample["network_tx_bytes"] = current[1] if current else None
+        previous, self._previous = self._previous, current
+        if previous and current:
+            elapsed = current[2] - previous[2]
+            received, sent = current[0] - previous[0], current[1] - previous[1]
+            # A negative delta means the counters were reset (adapter restart,
+            # sleep/resume); that interval has no valid speed.
+            if elapsed > 0 and received >= 0 and sent >= 0:
+                sample["network_rx_bytes_per_sec"] = int(received / elapsed)
+                sample["network_tx_bytes_per_sec"] = int(sent / elapsed)
+        return sample
+
+
+def send_heartbeat(config, sample):
+    """Returns "ok", "revoked", or "retry"."""
+    try:
+        status, body = _post_agent_json(config["server"] + HEARTBEAT_PATH, config["token"], sample)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        LOGGER.warning("Heartbeat could not reach the server; retrying next interval.", exc_info=True)
+        return "retry"
+    if status == 201:
+        return "ok"
+    if status == 401 and body.get("monitoring") == "revoked":
+        return "revoked"
+    LOGGER.warning("Heartbeat was not accepted (HTTP %s): %s", status, body.get("error"))
+    return "retry"
+
+
+def run_monitor(sleep=None, max_beats=None):
+    """Background loop started at sign-in. Returns a process exit code."""
+    import time
+
+    sleep = sleep or time.sleep
+    config = load_monitoring_config()
+    if config is None:
+        print("Live monitoring is not turned on for this device.")
+        return 2
+    if not _acquire_single_instance():
+        print("DevMonitor live monitoring is already running.")
+        return 0
+    _show_monitor_console()
+    pid_path = monitoring_directory() / MONITOR_PID_NAME
+    try:
+        pid_path.write_text(str(os.getpid()), encoding="ascii")
+    except OSError:
+        LOGGER.warning("Could not record the monitoring process ID.", exc_info=True)
+    print(MONITOR_CONSOLE_TITLE + ".")
+    print(f"Sending CPU, memory, storage and network usage to {config['server']} "
+          f"every {HEARTBEAT_INTERVAL_SECONDS} seconds.")
+    print("Stop it from the device page in DevMonitor or run this agent with --stop-monitoring.")
+    LOGGER.info("Live monitoring started (device_id=%s).", config.get("device_id"))
+
+    sampler = LiveMetricSampler()
+    beats = 0
+    try:
+        while max_beats is None or beats < max_beats:
+            sleep(HEARTBEAT_INTERVAL_SECONDS)
+            result = send_heartbeat(config, sampler.sample())
+            beats += 1
+            if result == "revoked":
+                LOGGER.info("Live monitoring was stopped from DevMonitor; removing it from this device.")
+                print("Live monitoring was stopped from DevMonitor. It has been removed from this device.")
+                remove_local_monitoring()
+                return 0
+    except KeyboardInterrupt:
+        LOGGER.info("Live monitoring paused by the user until next sign-in.")
+    finally:
+        try:
+            pid_path.unlink()
+        except OSError:
+            pass
+    return 0
+
+
+def _stop_running_monitor():
+    """End a running monitor process recorded in the PID file."""
+    try:
+        pid = int((monitoring_directory() / MONITOR_PID_NAME).read_text(encoding="ascii"))
+    except (OSError, ValueError):
+        return
+    if pid == os.getpid():
+        return
+    try:
+        process = psutil.Process(pid)
+        if "--monitor" in process.cmdline():
+            process.terminate()
+    except (psutil.Error, OSError):
+        LOGGER.warning("Could not end the running monitor process.", exc_info=True)
+
+
+def stop_live_monitoring():
+    """--stop-monitoring: tell the server, then remove everything locally."""
+    config = load_monitoring_config()
+    if config is not None:
+        try:
+            _post_agent_json(config["server"] + MONITORING_STOP_PATH, config["token"], {})
+        except (urllib.error.URLError, TimeoutError, OSError):
+            LOGGER.warning("Could not tell the server that monitoring stopped.", exc_info=True)
+            print("The server could not be reached; it will show this device as Offline.")
+    _stop_running_monitor()
+    remove_local_monitoring()
+    LOGGER.info("Live monitoring stopped on this device.")
+    print("Live monitoring is off. Nothing more will be sent from this device.")
+    return 0
+
+
+def enable_live_monitoring(server, device_id, token):
+    """Confirm consent with the server, then set up the background monitor."""
+    try:
+        status, body = _post_agent_json(server + MONITORING_ENABLE_PATH, token, {})
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        LOGGER.exception("Live monitoring could not be enabled.")
+        print(f"Live monitoring could not be turned on: {error}", file=sys.stderr)
+        return False
+    if status != 200 or body.get("monitoring") != "enabled":
+        print(
+            f"Live monitoring could not be turned on: {body.get('error') or f'HTTP {status}'}",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        arguments, command = _monitor_command()
+        save_monitoring_config(server, device_id, token)
+        _register_autostart(command)
+        _launch_monitor(arguments)
+    except (OSError, ValueError):
+        LOGGER.exception("Live monitoring could not be set up on this device.")
+        print("Live monitoring could not be set up on this device; it has been turned off.",
+              file=sys.stderr)
+        try:
+            _post_agent_json(server + MONITORING_STOP_PATH, token, {})
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+        remove_local_monitoring()
+        return False
+    LOGGER.info("Live monitoring enabled (device_id=%s).", device_id)
+    print(
+        f"Live monitoring is ON. It starts automatically when you sign in "
+        f"(\"{MONITOR_STARTUP_NAME}\" in Task Manager > Startup apps)."
     )
-    args, _unknown = parser.parse_known_args(argv)
-    return args
+    return True
+
+
+def ask_monitoring_consent_window(server):  # pragma: no cover - needs a display
+    """Opt-in dialog. "Not now" is the default; closing the window also declines."""
+    import tkinter as tk
+
+    theme = AGENT_THEME
+    _enable_dpi_awareness()
+    root = tk.Tk()
+    root.title("Turn on live monitoring?")
+    root.resizable(False, False)
+    root.configure(background=theme["background"])
+    scale = _pixel_scale(root)
+
+    def px(value):
+        return int(round(value * scale))
+
+    choice = {"enable": False}
+    body = tk.Frame(root, background=theme["background"], padx=px(32), pady=px(26))
+    body.pack(fill="both", expand=True)
+    tk.Label(
+        body, text="Turn on live monitoring?", font=(FONT_FAMILY, 15, "bold"),
+        foreground=theme["text"], background=theme["background"],
+    ).pack(anchor="w")
+    tk.Label(
+        body, text=CONSENT_TEXT.format(server=server), font=(FONT_FAMILY, 10),
+        foreground=theme["muted"], background=theme["background"],
+        wraplength=px(440), justify="left",
+    ).pack(anchor="w", pady=(px(10), px(18)))
+    buttons = tk.Frame(body, background=theme["background"])
+    buttons.pack(fill="x")
+
+    def finish(enable):
+        choice["enable"] = enable
+        root.destroy()
+
+    def button(text, command, primary):
+        return tk.Button(
+            buttons, text=text, command=command, font=(FONT_FAMILY, 10, "bold"),
+            background=theme["accent"] if primary else theme["surface_alt"],
+            foreground="#ffffff",
+            activebackground=theme["accent_active"] if primary else theme["border"],
+            activeforeground="#ffffff", relief="flat", borderwidth=0,
+            highlightthickness=0, cursor="hand2", padx=px(18), pady=px(9),
+        )
+
+    not_now = button("Not now", lambda: finish(False), primary=False)
+    not_now.pack(side="right")
+    button("Turn on live monitoring", lambda: finish(True), primary=True).pack(
+        side="right", padx=(0, px(10))
+    )
+    root.bind("<Escape>", lambda _event: finish(False))
+    root.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+    root.update_idletasks()
+    _place_window(root, body.winfo_reqwidth(), body.winfo_reqheight())
+    _bring_to_front(root)
+    not_now.focus_set()
+    root.mainloop()
+    return choice["enable"]
+
+
+def offer_live_monitoring(args, monitoring, device_id, use_window):
+    """Ask the device user; enable only on an explicit yes."""
+    token = monitoring.get("token") if isinstance(monitoring, dict) else None
+    if not token or not monitoring_supported():
+        return False
+    try:
+        server = _server_base(SUBMISSION_URL)
+    except ValueError:
+        LOGGER.exception("Live monitoring was not offered: invalid server address.")
+        return False
+    if args.yes:
+        agreed = bool(args.enable_monitoring)
+    else:
+        agreed = None
+        if use_window:
+            try:
+                agreed = ask_monitoring_consent_window(urlsplit(server).netloc)
+            except Exception:
+                LOGGER.exception("The monitoring consent window could not be shown.")
+        if agreed is None and not (sys.stdin is not None and sys.stdin.isatty()):
+            agreed = False
+        if agreed is None:
+            print("\nTurn on live monitoring?\n")
+            print(CONSENT_TEXT.format(server=urlsplit(server).netloc))
+            answer = input("\nType yes to turn on live monitoring (press Enter to skip): ")
+            agreed = answer.strip().casefold() in {"yes", "y"}
+    if not agreed:
+        LOGGER.info("Live monitoring was not enabled (the user declined).")
+        print("Live monitoring is off. You can link the device again later to turn it on.")
+        return False
+    return enable_live_monitoring(server, device_id, token)
 
 
 class SubmissionError(RuntimeError):
@@ -1369,6 +2343,12 @@ def submit_payload(submission_url, authorization_token, payload, *, scanner_mode
             headers={
                 "Authorization": f"Bearer {authorization_token}",
                 "Content-Type": "application/json",
+                # Lets the server offer opt-in live monitoring to this agent.
+                **(
+                    {"X-DevMonitor-Monitoring": "supported"}
+                    if not scanner_mode and monitoring_supported()
+                    else {}
+                ),
             },
             method="POST",
         )
@@ -1519,29 +2499,15 @@ def hand_off_link(link):
 # --------------------------------------------------------------------------
 
 WINDOW_COLORS = {
-    "background": "#0d0221",
-    "panel": "#1a0b45",
-    "text": "#f8fafc",
-    "muted": "#cbd5e1",
-    "error": "#fca5a5",
-    "link": "#93c5fd",
-    "accent": "#3458a8",
-    "accent_active": "#26408b",
+    "background": AGENT_THEME["background"],
+    "panel": AGENT_THEME["surface_alt"],
+    "text": AGENT_THEME["text"],
+    "muted": AGENT_THEME["muted"],
+    "error": AGENT_THEME["error"],
+    "link": AGENT_THEME["accent_light"],
+    "accent": AGENT_THEME["accent"],
+    "accent_active": AGENT_THEME["accent_active"],
 }
-
-
-def specification_lines(specifications):
-    """(label, value) pairs for the reviewed specifications, in display order."""
-    lines = []
-    for label, key in FIELD_LABELS:
-        value = specifications.get(key)
-        if (
-            key in {"storage_total_bytes", "storage_available_bytes"}
-            and not specifications.get("storage_devices")
-        ):
-            value = UNAVAILABLE
-        lines.append((label, display_value(key, value)))
-    return lines
 
 
 class ScannerWindow:  # pragma: no cover - needs a display
@@ -1560,7 +2526,8 @@ class ScannerWindow:  # pragma: no cover - needs a display
         self.enrollment = enrollment
         self.linked_with_link = linked_with_link
         self.specifications = None
-        self.registered_dashboard = None
+        # (server result, enrollment) once the device is registered.
+        self.registered = None
         self.waiting_message = ""
         self.events = queue.Queue()
         self.handoff = None
@@ -1582,14 +2549,12 @@ class ScannerWindow:  # pragma: no cover - needs a display
             "pady": 8,
         }
 
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
-        except (AttributeError, OSError):
-            pass
+        _enable_dpi_awareness()
         root = self.root = tk.Tk()
         root.title("DevMonitor Device Scanner")
-        root.geometry("640x660")
-        root.minsize(520, 540)
+        scale = _pixel_scale(root)
+        _place_window(root, int(640 * scale), int(680 * scale))
+        root.minsize(int(520 * scale), int(540 * scale))
         root.configure(background=colors["background"])
         style = ttk.Style(root)
         try:
@@ -1642,6 +2607,9 @@ class ScannerWindow:  # pragma: no cover - needs a display
         self.details.pack(fill="both", expand=True)
         scrollbar.configure(command=self.details.yview)
         self.details.tag_configure("label", foreground=colors["muted"])
+        self.details.tag_configure(
+            "section", foreground=colors["link"], font=(FONT_FAMILY, 11, "bold")
+        )
         self.details.configure(state="disabled")
 
         form = tk.Frame(root, background=colors["background"])
@@ -1710,13 +2678,7 @@ class ScannerWindow:  # pragma: no cover - needs a display
         finally:
             if self.handoff is not None:
                 self.handoff.stop()
-        if self.registered_dashboard is None:
-            return 0
-        try:
-            show_registration_success(self.registered_dashboard)
-        except (ImportError, OSError, RuntimeError):
-            LOGGER.exception("The registration success window could not be displayed.")
-        return 0
+        return self.registered
 
     # -- background work (worker threads only post to self.events) ----------
 
@@ -1762,9 +2724,13 @@ class ScannerWindow:  # pragma: no cover - needs a display
         self.progress.pack_forget()
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
-        for label, value in specification_lines(specifications):
-            self.details.insert("end", f"{label}\n", "label")
-            self.details.insert("end", f"{value}\n\n")
+        for title, rows in specification_sections(specifications):
+            self.details.insert("end", f"{title}\n", "section")
+            for row in rows:
+                indent = "    " if row["detail"] else ""
+                self.details.insert("end", f"{indent}{row['label']}\n", "label")
+                self.details.insert("end", f"{indent}{row['value']}\n")
+            self.details.insert("end", "\n")
         self.details.configure(state="disabled")
         self._refresh()
 
@@ -1788,8 +2754,8 @@ class ScannerWindow:  # pragma: no cover - needs a display
         self.root.focus_force()
         self._refresh()
 
-    def _on_submitted(self, dashboard_url):
-        self.registered_dashboard = dashboard_url
+    def _on_submitted(self, result):
+        self.registered = (result, self.enrollment)
         self.root.destroy()
 
     def _on_submit_failed(self, error):
@@ -1826,7 +2792,7 @@ class ScannerWindow:  # pragma: no cover - needs a display
             return
         if self.enrollment is None or self.specifications is None:
             return
-        submission_url, token, dashboard_url = self.enrollment
+        submission_url, token, _dashboard_url = self.enrollment
         payload = {"name": name, "device_type": device_type, "specifications": self.specifications}
         self.register_button.configure(state="disabled")
         self._set_status("Registering this device...")
@@ -1841,7 +2807,7 @@ class ScannerWindow:  # pragma: no cover - needs a display
                 self.events.put(("submit_failed", error))
                 return
             LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
-            self.events.put(("submitted", dashboard_url))
+            self.events.put(("submitted", result))
 
         threading.Thread(target=submit, name="devmonitor-submit", daemon=True).start()
 
@@ -1875,15 +2841,27 @@ class ScannerWindow:  # pragma: no cover - needs a display
 def _wants_window(args):
     """A packaged agent opened by double-click (no console) shows the scanner window.
 
-    Scripts, tests and CI keep the text flow (`--yes`, `--print-specs`, `--cli`).
+    Scripts, tests and CI keep the text flow (`--yes`, `--print-specs`,
+    `--console`/`--cli`); `--gui` forces the window.
     """
-    if args.yes or args.print_specs or args.cli or not getattr(sys, "frozen", False):
+    if args.yes or args.print_specs or args.console:
+        return False
+    if args.gui:
+        return True
+    if not getattr(sys, "frozen", False):
         return False
     return sys.stdin is None or sys.stdout is None or not sys.stdin.isatty()
 
 
-def run_scanner_window(link, *, linked_with_link):
-    """Open the scanner window; returns the process exit code."""
+def run_scanner_window(args, *, linked_with_link):
+    """Open the scanner window; returns the process exit code.
+
+    After registration the opt-in live monitoring question and the success
+    window follow, exactly as in the text flow.
+    """
+    global SUBMISSION_URL, REGISTRATION_TOKEN, DASHBOARD_URL
+
+    link = args.link
     if linked_with_link:
         register_link_handler()
         if link and hand_off_link(link):
@@ -1903,7 +2881,76 @@ def run_scanner_window(link, *, linked_with_link):
         return 1
     if link:
         window.events.put(("link", link))
-    return window.run()
+    registered = window.run()
+    if registered is None:
+        return 0
+    result, (SUBMISSION_URL, REGISTRATION_TOKEN, DASHBOARD_URL) = registered
+    offer_live_monitoring(args, result.get("monitoring"), result["device_id"], use_window=True)
+    try:
+        show_registration_success()
+    except (ImportError, OSError, RuntimeError):
+        LOGGER.exception("The registration success window could not be displayed.")
+    return 0
+
+
+def _guess_device_type():
+    try:
+        return "Laptop" if psutil.sensors_battery() is not None else "Desktop"
+    except (AttributeError, NotImplementedError, OSError, RuntimeError):
+        return "Desktop"
+
+
+def _parse_arguments(argv):
+    parser = argparse.ArgumentParser(description="Register this computer with DevMonitor.")
+    parser.add_argument("link", nargs="?", help="devmonitor://enroll link from the website")
+    parser.add_argument("--yes", action="store_true", help="submit without prompting")
+    parser.add_argument("--name", help="device name to use with --yes")
+    parser.add_argument("--device-type", choices=["Desktop", "Laptop"], help="used with --yes")
+    parser.add_argument("--version", action="version", version=AGENT_VERSION)
+    monitoring = parser.add_mutually_exclusive_group()
+    monitoring.add_argument(
+        "--monitor",
+        action="store_true",
+        help="run live monitoring (started at sign-in once you have turned it on)",
+    )
+    monitoring.add_argument(
+        "--stop-monitoring",
+        action="store_true",
+        help="turn live monitoring off on this device and tell DevMonitor",
+    )
+    parser.add_argument(
+        "--enable-monitoring",
+        action="store_true",
+        help="with --yes: also turn on live monitoring (you consent to it)",
+    )
+    parser.add_argument(
+        "--print-specs",
+        action="store_true",
+        help="print the detected specifications as JSON and exit (nothing is sent)",
+    )
+    parser.add_argument("--output", help="with --print-specs: write the JSON to this file")
+    review = parser.add_mutually_exclusive_group()
+    review.add_argument(
+        "--console",
+        "--cli",
+        dest="console",
+        action="store_true",
+        help="review the specifications in this console instead of a window",
+    )
+    review.add_argument(
+        "--gui",
+        action="store_true",
+        help="review the specifications in a window (the default for the packaged EXE)",
+    )
+    args, _unknown = parser.parse_known_args(argv)
+    return args
+
+
+def _use_review_window(args):
+    """The packaged EXE reviews in a window; running the script keeps the console."""
+    if args.yes or args.console:
+        return False
+    return bool(args.gui or getattr(sys, "frozen", False))
 
 
 def main(argv=None):
@@ -1911,6 +2958,10 @@ def main(argv=None):
 
     args = _parse_arguments(sys.argv[1:] if argv is None else argv)
     log_path = configure_logging()
+    if args.monitor:
+        return run_monitor()
+    if args.stop_monitoring:
+        return stop_live_monitoring()
     if args.print_specs:
         try:
             text = json.dumps(
@@ -1936,7 +2987,7 @@ def main(argv=None):
     )
     linked_with_link = not scanner_mode and not _embedded(REGISTRATION_TOKEN)
     if not scanner_mode and _wants_window(args):
-        return run_scanner_window(args.link, linked_with_link=linked_with_link)
+        return run_scanner_window(args, linked_with_link=linked_with_link)
     if linked_with_link:
         # Generic build: the one-use token comes from a "Link this device" link.
         register_link_handler()
@@ -1956,13 +3007,51 @@ def main(argv=None):
         return 1
 
     report = collect_health_report(specifications)
+    reviewed = None
+    if not scanner_mode and _use_review_window(args):
+        # The packaged EXE shows the specifications in a window; if Tk cannot
+        # open one, the console review below is used instead.
+        print("\nReview the detected device details in the DevMonitor window.")
+        try:
+            reviewed = review_specifications_window(
+                specifications,
+                default_name=(platform.node() or "").strip(),
+                default_type=_guess_device_type(),
+                server=urlsplit(SUBMISSION_URL).netloc,
+            )
+        except Exception:
+            LOGGER.exception("The review window could not be displayed; using the console.")
+            print("The review window could not be opened; continuing in this console.")
+        else:
+            if reviewed is None:
+                LOGGER.info("Submission cancelled in the review window; nothing was sent.")
+                print("Submission cancelled; no device was registered.")
+                print(
+                    "Run this agent again and click Register this device "
+                    "to link the device to your account."
+                )
+                return 0
+
     if scanner_mode:
         payload = {"report": report, "specifications": specifications}
         authorization_token = SCAN_TOKEN
+    elif reviewed is not None:
+        payload = {
+            "name": reviewed["name"],
+            "device_type": reviewed["device_type"],
+            "specifications": specifications,
+        }
+        authorization_token = REGISTRATION_TOKEN
     else:
         print("\nDetected device specifications (review before submission):")
-        for label, value in specification_lines(specifications):
-            print(f"  {label}: {value}")
+        for label, key in FIELD_LABELS:
+            value = specifications.get(key)
+            if (
+                key in {"storage_total_bytes", "storage_available_bytes"}
+                and not specifications["storage_devices"]
+            ):
+                value = UNAVAILABLE
+            print(f"  {label}: {display_value(key, value)}")
         _show_log_location(log_path)
         if args.yes:
             name = (args.name or platform.node() or "").strip()
@@ -2028,6 +3117,12 @@ def main(argv=None):
     else:
         LOGGER.info("Device registration succeeded (device_id=%s).", result["device_id"])
         print(f"Device Registered Successfully (Device ID: {result['device_id']}).")
+        offer_live_monitoring(
+            args,
+            result.get("monitoring"),
+            result["device_id"],
+            use_window=reviewed is not None,
+        )
         if args.yes:
             return 0
         try:
@@ -2042,7 +3137,7 @@ def main(argv=None):
 
 
 def _pause_before_closing():
-    """Keep the console window of a console-launched agent open so results stay readable."""
+    """Keep the console window of the packaged EXE open so results stay readable."""
     if getattr(sys, "frozen", False) and sys.stdin is not None and sys.stdin.isatty():
         try:
             input("\nPress Enter to close this window...")
@@ -2052,7 +3147,7 @@ def _pause_before_closing():
 
 if __name__ == "__main__":
     exit_code = main()
-    if not ({"--yes", "--print-specs"} & set(sys.argv[1:])) and not _wants_window(
+    if not {"--yes", "--print-specs", "--monitor"} & set(sys.argv[1:]) and not _wants_window(
         _parse_arguments(sys.argv[1:])
     ):
         _pause_before_closing()

@@ -30,6 +30,9 @@
     /* Device specifications: high-contrast text on the dark surfaces */
     --dm-spec-value: #ffffff;
     --dm-spec-label: #dbe4ee;
+    /* Bootstrap's .text-muted / .text-body-secondary read this variable; its
+       default dark grey is unreadable on the purple surfaces. */
+    --bs-secondary-color: var(--dm-text-muted);
 
     /* Metrics */
     --sidebar-width: 250px;
@@ -159,18 +162,6 @@ code {
 .login-card .form-text,
 .login-card p .text-muted {
     color: #9a9a9a !important;
-}
-
-.login-card .input-group .btn-outline-secondary {
-    border-color: var(--dm-border);
-    color: var(--dm-text-muted);
-    background: var(--dm-darkest);
-}
-
-.login-card .input-group .btn-outline-secondary:hover {
-    background: var(--dm-accent);
-    border-color: var(--dm-accent);
-    color: #ffffff;
 }
 
 .login-btn {
@@ -440,6 +431,15 @@ code {
 
 .content-card-body {
     padding: 1.35rem;
+}
+
+/* Secondary text inside cards and modals uses the theme's muted colour at every
+   screen size. (A copy of this rule further down sits inside the phone-only
+   media query, so on wider screens Bootstrap's dark grey was used and the text
+   was nearly invisible on the purple surfaces.) */
+.content-card .text-muted,
+.modal-content .text-muted {
+    color: var(--dm-text-muted) !important;
 }
 
 /* =============================================================
@@ -1661,6 +1661,27 @@ code {
     padding-top: 1rem;
 }
 
+/* Line the cards up section by section: every card in a grid row shares the
+   same five tracks (top, name, requirement, formats, actions), so the
+   download buttons sit at the same height however long the text above is. */
+@supports (grid-template-rows: subgrid) {
+    .dl-card {
+        display: grid;
+        grid-row: span 5;
+        grid-template-rows: subgrid;
+        row-gap: 0;
+    }
+
+    .dl-req {
+        min-height: 0;
+    }
+
+    .dl-actions {
+        margin-top: 0;
+        justify-content: flex-start;
+    }
+}
+
 .dl-form {
     margin: 0;
 }
@@ -1671,11 +1692,19 @@ code {
     justify-content: center;
     gap: 0.4rem;
     width: 100%;
+    min-height: 2.75rem;
+    padding: 0.55rem 1rem;
     font-size: 0.9rem;
     font-weight: 600;
     line-height: 1.3;
     text-align: center;
     white-space: normal; /* long labels wrap instead of overflowing narrow cards */
+}
+
+.dl-btn-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .dl-btn-pending,
@@ -1971,6 +2000,21 @@ code {
     font-weight: 600;
 }
 
+/* Device details page: the ID / type / status / owner line and the
+   "nothing recorded yet" messages. */
+.device-meta {
+    color: var(--dm-text);
+    opacity: 0.9;
+}
+
+.device-empty-state {
+    padding: 0.85rem 1rem;
+    color: var(--dm-text);
+    background: var(--dm-surface);
+    border: 1px dashed rgba(182, 195, 209, 0.3);
+    border-radius: var(--radius-md);
+}
+
 .device-scan-success {
     color: var(--dm-text);
     background: var(--dm-surface);
@@ -2036,6 +2080,61 @@ code {
 
 .password-requirements .is-invalid {
     color: #f87171;
+}
+
+/* Password show/hide toggle sitting inside the input's right edge */
+.password-field {
+    position: relative;
+}
+
+.password-field .form-control {
+    padding-right: 3rem;
+}
+
+/* Hide the browser's own reveal/clear buttons so only one eye is shown */
+.password-field .form-control::-ms-reveal,
+.password-field .form-control::-ms-clear {
+    display: none;
+}
+
+.password-toggle {
+    position: absolute;
+    top: 50%;
+    right: 0.4rem;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--dm-text-muted);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.password-toggle:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.password-toggle:focus-visible {
+    outline: none;
+    color: #ffffff;
+    box-shadow: 0 0 0 2px var(--dm-border-focus);
+}
+
+.password-toggle[aria-pressed="true"] {
+    color: #60a5fa;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .password-toggle { transition: none; }
 }
 
 .link-card-note {
@@ -2116,4 +2215,174 @@ code {
 
 .dl-card.is-pending .dl-status .bi-tools {
     color: #fbbf24;
+}
+
+
+/* =============================================================
+   LIVE MONITORING (opt-in heartbeats)
+   ============================================================= */
+
+.live-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.live-indicator.is-off {
+    background: rgba(148, 163, 184, 0.12);
+    color: var(--dm-text-dim);
+}
+
+.live-indicator-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 0 currentColor;
+    animation: live-pulse 2s ease-out infinite;
+}
+
+.live-indicator.is-off .live-indicator-dot {
+    animation: none;
+}
+
+@keyframes live-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
+    70% { box-shadow: 0 0 0 0.45rem rgba(52, 211, 153, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+}
+
+/* Dashboard table cell */
+.live-usage-link {
+    color: inherit;
+    text-decoration: none;
+}
+
+.live-usage {
+    display: grid;
+    gap: 0.25rem;
+    min-width: 11rem;
+}
+
+.live-usage.is-stale {
+    opacity: 0.55;
+}
+
+.live-meter {
+    display: grid;
+    grid-template-columns: 2.1rem 1fr 2.4rem;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.75rem;
+}
+
+.live-meter-label {
+    color: var(--dm-text-dim);
+    font-weight: 600;
+}
+
+.live-meter-track {
+    height: 0.4rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.live-meter-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    transition: width 0.6s ease, background-color 0.6s ease;
+}
+
+.live-meter-value {
+    color: var(--dm-text);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.live-net {
+    display: flex;
+    gap: 0.75rem;
+    color: var(--dm-text-muted);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.live-net .bi-arrow-down { color: #4ade80; }
+.live-net .bi-arrow-up { color: #f472b6; }
+
+.live-off {
+    color: var(--dm-text-dim);
+    font-size: 0.8rem;
+}
+
+/* Device page tiles */
+.live-meta {
+    color: var(--dm-text-muted);
+}
+
+.live-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+    gap: 0.75rem;
+}
+
+#liveMonitoringPanel.is-stale .live-grid {
+    opacity: 0.6;
+}
+
+.live-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--dm-border);
+    border-radius: var(--radius-md);
+    background: var(--dm-surface);
+}
+
+.live-tile-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+
+.live-tile-label {
+    color: var(--dm-text-muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.live-tile-value {
+    color: #ffffff;
+    font-size: 1.25rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.live-sparkline {
+    width: 100%;
+    height: 2.5rem;
+    display: block;
+}
+
+.live-tile-note {
+    min-height: 1.1rem;
+    color: var(--dm-text-dim);
+    font-size: 0.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .live-indicator-dot { animation: none; }
+    .live-meter-fill { transition: none; }
 }

@@ -403,6 +403,81 @@ class WindowsAgentConsoleTest(unittest.TestCase):
         self.assertIn("Download the agent again", output)
         self.assertNotIn('{"error"', output)
 
+    def test_review_window_sections_show_every_specification(self):
+        specs = dict(self.specs)
+        specs.update(
+            ram_capacity_bytes=16 * 1024 ** 3,
+            ram_usage_bytes=8 * 1024 ** 3,
+            storage_devices=[{"name": "C:\\", "total_bytes": 100 * 1024 ** 3,
+                              "available_bytes": 25 * 1024 ** 3}],
+            storage_total_bytes=100 * 1024 ** 3,
+            storage_available_bytes=25 * 1024 ** 3,
+        )
+        sections = self.agent.specification_sections(specs)
+        rows = {row["label"]: row for _title, section in sections for row in section}
+        for label, _key in self.agent.FIELD_LABELS:
+            self.assertIn(label, rows)
+        self.assertEqual(rows["RAM usage"]["value"], "8.0 GB in use (50%)")
+        self.assertAlmostEqual(rows["RAM usage"]["fraction"], 0.5)
+        self.assertEqual(rows["C:\\"]["value"], "25.0 GB free of 100.0 GB")
+        self.assertAlmostEqual(rows["C:\\"]["fraction"], 0.75)
+        self.assertTrue(rows["C:\\"]["detail"])
+        # Missing values are shown as Unavailable instead of crashing the window.
+        empty = {row["label"]: row["value"]
+                 for _t, section in self.agent.specification_sections({}) for row in section}
+        self.assertEqual(empty["Total storage capacity"], "Unavailable")
+        self.assertEqual(empty["CPU name"], "Unavailable")
+
+    def test_packaged_exe_reviews_in_a_window_and_script_uses_console(self):
+        parse = self.agent._parse_arguments
+        self.assertFalse(self.agent._use_review_window(parse([])))
+        self.assertTrue(self.agent._use_review_window(parse(["--gui"])))
+        with patch.object(self.agent.sys, "frozen", True, create=True):
+            self.assertTrue(self.agent._use_review_window(parse([])))
+            self.assertFalse(self.agent._use_review_window(parse(["--console"])))
+            self.assertFalse(self.agent._use_review_window(parse(["--yes"])))
+
+    def test_review_window_approval_submits_without_console_prompts(self):
+        class Response(io.BytesIO):
+            status = 201
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+
+        sent = []
+
+        def urlopen(request, timeout):
+            sent.append(json.loads(request.data))
+            return Response(b'{"device_id": 9}')
+
+        approved = {"name": "Lab PC", "device_type": "Laptop"}
+        with patch.object(self.agent, "_use_review_window", return_value=True), \
+                patch.object(self.agent, "review_specifications_window", return_value=approved) as window, \
+                patch.object(self.agent, "show_registration_success") as success:
+            code, output, _log, _ = self.run_main([], urlopen=urlopen)
+        self.assertEqual(code, 0)
+        window.assert_called_once()
+        success.assert_called_once()
+        self.assertEqual((sent[0]["name"], sent[0]["device_type"]), ("Lab PC", "Laptop"))
+        self.assertNotIn("Detected device specifications", output)
+
+    def test_review_window_cancel_sends_nothing_and_failure_falls_back(self):
+        with patch.object(self.agent, "_use_review_window", return_value=True), \
+                patch.object(self.agent, "review_specifications_window", return_value=None):
+            code, output, log, _ = self.run_main([])
+        self.assertEqual(code, 0)
+        self.assertIn("Submission cancelled", output)
+        self.assertNotIn("Submitting payload", log)
+
+        with patch.object(self.agent, "_use_review_window", return_value=True), \
+                patch.object(self.agent, "review_specifications_window", side_effect=RuntimeError("no display")):
+            code, output, log, _ = self.run_main(["", "Laptop", "no"])
+        self.assertEqual(code, 0)
+        self.assertIn("continuing in this console", output)
+        self.assertIn("Detected device specifications", output)
+        self.assertNotIn("Submitting payload", log)
+
     def test_packaged_console_waits_for_enter_before_closing(self):
         with patch.object(self.agent.sys, "frozen", True, create=True), \
                 patch.object(self.agent.sys, "stdin") as stdin, \
@@ -450,7 +525,9 @@ class WindowsAgentScannerWindowTest(unittest.TestCase):
                 patch.object(self.agent, "run_scanner_window", return_value=0) as window, \
                 patch.object(self.agent, "input", create=True) as prompt:
             self.assertEqual(self.agent.main([]), 0)
-        window.assert_called_once_with(None, linked_with_link=False)
+        window.assert_called_once()
+        self.assertIsNone(window.call_args.args[0].link)
+        self.assertEqual(window.call_args.kwargs, {"linked_with_link": False})
         prompt.assert_not_called()
 
     def test_link_is_handed_to_the_open_window(self):
@@ -484,9 +561,40 @@ class WindowsAgentScannerWindowTest(unittest.TestCase):
                 patch.object(self.agent, "hand_off_link", return_value=True), \
                 patch.object(self.agent, "ScannerWindow") as window:
             self.assertEqual(
-                self.agent.run_scanner_window("devmonitor://enroll?x", linked_with_link=True), 0
+                self.agent.run_scanner_window(
+                    self.args("devmonitor://enroll?x"), linked_with_link=True
+                ),
+                0,
             )
         window.assert_not_called()
+
+    def test_registration_in_the_window_offers_live_monitoring_then_success(self):
+        enrollment = ("https://m.example/api/device-agent/enroll", "T" * 43, "https://m.example/dashboard")
+        result = {"device_id": 9, "monitoring": {"token": "m" * 43}}
+        with patch.object(self.agent, "register_link_handler"), \
+                patch.object(self.agent, "hand_off_link", return_value=False), \
+                patch.object(self.agent, "ScannerWindow") as window, \
+                patch.object(self.agent, "offer_live_monitoring") as offer, \
+                patch.object(self.agent, "show_registration_success") as success, \
+                patch.object(self.agent, "SUBMISSION_URL", "__SUBMISSION_URL__"), \
+                patch.object(self.agent, "REGISTRATION_TOKEN", "__REGISTRATION_TOKEN__"), \
+                patch.object(self.agent, "DASHBOARD_URL", "__DASHBOARD_URL__"):
+            window.return_value.run.return_value = (result, enrollment)
+            args = self.args()
+            self.assertEqual(self.agent.run_scanner_window(args, linked_with_link=True), 0)
+            # The consent step reads the server address from the link the window used.
+            self.assertEqual(self.agent.SUBMISSION_URL, enrollment[0])
+            self.assertEqual(self.agent.DASHBOARD_URL, enrollment[2])
+        offer.assert_called_once_with(args, result["monitoring"], 9, use_window=True)
+        success.assert_called_once()
+
+    def test_cancelled_window_registers_nothing(self):
+        with patch.object(self.agent, "ScannerWindow") as window, \
+                patch.object(self.agent, "offer_live_monitoring") as offer, \
+                patch.object(self.agent, "REGISTRATION_TOKEN", "T" * 43):
+            window.return_value.run.return_value = None
+            self.assertEqual(self.agent.run_scanner_window(self.args(), linked_with_link=False), 0)
+        offer.assert_not_called()
 
     def test_print_specs_can_write_to_a_file(self):
         output = Path(self.scratch.name) / "specs.json"
