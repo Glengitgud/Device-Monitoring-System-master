@@ -215,7 +215,7 @@ class LiveMonitoringApiTest(unittest.TestCase):
         dashboard = self.client.get("/api/dashboard")
         self.assertEqual(dashboard.status_code, 200)
         self.assertEqual(dashboard.json["monitored"], 1)
-        self.assertEqual(dashboard.json["refresh_seconds"], 5)
+        self.assertEqual(dashboard.json["refresh_seconds"], 30)
         listed = dashboard.json["devices"][0]
         self.assertTrue(listed["monitoring"]["enabled"])
         self.assertEqual(listed["monitoring"]["offlineAfterSeconds"], 90)

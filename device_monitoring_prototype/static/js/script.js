@@ -1431,7 +1431,7 @@ function initLiveMonitoringPanel() {
     });
 }
 
-const DASHBOARD_REFRESH_MS = 5000;
+const DASHBOARD_REFRESH_MS = 30000;
 
 function initDashboard(notifyOnError = true) {
     const scanCompleted = new URLSearchParams(window.location.search).get('scan');
@@ -1469,7 +1469,7 @@ function initDashboard(notifyOnError = true) {
             '<tr><td colspan="8" class="text-center text-muted py-4">No registered devices yet.</td></tr>';
         const indicatorText = document.getElementById('liveRefreshText');
         if (indicatorText) {
-            indicatorText.textContent = `Live · ${result.monitored || 0} monitored · refreshing every ${result.refresh_seconds || 5} s`;
+            indicatorText.textContent = `Live · ${result.monitored || 0} monitored · refreshing every ${result.refresh_seconds || 30} s`;
         }
         if (scanCompleted === 'complete') {
             showToast('Device scan completed successfully. Dashboard data is up to date.');

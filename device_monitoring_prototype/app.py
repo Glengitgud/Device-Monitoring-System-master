@@ -171,7 +171,7 @@ from device_monitoring_prototype.services import (
 
 
 # Live monitoring: the dashboard polls this often; responses stay small.
-DASHBOARD_REFRESH_SECONDS = 5
+DASHBOARD_REFRESH_SECONDS = 30
 DEVICE_DETAILS_METRIC_LIMIT = 20
 # 24 hours at one sample per 30 seconds.
 METRICS_RESPONSE_LIMIT = 2880
