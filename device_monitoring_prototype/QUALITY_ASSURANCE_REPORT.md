@@ -11,7 +11,7 @@ This report records what has been tested in DevMonitor, how it was tested, and w
 
 | Item | Result |
 |---|---|
-| Automated regression | **205 tests passed, 0 failed** (177 before this review, 28 new) |
+| Automated regression | **208 tests passed, 0 failed** (177 before this review, 31 new) |
 | Added in this review | MAC-based duplicate prevention, 4-device limit, admin sign-in code, 5-minute code countdown |
 | Database | 19 ORM tables match `schema.sql`; migrations `013` and `014` added (additive, apply once) |
 | Open issues | 11, none critical (see [Open issues and risks](#open-issues-and-risks)) |
@@ -78,7 +78,7 @@ One physical device belongs to one account. A device counts as already registere
 | Admin account uses `devmonitor.system@gmail.com` | ✅ | A | Configurable as `ADMIN_EMAIL`. `init-db` and migration `014` move the old `admin@localhost`; `create-admin` refuses any other address. |
 | Admin sign-in = password + emailed 6-digit code | ✅ | A, L | Password alone signs nothing in; the code page shows a 5-minute countdown and **Resend code** (60 s cooldown). |
 | Wrong, expired, reused, or too many codes | ✅ | A | All refused; mail failure keeps the admin signed out (503). |
-| Admin panel re-verification (`/admin`, `/api/admin/*`) | ✅ | A | Fresh password check per visit, as before. |
+| Admin panel re-verification (`/admin`, `/api/admin/*`) | ✅ | A | Password on every visit; the first visit after each sign-in also needs a 5-minute emailed code (with countdown and resend). |
 | User management (create, role, status, final-admin guard) | ✅ | A | |
 | Device management (archive, restore, soft delete, scan) | ✅ | A | |
 | Audit log viewer and Excel export | ✅ | A | Export needs fresh credentials and is audited; emails are masked. |
@@ -138,9 +138,9 @@ One physical device belongs to one account. A device counts as already registere
 | Suite / check | Result |
 |---|---|
 | Baseline on `master` before changes | 177 passed |
-| After this review (full suite) | 205 passed in 3 consecutive full runs |
+| After this review (full suite) | 208 passed |
 | New: `test_device_registration_rules.py` | 11 tests: duplicates (same/other account, archived, deleted, mobile), limit, website notice |
-| New: `test_admin_login_verification.py` | 12 tests: code required, wrong/expired/locked code, resend cooldown, mail failure, `init-db`/`create-admin` |
+| New: `test_admin_login_verification.py` | 15 tests: admin panel code, code required, wrong/expired/locked code, resend cooldown, mail failure, `init-db`/`create-admin` |
 | New: `test_email_code_expiry.py` | 5 tests: 5-minute lifetime, countdown value, boundary, resend, page markup |
 | Updated existing tests | Admin sign-ins finish the email-code step (`complete_admin_login`); `check-db` expects 19 tables; verification status includes `registration_rejection` |
 | Security controls weakened | None. CSRF, owner scoping, token hashing, and admin re-verification are unchanged. |

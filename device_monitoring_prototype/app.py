@@ -1475,6 +1475,65 @@ def create_app(test_config=None):
     def archived_devices():
         return render_template("archived_devices.html", active_page="archived-devices")
 
+    def log_admin_panel_event(event_type, **details):
+        db.session.add(
+            ActivityLog(
+                actor_user_id=current_user.id,
+                event_type=event_type,
+                entity_type="admin_panel",
+                details={
+                    "ip_address": request.remote_addr,
+                    "username": current_user.username,
+                    **details,
+                },
+            )
+        )
+        db.session.commit()
+
+    def admin_panel_code_page(status=200):
+        timing = login_code_status(current_user)
+        return render_template(
+            "admin_verify.html",
+            active_page="admin",
+            requires_email_code=True,
+            code_email=mask_email(current_user.email),
+            code_expires_in=timing["expires_in_seconds"],
+            resend_in=timing["resend_in_seconds"],
+        ), status
+
+    def grant_admin_panel_access():
+        session.pop("admin_panel_code_user_id", None)
+        session["admin_verified_user_id"] = current_user.id
+        session["admin_verified_at"] = datetime.now(timezone.utc).timestamp()
+        session["admin_verification_allow_next"] = True
+        log_admin_panel_event(
+            "admin.verification_succeeded", role=current_user.role_name, status="success"
+        )
+        flash("Administrator identity verified.", "success")
+        return redirect(url_for("admin"))
+
+    def finish_admin_panel_code():
+        if request.form.get("resend_code") == "1":
+            try:
+                send_admin_login_code(current_user, resend=True)
+            except ValidationError as error:
+                flash(str(error), "warning")
+                return admin_panel_code_page(429)
+            except EmailDeliveryError as error:
+                flash(str(error), "danger")
+                return admin_panel_code_page(503)
+            log_admin_panel_event("admin.verification_code_sent", resend=True)
+            flash("A new verification code has been sent.", "success")
+            return admin_panel_code_page()
+        try:
+            verify_admin_login_code(current_user, request.form.get("email_code", "").strip())
+        except ValidationError as error:
+            log_admin_panel_event("admin.verification_failed", reason="email_code")
+            flash(str(error), "danger")
+            return admin_panel_code_page(401)
+        session["admin_panel_code_verified_user_id"] = current_user.id
+        return grant_admin_panel_access()
+
     @app.route("/admin/verify", methods=["GET", "POST"])
     @login_required
     def admin_verify():
@@ -1493,6 +1552,16 @@ def create_app(test_config=None):
             )
             db.session.commit()
             abort(403)
+
+        code_pending = session.get("admin_panel_code_user_id") == current_user.id
+        if request.method == "POST" and code_pending and (
+            request.form.get("email_code") is not None
+            or request.form.get("resend_code") == "1"
+        ):
+            return finish_admin_panel_code()
+        if request.method == "POST" and request.form.get("back_to_password") == "1":
+            session.pop("admin_panel_code_user_id", None)
+            return render_template("admin_verify.html", active_page="admin")
 
         if request.method == "POST":
             username = request.form.get("username", "").strip()
@@ -1524,26 +1593,26 @@ def create_app(test_config=None):
                 flash("Administrator verification failed.", "danger")
                 return render_template("admin_verify.html", active_page="admin"), 403
 
-            session["admin_verified_user_id"] = current_user.id
-            session["admin_verified_at"] = datetime.now(timezone.utc).timestamp()
-            session["admin_verification_allow_next"] = True
-            db.session.add(
-                ActivityLog(
-                    actor_user_id=current_user.id,
-                    event_type="admin.verification_succeeded",
-                    entity_type="admin_panel",
-                    details={
-                        "ip_address": request.remote_addr,
-                        "username": current_user.username,
-                        "role": current_user.role_name,
-                        "status": "success",
-                    },
-                )
-            )
-            db.session.commit()
-            flash("Administrator identity verified.", "success")
-            return redirect(url_for("admin"))
+            # Password confirmed. The first panel entry of each sign-in also needs
+            # a 6-digit code emailed to the administrator mailbox; later entries in
+            # the same session re-check the password only (avoids an email per visit).
+            if session.get("admin_panel_code_verified_user_id") == current_user.id:
+                return grant_admin_panel_access()
+            try:
+                send_admin_login_code(current_user)
+            except EmailDeliveryError as error:
+                log_admin_panel_event("admin.verification_failed", reason="email_delivery")
+                flash(str(error), "danger")
+                return render_template("admin_verify.html", active_page="admin"), 503
+            except ValidationError as error:
+                flash(str(error), "warning")
+            else:
+                log_admin_panel_event("admin.verification_code_sent")
+            session["admin_panel_code_user_id"] = current_user.id
+            return admin_panel_code_page()
 
+        if code_pending:
+            return admin_panel_code_page()
         db.session.add(
             ActivityLog(
                 actor_user_id=current_user.id,

@@ -195,6 +195,63 @@ class AdminLoginVerificationTest(unittest.TestCase):
             self.assertEqual(user.email, "devmonitor.system@gmail.com")
             self.assertTrue(user.is_admin)
 
+    # -- administrator panel (/admin/verify) ----------------------------------
+    def sign_in_admin(self):
+        _response, send_email = self.submit_password()
+        self.assertEqual(self.submit_code(send_email.call_args.args[1]).status_code, 302)
+        self.client.get("/admin/verify")
+
+    def panel_password(self, password="admin123"):
+        with patch(SEND_EMAIL) as send_email:
+            response = self.client.post("/admin/verify", data={
+                "csrf_token": self.csrf(), "username": "admin", "password": password,
+            })
+        return response, send_email
+
+    def test_admin_panel_requires_password_and_an_emailed_code(self):
+        self.sign_in_admin()
+        self.assertEqual(self.client.get("/admin").location, "/admin/verify")
+
+        response, send_email = self.panel_password()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Email verification code", response.data)
+        self.assertIn(b"data-code-expires-in", response.data)
+        self.assertEqual(send_email.call_args.args[0], "devmonitor.system@gmail.com")
+        # The password alone does not open the panel.
+        self.assertEqual(self.client.get("/admin").location, "/admin/verify")
+
+        code = send_email.call_args.args[1]
+        wrong = "000000" if code != "000000" else "111111"
+        refused = self.client.post(
+            "/admin/verify", data={"csrf_token": self.csrf(), "email_code": wrong}
+        )
+        self.assertEqual(refused.status_code, 401)
+        accepted = self.client.post(
+            "/admin/verify", data={"csrf_token": self.csrf(), "email_code": code}
+        )
+        self.assertEqual(accepted.location, "/admin")
+        self.assertEqual(self.client.get("/admin").status_code, 200)
+
+    def test_wrong_panel_password_sends_no_code(self):
+        self.sign_in_admin()
+        response, send_email = self.panel_password("wrong-password")
+        self.assertEqual(response.status_code, 403)
+        send_email.assert_not_called()
+
+    def test_later_panel_entries_in_the_same_sign_in_need_only_the_password(self):
+        self.sign_in_admin()
+        _response, send_email = self.panel_password()
+        self.client.post("/admin/verify", data={
+            "csrf_token": self.csrf(), "email_code": send_email.call_args.args[1],
+        })
+        self.client.get("/admin")
+        self.client.get("/dashboard")
+        # Revisiting the panel asks again; this time the password is enough.
+        self.assertEqual(self.client.get("/admin").location, "/admin/verify")
+        again, second_email = self.panel_password()
+        self.assertEqual(again.location, "/admin")
+        second_email.assert_not_called()
+
     def test_standard_users_still_use_their_authenticator(self):
         with self.app.app_context():
             user = User(

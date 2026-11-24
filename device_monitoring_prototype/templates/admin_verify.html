@@ -13,6 +13,32 @@
                 </h1>
             </div>
             <div class="content-card-body">
+                {% if requires_email_code %}
+                <p class="text-muted">
+                    We emailed a 6-digit verification code to <strong>{{ code_email }}</strong>.
+                    Enter it to open the administrator panel.
+                </p>
+                <form method="post" autocomplete="off">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <div class="mb-3">
+                        <label class="form-label" for="adminVerifyCode">Email verification code</label>
+                        <input class="form-control verification-code" id="adminVerifyCode" name="email_code"
+                               inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}"
+                               minlength="6" maxlength="6" required autofocus
+                               aria-describedby="adminCodeExpiry">
+                        <p id="adminCodeExpiry" class="code-expiry" role="timer" aria-live="polite"
+                           data-code-expires-in="{{ code_expires_in }}">This code expires in 5 minutes.</p>
+                    </div>
+                    <button class="btn btn-primary" type="submit">
+                        <i class="bi bi-shield-check me-1"></i>Verify and Continue
+                    </button>
+                    <button class="btn btn-link" type="submit" name="resend_code" value="1"
+                            formnovalidate data-resend-in="{{ resend_in }}">Resend code</button>
+                    <button class="btn btn-outline-secondary ms-2" type="submit" name="back_to_password"
+                            value="1" formnovalidate>Back</button>
+                </form>
+                <script src="{{ url_for('static', filename='js/code-expiry.js') }}" defer></script>
+                {% else %}
                 <p class="text-muted">
                     Confirm your administrator credentials before entering protected administrative features.
                 </p>
@@ -37,6 +63,7 @@
                     </button>
                     <a class="btn btn-outline-secondary ms-2" href="{{ url_for('dashboard') }}">Cancel</a>
                 </form>
+                {% endif %}
             </div>
         </section>
     </div>

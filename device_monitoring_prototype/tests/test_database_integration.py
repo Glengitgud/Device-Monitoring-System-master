@@ -114,14 +114,22 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.client.get("/admin/verify")
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
-        response = self.client.post(
-            "/admin/verify",
-            data={
-                "csrf_token": token,
-                "username": username,
-                "password": password,
-            },
-        )
+        with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+            response = self.client.post(
+                "/admin/verify",
+                data={
+                    "csrf_token": token,
+                    "username": username,
+                    "password": password,
+                },
+            )
+        if send_email.called:
+            # First panel entry of the sign-in: confirm the emailed code.
+            self.assertEqual(response.status_code, 200)
+            response = self.client.post(
+                "/admin/verify",
+                data={"csrf_token": token, "email_code": send_email.call_args.args[1]},
+            )
         self.assertEqual(response.status_code, 302)
 
     def register_and_login(
