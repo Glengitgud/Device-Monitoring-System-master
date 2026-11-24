@@ -202,6 +202,7 @@ jobs:
         run: |
           hdiutil attach agents/macos/dist/DevMonitor-Agent.dmg -mountpoint "$RUNNER_TEMP/dmg" -nobrowse -readonly
           "$RUNNER_TEMP/dmg/DevMonitor Agent.app/Contents/MacOS/DevMonitor Agent" --version
+          bash agents/ci/check_macos_https.sh "$RUNNER_TEMP/dmg/DevMonitor Agent.app"
           hdiutil detach "$RUNNER_TEMP/dmg"
           python -c "from device_monitoring_prototype.package_validation import validate_dmg; validate_dmg('agents/macos/dist/DevMonitor-Agent.dmg'); print('valid DMG')"
 

@@ -130,6 +130,9 @@ jobs:
             echo "A used registration link was accepted twice" >&2; exit 1
           fi
 
+      - name: The packaged app makes verified HTTPS connections
+        run: bash agents/ci/check_macos_https.sh "$APP"
+
       - name: Backend log
         if: always()
         run: cat "$RUNNER_TEMP/backend.log" 2>/dev/null || true

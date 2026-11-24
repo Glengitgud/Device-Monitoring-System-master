@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import re
+import ssl
 import tarfile
 import tempfile
 import types
@@ -315,6 +316,28 @@ class UnixAgentUnitTest(unittest.TestCase):
         ):
             with self.subTest(expected=expected), self.assertRaisesRegex(agent.AgentError, expected):
                 agent.submit_registration(url, TOKEN, {"name": "x"}, opener=opener)
+
+    def test_https_requests_always_verify_certificates(self):
+        # The packaged Mac app has no system certificates, so the agent must use
+        # its own verifying context (certifi when bundled) rather than urlopen's default.
+        context = agent.tls_context()
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        self.assertIs(agent.submit_registration.__defaults__[0], agent.open_url)
+
+        captured = {}
+
+        def fake_urlopen(request, timeout, context):
+            captured.update(timeout=timeout, context=context)
+            raise urllib.error.URLError("offline")
+
+        with patch.object(agent.urllib.request, "urlopen", fake_urlopen):
+            with self.assertRaises(agent.AgentError):
+                agent.submit_registration(
+                    "https://monitor.example.edu/api/device-agent/enroll", TOKEN, {"name": "x"}
+                )
+        self.assertEqual(captured["timeout"], 20)
+        self.assertEqual(captured["context"].verify_mode, ssl.CERT_REQUIRED)
 
 
 class LinuxPackageTest(unittest.TestCase):

@@ -32,8 +32,10 @@ ARCH="${TARGET_ARCH:-universal2}"
 # shellcheck disable=SC1091
 source "$HERE/.venv/bin/activate"
 python -m pip install --quiet --upgrade pip
-python -m pip install --quiet "pyinstaller==6.17.0" "pillow>=10"
+python -m pip install --quiet "pyinstaller==6.17.0" "pillow>=10" "certifi>=2024.2.2"
 python -c "import tkinter" || { echo "This Python has no Tk. Use the python.org installer." >&2; exit 1; }
+# The frozen python.org Python does not read the macOS keychain, so the app ships
+# certifi's CA bundle for HTTPS (see tls_context() in device_agent_unix.py).
 
 rm -rf "$HERE/build" "$DIST"
 pyinstaller \
@@ -41,6 +43,7 @@ pyinstaller \
   --name "$APP_NAME" \
   --osx-bundle-identifier com.devmonitor.agent \
   --argv-emulation \
+  --hidden-import certifi --collect-data certifi \
   --target-arch "$ARCH" \
   --icon "$ROOT/agents/shared/icon-1024.png" \
   --distpath "$DIST" --workpath "$HERE/build" --specpath "$HERE/build" \

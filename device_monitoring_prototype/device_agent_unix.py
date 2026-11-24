@@ -483,7 +483,33 @@ def collector_for_this_system():
 # Submission
 # --------------------------------------------------------------------------
 
-def submit_registration(submission_url, token, payload, opener=urllib.request.urlopen):
+def tls_context():
+    """Certificate-verifying TLS context that also works in the packaged Mac app.
+
+    The python.org Python frozen into "DevMonitor Agent.app" does not read the
+    macOS keychain, so on a Mac without that Python installed it has no trusted
+    certificates and every HTTPS request fails. The app therefore ships
+    certifi's CA bundle; when certifi is absent (a plain Linux run) the
+    system's default certificates are used. Verification is never disabled.
+    """
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    context = ssl.create_default_context(cafile=certifi.where())
+    # Keep trusting the system store too (local CAs on Linux, for example).
+    try:
+        context.load_default_certs()
+    except ssl.SSLError:
+        pass
+    return context
+
+
+def open_url(request, timeout):
+    return urllib.request.urlopen(request, timeout=timeout, context=tls_context())
+
+
+def submit_registration(submission_url, token, payload, opener=open_url):
     request = urllib.request.Request(
         submission_url,
         data=json.dumps(payload).encode("utf-8"),
