@@ -5,8 +5,10 @@
 #   * builds a universal (Apple silicon + Intel) "DevMonitor Agent.app" and DevMonitor-Agent.dmg,
 #     checks the DMG contents, and enrolls the runner Mac end-to-end against a throwaway backend;
 #   * compiles the iOS app, runs its XCTest suite in the iOS Simulator (including a real
-#     enrollment against the throwaway backend) and compiles it for real devices (unsigned).
-# The DMG is ad-hoc signed (Gatekeeper will warn) and no installable .ipa is produced.
+#     enrollment against the throwaway backend) and compiles it for real devices (unsigned),
+#     published as the DevMonitorAgent-iOS-unsigned-ipa artifact for free USB sideloading.
+# The DMG is ad-hoc signed (Gatekeeper will warn). The unsigned .ipa cannot be installed
+# from a website; a sideloading tool must sign it with an Apple ID first.
 #
 # Optional secrets for distributable builds (Apple Developer Program, US$99/year):
 #   macOS:  MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, DEVELOPER_ID_APPLICATION,
@@ -205,13 +207,35 @@ jobs:
           python agents/ci/ci_backend.py check --db "$RUNNER_TEMP/ios-ci.db" \
             --expect-type Phone Tablet --expect-os iOS
 
-      - name: Compile for real iPhone/iPad hardware (unsigned - not installable)
+      - name: Compile for real iPhone/iPad hardware (unsigned)
         run: |
           xcodebuild build \
             -project agents/ios/DevMonitorAgent.xcodeproj \
             -scheme DevMonitorAgent -configuration Release \
             -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/ios-build" \
             CODE_SIGNING_ALLOWED=NO
+
+      # Not installable as-is: iOS only runs signed apps. A sideloading tool such as
+      # Sideloadly or AltStore signs it with a free Apple ID over USB, for demos and
+      # testing (the free signature expires after 7 days). See agents/README.md.
+      - name: Package the unsigned .ipa for sideloading
+        run: |
+          APP="$RUNNER_TEMP/ios-build/Build/Products/Release-iphoneos/DevMonitorAgent.app"
+          test -d "$APP"
+          plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw "$APP/Info.plist" | grep -qx devmonitor
+          STAGING="$RUNNER_TEMP/ipa"
+          rm -rf "$STAGING" && mkdir -p "$STAGING/Payload"
+          cp -R "$APP" "$STAGING/Payload/"
+          (cd "$STAGING" && zip -qry "$GITHUB_WORKSPACE/DevMonitorAgent-unsigned.ipa" Payload)
+          unzip -l DevMonitorAgent-unsigned.ipa | grep -q "Payload/DevMonitorAgent.app/Info.plist"
+          shasum -a 256 DevMonitorAgent-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DevMonitorAgent-iOS-unsigned-ipa
+          path: DevMonitorAgent-unsigned.ipa
+          if-no-files-found: error
 
       - name: Backend log
         if: always()

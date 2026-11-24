@@ -184,6 +184,27 @@ TestFlight (beta, up to 10,000 testers, builds expire after 90 days), Ad Hoc
 (up to 100 registered devices per year) or Apple Business Manager custom apps.
 An `.ipa` cannot be offered as a normal website download.
 
+### Free demo install over USB (no Apple Developer Program)
+
+For demonstrations and testing only. The *Apple agents* workflow publishes an
+unsigned `DevMonitorAgent-unsigned.ipa` as the `DevMonitorAgent-iOS-unsigned-ipa`
+artifact (run it from **Actions → Apple agents → Run workflow**). A sideloading
+tool signs it with a free Apple ID while the iPhone is connected by cable:
+
+1. On Windows, install iTunes and iCloud from apple.com (not the Microsoft Store),
+   then Sideloadly. Use a separate Apple ID made for this.
+2. Connect the iPhone, unlock it and tap **Trust This Computer**.
+3. Drag the `.ipa` into Sideloadly, enter the Apple ID and select **Start**.
+4. On the iPhone: **Settings → Privacy & Security → Developer Mode** (on, restart),
+   then **Settings → General → VPN & Device Management** → trust the Apple ID.
+5. In Safari, sign in to the website as a standard user and open
+   `/device-link/open` (or **Link a Device → Link this device**); choose **Open**
+   when Safari asks to open DevMonitor Agent, then **Register This Device**.
+
+A free signature expires after 7 days (reinstall with step 3) and allows at most
+three sideloaded apps per device. If Sideloadly reports that the bundle ID is not
+available, set a unique one under *Advanced options*.
+
 Platform limits: apps cannot read the MAC address, serial number, system-wide
 memory usage or (iOS 16+) the user's device name. Apple's required-reason API
 rules do not allow sending free/total disk space off the device, so the iOS
