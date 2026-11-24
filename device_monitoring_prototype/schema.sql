@@ -114,6 +114,7 @@ CREATE TABLE devices (
     UNIQUE KEY uq_devices_monitoring_token_hash (monitoring_token_hash),
     KEY ix_devices_owner_status (owner_user_id, status),
     KEY ix_devices_lifecycle_owner (lifecycle_status, owner_user_id),
+    KEY ix_devices_mac_address (mac_address),
     CONSTRAINT fk_devices_owner FOREIGN KEY (owner_user_id)
         REFERENCES users (id) ON DELETE RESTRICT,
     CONSTRAINT fk_devices_registered_by FOREIGN KEY (registered_by_user_id)
@@ -140,6 +141,8 @@ CREATE TABLE device_registration_tokens (
     download_confirmed_at DATETIME NULL,
     used_at DATETIME NULL,
     revoked_at DATETIME NULL,
+    rejected_at DATETIME NULL,
+    rejection_reason VARCHAR(255) NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uq_device_registration_tokens_hash (token_hash),
     UNIQUE KEY uq_device_registration_tokens_device (device_id),

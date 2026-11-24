@@ -141,6 +141,7 @@ from device_monitoring_prototype.services import (
     MONITORING_ACTIVATION_WINDOW,
     MONITORING_OFFLINE_AFTER,
     DatabaseSetupError,
+    DuplicateDeviceError,
     HeartbeatRateLimitError,
     MonitoringCredentialError,
     ValidationError,
@@ -156,6 +157,7 @@ from device_monitoring_prototype.services import (
     find_valid_registration_token,
     issue_device_registration_token,
     issue_direct_agent_download_token,
+    latest_registration_rejection,
     pending_agent_enrollment,
     hash_password,
     register_agent_device,
@@ -1539,6 +1541,7 @@ def create_app(test_config=None):
 
         response = jsonify(
             status=status,
+            rejection_reason=None if registration.used_at else registration.rejection_reason,
             expires_at=expires_at.isoformat(),
             server_time=datetime.now(timezone.utc).isoformat(),
             device=(
@@ -2288,6 +2291,8 @@ def create_app(test_config=None):
             device = register_agent_device(token, api_data())
         except RegistrationTokenError as error:
             return api_error(error, 401)
+        except DuplicateDeviceError as error:
+            return api_error(error, 409)
         except ValidationError as error:
             return api_error(error)
         payload = {
@@ -2716,6 +2721,8 @@ def create_app(test_config=None):
         can_access_device(device)
         try:
             restore_device(device)
+        except DuplicateDeviceError as error:
+            return api_error(error, 409)
         except ValidationError as error:
             return api_error(error)
         return "", 204
@@ -3027,6 +3034,7 @@ def create_app(test_config=None):
             verified=count > 0,
             verified_devices=count,
             pending_enrollment=None if count else pending_agent_enrollment(current_user),
+            registration_rejection=latest_registration_rejection(current_user),
             scan_status="Completed" if latest_device else "Pending",
             registration_status="Registered" if latest_device else "Pending",
             latest_device=(

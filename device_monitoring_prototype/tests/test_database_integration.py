@@ -1086,6 +1086,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
                 "verified": True,
                 "verified_devices": 1,
                 "pending_enrollment": None,
+                "registration_rejection": None,
                 "scan_status": "Completed",
                 "registration_status": "Registered",
                 "latest_device": {

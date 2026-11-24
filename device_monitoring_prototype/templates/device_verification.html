@@ -29,6 +29,12 @@
             </span>
         </div>
 
+        <div id="registrationRejectedNotice" class="alert alert-danger" role="alert" hidden>
+            <i class="bi bi-exclamation-octagon me-1" aria-hidden="true"></i>
+            <strong>Device not registered.</strong>
+            <span id="registrationRejectedText"></span>
+        </div>
+
         {% if not verified_device_count %}
         {# First device: download, open, approve. The app links itself through
            /device-link/open, so no "Link this device" button is needed here. #}

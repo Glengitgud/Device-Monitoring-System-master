@@ -218,6 +218,7 @@ class Device(db.Model):
         ),
         db.Index("ix_devices_owner_status", "owner_user_id", "status"),
         db.Index("ix_devices_lifecycle_owner", "lifecycle_status", "owner_user_id"),
+        db.Index("ix_devices_mac_address", "mac_address"),
     )
 
     id = db.Column(ID_TYPE, primary_key=True)
@@ -393,6 +394,9 @@ class DeviceRegistrationToken(db.Model):
     download_confirmed_at = db.Column(db.DateTime(timezone=True))
     used_at = db.Column(db.DateTime(timezone=True))
     revoked_at = db.Column(db.DateTime(timezone=True))
+    # Why the last enrollment attempt with this token was refused (duplicate or limit).
+    rejected_at = db.Column(db.DateTime(timezone=True))
+    rejection_reason = db.Column(db.String(255))
 
     user = db.relationship("User", back_populates="registration_tokens")
     device = db.relationship("Device", back_populates="registration_token")

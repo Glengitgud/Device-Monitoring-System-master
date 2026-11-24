@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from sqlalchemy import delete, func, or_, update
+from sqlalchemy import and_, delete, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash
 
@@ -51,6 +51,15 @@ OPTIONAL_SPECIFICATION_KEYS = {"mac_address"}
 AGENT_DEVICE_TYPES = {"Desktop", "Laptop", "Phone", "Tablet"}
 # Types a user may choose when adding or editing a device manually.
 MANUAL_DEVICE_TYPES = {"Desktop", "Laptop", "Server", "Workstation", "Phone", "Tablet", "Other"}
+MAC_ADDRESS_PATTERN = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
+# Values that do not identify one device: iOS reports 02:00:00:00:00:00 to every
+# app, and all-zero / broadcast addresses come from virtual or missing adapters.
+# Devices reporting these (or no MAC, like Android 10+) skip MAC duplicate checks.
+PLACEHOLDER_MAC_ADDRESSES = {
+    "00:00:00:00:00:00",
+    "02:00:00:00:00:00",
+    "FF:FF:FF:FF:FF:FF",
+}
 EMAIL_PATTERN = re.compile(
     r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
     r"(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@"
@@ -65,6 +74,10 @@ class ValidationError(ValueError):
 
 class RegistrationTokenError(ValidationError):
     """Raised when a one-time device enrollment token cannot be accepted."""
+
+
+class DuplicateDeviceError(ValidationError):
+    """Raised when a device's MAC address is already registered."""
 
 
 class MonitoringCredentialError(ValidationError):
@@ -279,6 +292,85 @@ def deactivate_user(user):
     db.session.commit()
 
 
+# ---------------------------------------------------------------------------
+# Device registration rules
+# ---------------------------------------------------------------------------
+# One physical device belongs to one account. A device is identified by its MAC
+# address when it reports a real one:
+#   * an active device blocks every other registration of that MAC, on any account;
+#   * an archived device blocks other accounts, but its own owner may register it
+#     again (restoring the archived row is checked the same way);
+#   * a soft-deleted device (removed by an administrator) releases its MAC.
+# Devices with no MAC or a placeholder MAC (iOS, Android 10+) are not deduplicated.
+
+DUPLICATE_DEVICE_OWN_ACCOUNT_MESSAGE = (
+    "This device is already registered to your account. "
+    "Open My Devices (or Archived Devices) to manage it."
+)
+DUPLICATE_DEVICE_OTHER_ACCOUNT_MESSAGE = (
+    "This device is already registered to another account. A device can only be "
+    "linked to one account; ask an administrator to remove it first."
+)
+
+
+def normalize_mac_address(value):
+    """Return a MAC as 00:11:22:AA:BB:CC (accepting '-' separators), or None."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValidationError("MAC address must use the format 00:11:22:33:44:55.")
+    candidate = value.strip().replace("-", ":").upper()
+    if not candidate:
+        return None
+    if not MAC_ADDRESS_PATTERN.fullmatch(candidate):
+        raise ValidationError("MAC address must use the format 00:11:22:33:44:55.")
+    return candidate
+
+
+def is_identifying_mac_address(mac_address):
+    """True when a normalized MAC can tell one device apart from another."""
+    return bool(mac_address) and mac_address not in PLACEHOLDER_MAC_ADDRESSES
+
+
+def ensure_mac_address_available(owner, mac_address, *, exclude_device_id=None):
+    """Raise DuplicateDeviceError when ``mac_address`` is already registered."""
+    if not is_identifying_mac_address(mac_address):
+        return
+    query = Device.query.filter(
+        Device.mac_address == mac_address,
+        or_(
+            Device.lifecycle_status == "active",
+            and_(Device.lifecycle_status == "archived", Device.owner_user_id != owner.id),
+        ),
+    )
+    if exclude_device_id is not None:
+        query = query.filter(Device.id != exclude_device_id)
+    existing = query.order_by(Device.id).first()
+    if existing is None:
+        return
+    raise DuplicateDeviceError(
+        DUPLICATE_DEVICE_OWN_ACCOUNT_MESSAGE
+        if existing.owner_user_id == owner.id
+        else DUPLICATE_DEVICE_OTHER_ACCOUNT_MESSAGE
+    )
+
+
+def _reject_registration(registration, error, *, mac_address=None):
+    """Record why an enrollment was refused so the website can show it."""
+    registration.rejected_at = datetime.now(timezone.utc)
+    registration.rejection_reason = str(error)[:255]
+    db.session.add(
+        ActivityLog(
+            actor=registration.user,
+            event_type="device.registration_rejected",
+            entity_type="device_registration_token",
+            entity_id=registration.id,
+            details={"reason": type(error).__name__, "mac_address": mac_address},
+        )
+    )
+    db.session.commit()
+
+
 def create_device(owner, data):
     name = _required_text(data, "name", limit=120)
     hostname = _text(data, "hostname", limit=255) or name
@@ -406,6 +498,27 @@ def pending_agent_enrollment(user):
     return None
 
 
+def latest_registration_rejection(user):
+    """Most recent refused enrollment (cleared once a device registers successfully)."""
+    registration = (
+        DeviceRegistrationToken.query.filter(
+            DeviceRegistrationToken.user_id == user.id,
+            DeviceRegistrationToken.used_at.is_(None),
+            DeviceRegistrationToken.rejected_at.isnot(None),
+            DeviceRegistrationToken.rejected_at
+            > datetime.now(timezone.utc) - REGISTRATION_TOKEN_LIFETIME,
+        )
+        .order_by(DeviceRegistrationToken.rejected_at.desc(), DeviceRegistrationToken.id.desc())
+        .first()
+    )
+    if registration is None:
+        return None
+    rejected_at = registration.rejected_at
+    if rejected_at.tzinfo is None:
+        rejected_at = rejected_at.replace(tzinfo=timezone.utc)
+    return {"message": registration.rejection_reason, "rejected_at": rejected_at.isoformat()}
+
+
 def find_valid_registration_token(token):
     if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token):
         return None
@@ -458,13 +571,7 @@ def validate_detected_specifications(specifications):
     motherboard_brand = _inventory_text(specifications, "motherboard_brand", 120)
     os_name = _inventory_text(specifications, "operating_system_name", 120)
     os_version = _inventory_text(specifications, "operating_system_version", 255)
-    mac_address = _inventory_text(specifications, "mac_address", 17)
-    if mac_address and not re.fullmatch(
-        r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", mac_address
-    ):
-        raise ValidationError("MAC address must use the format 00:11:22:33:44:55.")
-    if mac_address:
-        mac_address = mac_address.upper()
+    mac_address = normalize_mac_address(_inventory_text(specifications, "mac_address", 17))
     gpu_values = specifications.get("gpu_information")
     if not isinstance(gpu_values, list) or len(gpu_values) > 32:
         raise ValidationError("GPU information must be a list of at most 32 names.")
@@ -576,6 +683,13 @@ def register_agent_device(token, data):
         raise RegistrationTokenError(
             "Verify the account and confirm the Device Agent download before registering a device."
         )
+    # Checked before the token is claimed, so the link still works once the
+    # conflict is resolved (for example after an administrator removes the device).
+    try:
+        ensure_mac_address_available(registration.user, specifications["mac_address"])
+    except DuplicateDeviceError as error:
+        _reject_registration(registration, error, mac_address=specifications["mac_address"])
+        raise
 
     now = datetime.now(timezone.utc)
     claim = db.session.execute(
@@ -637,6 +751,12 @@ def register_agent_device(token, data):
     db.session.flush()
     registration.device = device
     registration.mac_address = device.mac_address
+    # A successful registration supersedes earlier refusals shown on the website
+    # (each refusal stays in activity_logs).
+    DeviceRegistrationToken.query.filter(
+        DeviceRegistrationToken.user_id == user.id,
+        DeviceRegistrationToken.rejected_at.isnot(None),
+    ).update({"rejected_at": None, "rejection_reason": None}, synchronize_session=False)
     _log_device_event(device, "Device registered with QR-based agent")
     db.session.add(
         ActivityLog(
@@ -699,6 +819,7 @@ def archive_device(device):
 def restore_device(device):
     if device.lifecycle_status != "archived":
         raise ValidationError("Only archived devices can be restored.")
+    ensure_mac_address_available(device.owner, device.mac_address, exclude_device_id=device.id)
     device.lifecycle_status = "active"
     device.archived_at = None
     device.archived_by_user_id = None

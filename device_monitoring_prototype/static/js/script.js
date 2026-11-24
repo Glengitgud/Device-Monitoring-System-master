@@ -474,6 +474,7 @@ async function refreshDeviceVerificationStatus() {
         }
         if (latest?.id != null) latestVerificationDeviceId = latest.id;
         updatePendingEnrollmentNotice(result.verified ? null : result.pending_enrollment);
+        updateRegistrationRejectedNotice(result.registration_rejection);
         if (!result.verified) return;
 
         document.getElementById('deviceVerificationPending')?.classList.add('d-none');
@@ -483,6 +484,16 @@ async function refreshDeviceVerificationStatus() {
     } catch (error) {
         status.textContent = `Unable to check device verification: ${error.message}`;
     }
+}
+
+// The agent shows the same message; this keeps the website in step when the server
+// refuses a device (already registered, or the account's device limit is reached).
+function updateRegistrationRejectedNotice(rejection) {
+    const notice = document.getElementById('registrationRejectedNotice');
+    const text = document.getElementById('registrationRejectedText');
+    if (!notice || !text) return;
+    notice.hidden = !rejection?.message;
+    text.textContent = rejection?.message || '';
 }
 
 function updatePendingEnrollmentNotice(pending) {
