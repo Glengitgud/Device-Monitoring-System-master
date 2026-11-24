@@ -152,7 +152,10 @@
                             </label>
                             <input id="emailVerificationCode" class="form-control verification-code"
                                    name="code" inputmode="numeric" autocomplete="one-time-code"
-                                   pattern="[0-9]{6}" minlength="6" maxlength="6" required>
+                                   pattern="[0-9]{6}" minlength="6" maxlength="6" required
+                                   aria-describedby="emailCodeExpiry">
+                            <p id="emailCodeExpiry" class="code-expiry" role="timer"
+                               aria-live="polite">This code expires in 5 minutes.</p>
                             <button type="submit" class="btn btn-primary w-100 mt-3">
                                 <span class="spinner-border spinner-border-sm button-spinner me-1"
                                       aria-hidden="true" hidden></span>
@@ -211,6 +214,7 @@
             </p>
         </div>
     </div>
+    <script src="{{ url_for('static', filename='js/code-expiry.js') }}" defer></script>
     <script src="{{ url_for('static', filename='js/register.js') }}" defer></script>
     <script src="{{ url_for('static', filename='js/password-strength.js') }}" defer></script>
     <script src="{{ url_for('static', filename='js/password-toggle.js') }}" defer></script>

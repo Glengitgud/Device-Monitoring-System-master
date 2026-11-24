@@ -469,6 +469,18 @@ def _ensure_challenge_is_open(challenge):
         raise RegistrationRestartRequired("This registration has expired. Please start again.")
 
 
+def email_code_expires_in(challenge):
+    """Whole seconds until the newest unverified email code expires (0 if none)."""
+    verification = (
+        EmailVerification.query.filter_by(registration_challenge_id=challenge.id, verified=False)
+        .order_by(EmailVerification.created_at.desc(), EmailVerification.id.desc())
+        .first()
+    )
+    if verification is None:
+        return 0
+    return max(0, math.ceil((verification.expires_at - utcnow()).total_seconds()))
+
+
 def resend_email_code(challenge):
     _ensure_challenge_is_open(challenge)
     now = utcnow()
@@ -587,7 +599,9 @@ def verify_email_code(challenge, code):
             "Email verification rejected (challenge_id=%s, reason=expired_or_missing_code).",
             challenge.id,
         )
-        raise ValidationError("That email code has expired. Request a new code.")
+        raise ValidationError(
+            "That verification code has expired. Select Resend code to get a new one."
+        )
     expected = _email_code_hash(challenge.id, code)
     if not hmac.compare_digest(verification.verification_code, expected):
         challenge.email_attempts += 1

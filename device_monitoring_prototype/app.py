@@ -107,6 +107,7 @@ from device_monitoring_prototype.authentication import (
     cancel_registration,
     check_smtp_connection,
     complete_registration,
+    email_code_expires_in,
     login_code_status,
     registration_authenticator_qr,
     resend_email_code,
@@ -1197,6 +1198,9 @@ def create_app(test_config=None):
                 else None
             ),
             resend_in_seconds=resend_in_seconds,
+            code_expires_in_seconds=(
+                0 if challenge.email_verified_at is not None else email_code_expires_in(challenge)
+            ),
         )
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -1204,14 +1208,16 @@ def create_app(test_config=None):
     @app.post("/api/registration/resend-code")
     def resend_registration_code():
         try:
-            resend_email_code(registration_challenge())
+            challenge = registration_challenge()
+            resend_email_code(challenge)
         except ValidationError as error:
             return jsonify(error=str(error)), 400
         except EmailDeliveryError as error:
             return jsonify(error=str(error)), 503
         return jsonify(
-            message="A new verification code has been sent.",
+            message="A new verification code has been sent. It expires in 5 minutes.",
             resend_in_seconds=EMAIL_RESEND_INTERVAL.total_seconds(),
+            code_expires_in_seconds=email_code_expires_in(challenge),
         )
 
     @app.post("/api/registration/cancel")

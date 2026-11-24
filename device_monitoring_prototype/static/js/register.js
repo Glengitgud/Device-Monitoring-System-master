@@ -122,11 +122,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const csrfInput = form.querySelector('[name="csrf_token"]');
     const resendButton = document.getElementById('resendVerificationCode');
     const resendCountdown = document.getElementById('resendCodeCountdown');
+    const codeExpiry = document.getElementById('emailCodeExpiry');
     const registrationFormStatus = document.getElementById('registrationFormStatus');
     const profileStorageKey = 'devmonitor.registration.profile.v1';
     let activeRegistration = null;
     let registrationStartPending = false;
     let resendTimer = null;
+    let stopCodeExpiry = () => {};
+
+    // Email codes expire after 5 minutes on the server; show the time left.
+    function startCodeExpiry(seconds) {
+        stopCodeExpiry();
+        if (!codeExpiry || !window.DevMonitorCodeTimer) return;
+        stopCodeExpiry = window.DevMonitorCodeTimer.start(codeExpiry, seconds);
+    }
 
     function setRegistrationFormStatus(message = '') {
         registrationFormStatus.textContent = message;
@@ -306,6 +315,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function resetClosedRegistration(message) {
         activeRegistration = null;
         window.clearInterval(resendTimer);
+        stopCodeExpiry();
         emailStage.hidden = true;
         authenticatorStage.hidden = true;
         document.getElementById('authenticatorQrCode').removeAttribute('src');
@@ -380,6 +390,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 'info'
             );
             updateResendCountdown(state.resend_in_seconds);
+            startCodeExpiry(state.code_expires_in_seconds);
         }
         if (!verificationDialog.open) verificationDialog.showModal();
     }
@@ -448,6 +459,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         activeRegistration = null;
         window.clearInterval(resendTimer);
+        stopCodeExpiry();
         clearSavedProfile();
         showResumeBanner();
         setRegistrationFormStatus();
@@ -553,6 +565,8 @@ document.addEventListener('DOMContentLoaded', () => {
             );
             setDialogStatus(result.message, 'success');
             updateResendCountdown(result.resend_in_seconds);
+            startCodeExpiry(result.code_expires_in_seconds);
+            document.getElementById('emailVerificationCode').value = '';
         } catch (error) {
             setDialogStatus(error.message, 'error');
             const cooldown = error.message.match(/wait\s+(\d+)\s+seconds?/i);
