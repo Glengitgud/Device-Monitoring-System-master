@@ -1,4 +1,4 @@
-"""Device registration rules: MAC duplicate prevention."""
+"""Device registration rules: MAC duplicate prevention and the per-user device limit."""
 
 import unittest
 
@@ -12,6 +12,8 @@ from device_monitoring_prototype.models import (
     db,
 )
 from device_monitoring_prototype.services import (
+    MAX_DEVICES_PER_USER,
+    DeviceLimitError,
     ValidationError,
     archive_device,
     hash_password,
@@ -198,6 +200,62 @@ class DeviceRegistrationRulesTest(unittest.TestCase):
             self.client.get("/api/device-verification-status").json["registration_rejection"]
         )
         self.assertTrue(csrf)
+
+    # -- device limit -----------------------------------------------------------
+    def test_standard_user_can_register_at_most_four_devices(self):
+        owner = self.make_user("limitowner")
+        tokens = [self.issue_token(owner) for _ in range(MAX_DEVICES_PER_USER + 1)]
+        for index, token in enumerate(tokens[:MAX_DEVICES_PER_USER]):
+            response = self.enroll(token, f"3C:22:FB:00:00:0{index}", name=f"Device {index}")
+            self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+
+        refused = self.enroll(tokens[-1], "3C:22:FB:00:00:09", name="Fifth device")
+        self.assertEqual(refused.status_code, 409)
+        self.assertIn(f"up to {MAX_DEVICES_PER_USER} devices", refused.json["error"])
+        with self.app.app_context():
+            self.assertEqual(Device.query.filter_by(owner_user_id=owner).count(), 4)
+        # No new download or app link is issued while the account is full.
+        with self.app.test_request_context():
+            with self.assertRaises(DeviceLimitError):
+                issue_direct_agent_download_token(db.session.get(User, owner))
+
+    def test_archived_devices_do_not_count_toward_the_limit(self):
+        owner = self.make_user("archivelimit")
+        self.add_devices(owner, MAX_DEVICES_PER_USER - 1)
+        self.add_devices(owner, 3, lifecycle_status="archived")
+        self.assertEqual(self.enroll_for(owner).status_code, 201)
+
+        # The account is full again, so an archived device cannot be restored.
+        with self.app.test_request_context():
+            archived = Device.query.filter_by(
+                owner_user_id=owner, lifecycle_status="archived"
+            ).first()
+            with self.assertRaises(DeviceLimitError):
+                restore_device(archived)
+
+    def test_manual_device_creation_respects_the_limit(self):
+        csrf = self.register_and_login()
+        with self.app.app_context():
+            user_id = User.query.filter_by(username="testuser").one().id
+        self.add_devices(user_id, MAX_DEVICES_PER_USER)
+        self.client.get("/dashboard")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        response = self.client.post(
+            "/api/devices",
+            headers={"X-CSRF-Token": csrf},
+            json={"name": "Manual PC", "type": "Desktop", "os": "Windows 11"},
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("up to 4 devices", response.json["error"])
+
+    def test_administrators_are_exempt_from_the_limit(self):
+        from device_monitoring_prototype.services import ensure_device_capacity
+
+        admin = self.make_user("limitadmin", admin=True)
+        self.add_devices(admin, MAX_DEVICES_PER_USER + 1)
+        with self.app.app_context():
+            ensure_device_capacity(db.session.get(User, admin))
 
 
 if __name__ == "__main__":

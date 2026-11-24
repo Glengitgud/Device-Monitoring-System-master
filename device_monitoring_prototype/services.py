@@ -31,6 +31,9 @@ REGISTRATION_TOKEN_LIFETIME = timedelta(minutes=30)
 # second download or a "Link this device" tap does not silently invalidate an
 # agent that was already downloaded. Older extras are revoked.
 MAX_PENDING_DIRECT_TOKENS = 5
+# A standard user may own at most this many active (non-archived) devices.
+# Administrators do not register devices and are exempt.
+MAX_DEVICES_PER_USER = 4
 SPECIFICATION_KEYS = {
     "cpu_name",
     "ram_capacity_bytes",
@@ -78,6 +81,10 @@ class RegistrationTokenError(ValidationError):
 
 class DuplicateDeviceError(ValidationError):
     """Raised when a device's MAC address is already registered."""
+
+
+class DeviceLimitError(ValidationError):
+    """Raised when a standard user already owns the maximum number of devices."""
 
 
 class MonitoringCredentialError(ValidationError):
@@ -355,6 +362,21 @@ def ensure_mac_address_available(owner, mac_address, *, exclude_device_id=None):
     )
 
 
+def active_device_count(user):
+    return Device.query.filter_by(owner_user_id=user.id, lifecycle_status="active").count()
+
+
+def ensure_device_capacity(user):
+    """Raise DeviceLimitError when a standard user cannot add another device."""
+    if user.is_admin:
+        return
+    if active_device_count(user) >= MAX_DEVICES_PER_USER:
+        raise DeviceLimitError(
+            f"You can register up to {MAX_DEVICES_PER_USER} devices. Archive a device "
+            "in My Devices before registering a new one."
+        )
+
+
 def _reject_registration(registration, error, *, mac_address=None):
     """Record why an enrollment was refused so the website can show it."""
     registration.rejected_at = datetime.now(timezone.utc)
@@ -382,6 +404,7 @@ def create_device(owner, data):
     status = status.strip().lower() if isinstance(status, str) else ""
     if status not in {"online", "offline", "maintenance", "unknown"}:
         raise ValidationError("Invalid device status.")
+    ensure_device_capacity(owner)
 
     device = Device(
         asset_tag=f"DM-{uuid.uuid4().hex[:16].upper()}",
@@ -405,6 +428,7 @@ def create_device(owner, data):
 
 
 def issue_device_registration_token(user, *, revoke_unused=True):
+    ensure_device_capacity(user)
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     if revoke_unused:
@@ -687,7 +711,8 @@ def register_agent_device(token, data):
     # conflict is resolved (for example after an administrator removes the device).
     try:
         ensure_mac_address_available(registration.user, specifications["mac_address"])
-    except DuplicateDeviceError as error:
+        ensure_device_capacity(registration.user)
+    except (DuplicateDeviceError, DeviceLimitError) as error:
         _reject_registration(registration, error, mac_address=specifications["mac_address"])
         raise
 
@@ -820,6 +845,7 @@ def restore_device(device):
     if device.lifecycle_status != "archived":
         raise ValidationError("Only archived devices can be restored.")
     ensure_mac_address_available(device.owner, device.mac_address, exclude_device_id=device.id)
+    ensure_device_capacity(device.owner)
     device.lifecycle_status = "active"
     device.archived_at = None
     device.archived_by_user_id = None

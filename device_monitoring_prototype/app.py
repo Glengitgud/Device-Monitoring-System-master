@@ -141,6 +141,7 @@ from device_monitoring_prototype.services import (
     MONITORING_ACTIVATION_WINDOW,
     MONITORING_OFFLINE_AFTER,
     DatabaseSetupError,
+    DeviceLimitError,
     DuplicateDeviceError,
     HeartbeatRateLimitError,
     MonitoringCredentialError,
@@ -1500,6 +1501,8 @@ def create_app(test_config=None):
                 )
             token, expires_at = issue_device_registration_token(current_user)
             qr_payload = registration_qr_payload(token, expires_at)
+        except DeviceLimitError as error:
+            return api_error(error, 409)
         except ValueError as error:
             return api_error(error, 500)
         response = jsonify(**qr_payload)
@@ -2076,7 +2079,7 @@ def create_app(test_config=None):
         try:
             token, _expires_at = issue_direct_agent_download_token(current_user)
         except ValidationError as error:
-            return failure(str(error), 403)
+            return failure(str(error), 409 if isinstance(error, DeviceLimitError) else 403)
         submission_url = f"{base_url}{url_for('submit_agent_enrollment')}"
         try:
             package_bytes = build(token, submission_url)
@@ -2235,7 +2238,7 @@ def create_app(test_config=None):
         try:
             token, expires_at = issue_direct_agent_download_token(current_user, channel="link")
         except ValidationError as error:
-            return None, (str(error), 403)
+            return None, (str(error), 409 if isinstance(error, DeviceLimitError) else 403)
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         link = f"devmonitor://enroll?{urlencode({'server': base_url, 'token': token})}"
@@ -2291,7 +2294,7 @@ def create_app(test_config=None):
             device = register_agent_device(token, api_data())
         except RegistrationTokenError as error:
             return api_error(error, 401)
-        except DuplicateDeviceError as error:
+        except (DuplicateDeviceError, DeviceLimitError) as error:
             return api_error(error, 409)
         except ValidationError as error:
             return api_error(error)
@@ -2451,6 +2454,8 @@ def create_app(test_config=None):
             )
         try:
             device = create_device(current_user, api_data())
+        except DeviceLimitError as error:
+            return api_error(error, 409)
         except ValidationError as error:
             return api_error(error)
         return jsonify(serialize_device(device)), 201
@@ -2721,7 +2726,7 @@ def create_app(test_config=None):
         can_access_device(device)
         try:
             restore_device(device)
-        except DuplicateDeviceError as error:
+        except (DuplicateDeviceError, DeviceLimitError) as error:
             return api_error(error, 409)
         except ValidationError as error:
             return api_error(error)
