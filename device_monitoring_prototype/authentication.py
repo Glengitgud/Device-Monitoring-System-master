@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import math
 import re
 import secrets
 import smtplib
@@ -22,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from device_monitoring_prototype.models import (
     ActivityLog,
     EmailVerification,
+    LoginVerification,
     RegistrationChallenge,
     Role,
     User,
@@ -48,6 +50,25 @@ TOTP_PERIOD_SECONDS = 30
 # Registration and sign-in share this window so an enrolled authenticator that
 # passes registration also passes sign-in.
 TOTP_VALID_WINDOW_STEPS = 1
+# The administrator signs in with a password plus a code emailed to the
+# administrator mailbox (ADMIN_EMAIL). Codes share the 5-minute lifetime.
+DEFAULT_ADMIN_EMAIL = "devmonitor.system@gmail.com"
+ADMIN_LOGIN_CODE_LIFETIME = EMAIL_CODE_LIFETIME
+# Wording for the two kinds of code email (subject, heading, intro, ignore note).
+EMAIL_CODE_PURPOSES = {
+    "registration": (
+        "Your DevMonitor verification code",
+        "Verify your email address",
+        "Use this verification code to continue creating your account:",
+        "If you did not request an account, you can ignore this message.",
+    ),
+    "admin_login": (
+        "Your DevMonitor administrator sign-in code",
+        "Administrator sign-in",
+        "Use this code to finish signing in to the DevMonitor administrator account:",
+        "If you did not just sign in, change the administrator password immediately.",
+    ),
+}
 
 
 class RegistrationRestartRequired(ValidationError):
@@ -143,7 +164,7 @@ def _validate_registration(data, exclude_challenge_id=None):
     return full_name, username, email, password
 
 
-def _send_email(email, code):
+def _send_email(email, code, purpose="registration"):
     host = current_app.config.get("MAIL_SERVER")
     if not host:
         current_app.logger.error("SMTP host is not configured.")
@@ -156,8 +177,9 @@ def _send_email(email, code):
             "We could not prepare the verification email. Please check the address and try again."
         )
 
+    subject, heading, intro, ignore_note = EMAIL_CODE_PURPOSES[purpose]
     message = EmailMessage()
-    message["Subject"] = "Your DevMonitor verification code"
+    message["Subject"] = subject
     username = current_app.config.get("MAIL_USERNAME")
     sender = current_app.config.get("MAIL_DEFAULT_SENDER") or username
     if host.lower() == "smtp.gmail.com" and (
@@ -173,19 +195,18 @@ def _send_email(email, code):
     message["To"] = email
     message.set_content(
         "DevMonitor\n\n"
-        f"Your email verification code is: {code}\n\n"
-        "This code expires in 5 minutes. If you did not request an account, "
-        "you can ignore this message."
+        f"{intro} {code}\n\n"
+        f"This code expires in 5 minutes. {ignore_note}"
     )
     message.add_alternative(
         "<!doctype html><html><body style=\"font-family:Arial,sans-serif;color:#172033\">"
         "<main style=\"max-width:560px;margin:24px auto;padding:24px;border:1px solid #dbe2ea;"
         "border-radius:12px\"><p style=\"color:#26408b;font-weight:bold\">DevMonitor</p>"
-        "<h1 style=\"font-size:22px\">Verify your email address</h1>"
-        "<p>Use this verification code to continue creating your account:</p>"
+        f"<h1 style=\"font-size:22px\">{heading}</h1>"
+        f"<p>{intro}</p>"
         f"<p style=\"font-size:30px;font-weight:bold;letter-spacing:6px\">{code}</p>"
-        "<p>This code expires in <strong>5 minutes</strong>. If you did not request "
-        "an account, you can ignore this message.</p></main></body></html>",
+        f"<p>This code expires in <strong>5 minutes</strong>. {ignore_note}</p>"
+        "</main></body></html>",
         subtype="html",
     )
 
@@ -715,6 +736,91 @@ def complete_registration(challenge):
     except IntegrityError as error:
         db.session.rollback()
         raise ValidationError("That username or email address is already registered.") from error
+
+
+def _login_code_hash(user_id, code):
+    return _email_code_hash(f"admin-login-{user_id}", code)
+
+
+def _latest_login_verification(user):
+    return (
+        LoginVerification.query.filter_by(user_id=user.id, used_at=None)
+        .order_by(LoginVerification.created_at.desc(), LoginVerification.id.desc())
+        .first()
+    )
+
+
+def login_code_status(user):
+    """Seconds until the current sign-in code expires and until a resend is allowed."""
+    verification = _latest_login_verification(user)
+    if verification is None:
+        return {"expires_in_seconds": 0, "resend_in_seconds": 0}
+    now = utcnow()
+    expires_in = (verification.expires_at - now).total_seconds()
+    resend_in = (verification.created_at + EMAIL_RESEND_INTERVAL - now).total_seconds()
+    return {
+        "expires_in_seconds": max(0, math.ceil(expires_in)),
+        "resend_in_seconds": int(resend_in) + 1 if resend_in > 0 else 0,
+    }
+
+
+def send_admin_login_code(user, *, resend=False):
+    """Email a fresh 6-digit sign-in code to the administrator's mailbox."""
+    now = utcnow()
+    previous = _latest_login_verification(user)
+    if resend and previous is not None and previous.created_at + EMAIL_RESEND_INTERVAL > now:
+        wait_seconds = int((previous.created_at + EMAIL_RESEND_INTERVAL - now).total_seconds()) + 1
+        raise ValidationError(f"Please wait {wait_seconds} seconds before requesting another code.")
+    recent_sends = LoginVerification.query.filter(
+        LoginVerification.user_id == user.id,
+        LoginVerification.created_at > now - timedelta(hours=1),
+    ).count()
+    if recent_sends >= EMAIL_SENDS_PER_HOUR:
+        raise ValidationError(
+            "Too many sign-in codes were requested. Please wait before trying again."
+        )
+    LoginVerification.query.filter_by(user_id=user.id, used_at=None).update(
+        {"expires_at": now}, synchronize_session=False
+    )
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    verification = LoginVerification(
+        user_id=user.id,
+        code_hash=_login_code_hash(user.id, code),
+        created_at=now,
+        expires_at=now + ADMIN_LOGIN_CODE_LIFETIME,
+        attempts=0,
+    )
+    db.session.add(verification)
+    db.session.commit()
+    try:
+        _send_email(user.email, code, purpose="admin_login")
+    except EmailDeliveryError:
+        verification.expires_at = utcnow()
+        db.session.commit()
+        current_app.logger.warning("Administrator sign-in email failed (user_id=%s).", user.id)
+        raise
+    return verification
+
+
+def verify_admin_login_code(user, code):
+    """Accept the newest unused, unexpired code; raises ValidationError otherwise."""
+    verification = _latest_login_verification(user)
+    if verification is None or verification.expires_at <= utcnow():
+        raise ValidationError(
+            "That sign-in code has expired. Select Resend code to get a new one."
+        )
+    if verification.attempts >= MAX_VERIFICATION_ATTEMPTS:
+        raise ValidationError("Too many incorrect codes. Select Resend code to get a new one.")
+    if not EMAIL_CODE_PATTERN.fullmatch(code or "") or not hmac.compare_digest(
+        verification.code_hash, _login_code_hash(user.id, code)
+    ):
+        verification.attempts += 1
+        db.session.commit()
+        if verification.attempts >= MAX_VERIFICATION_ATTEMPTS:
+            raise ValidationError("Too many incorrect codes. Select Resend code to get a new one.")
+        raise ValidationError("That sign-in code is incorrect. Please try again.")
+    verification.used_at = utcnow()
+    db.session.commit()
 
 
 def verify_login_totp(user, code):

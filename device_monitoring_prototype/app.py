@@ -99,6 +99,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 from device_monitoring_prototype.authentication import (
+    DEFAULT_ADMIN_EMAIL,
     EMAIL_RESEND_INTERVAL,
     MAX_VERIFICATION_ATTEMPTS,
     EmailDeliveryError,
@@ -106,10 +107,13 @@ from device_monitoring_prototype.authentication import (
     cancel_registration,
     check_smtp_connection,
     complete_registration,
+    login_code_status,
     registration_authenticator_qr,
     resend_email_code,
+    send_admin_login_code,
     send_contact_message,
     start_registration,
+    verify_admin_login_code,
     verify_email_code,
     verify_login_totp,
     verify_registration_totp,
@@ -328,6 +332,8 @@ def create_app(test_config=None):
         MAIL_TIMEOUT=int(os.environ.get("MAIL_TIMEOUT", "15")),
         # Inbox for the homepage "Contact us" form; defaults to MAIL_DEFAULT_SENDER.
         CONTACT_RECIPIENT=os.environ.get("CONTACT_RECIPIENT", "").strip(),
+        # Mailbox of the administrator account; admin sign-in codes are sent here.
+        ADMIN_EMAIL=(os.environ.get("ADMIN_EMAIL") or DEFAULT_ADMIN_EMAIL).strip().lower(),
         SQLALCHEMY_DATABASE_URI=_database_uri(),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         SQLALCHEMY_ENGINE_OPTIONS=_database_engine_options(),
@@ -859,6 +865,78 @@ def create_app(test_config=None):
         session["contact_sent_at"] = recent + [now]
         return jsonify(message="Thanks! Your message has been sent. We will reply by email.")
 
+    # Administrator sign-in, step 2: a 6-digit code emailed to the administrator
+    # mailbox (valid for 5 minutes). Standard users use their authenticator app.
+    def admin_email_code_page(user, status=200):
+        timing = login_code_status(user)
+        return render_template(
+            "login.html",
+            requires_email_code=True,
+            login_identifier=user.username,
+            code_email=mask_email(user.email),
+            code_expires_in=timing["expires_in_seconds"],
+            resend_in=timing["resend_in_seconds"],
+        ), status
+
+    def log_admin_login_event(user, event_type, **details):
+        db.session.add(
+            ActivityLog(
+                actor_user_id=user.id,
+                event_type=event_type,
+                entity_type="user",
+                entity_id=user.id,
+                details={"username": user.username, **details},
+            )
+        )
+        db.session.commit()
+
+    def start_admin_email_login(user, next_url):
+        session.clear()
+        session["pending_login_user_id"] = user.id
+        session["pending_login_next"] = next_url
+        session["pending_login_method"] = "email"
+        try:
+            send_admin_login_code(user)
+        except EmailDeliveryError as error:
+            session.clear()
+            log_admin_login_event(user, "auth.admin_login_code_failed", reason="email_delivery")
+            flash(str(error), "danger")
+            return render_template("login.html", login_identifier=user.username), 503
+        except ValidationError as error:
+            flash(str(error), "warning")
+        else:
+            log_admin_login_event(user, "auth.admin_login_code_sent")
+        return admin_email_code_page(user)
+
+    def finish_admin_email_login(user):
+        if request.form.get("resend_code") == "1":
+            try:
+                send_admin_login_code(user, resend=True)
+            except ValidationError as error:
+                flash(str(error), "warning")
+                return admin_email_code_page(user, 429)
+            except EmailDeliveryError as error:
+                flash(str(error), "danger")
+                return admin_email_code_page(user, 503)
+            log_admin_login_event(user, "auth.admin_login_code_sent", resend=True)
+            flash("A new sign-in code has been sent.", "success")
+            return admin_email_code_page(user)
+        try:
+            verify_admin_login_code(user, request.form.get("email_code", "").strip())
+        except ValidationError as error:
+            log_admin_login_event(user, "auth.login_2fa_failed", method="email")
+            flash(str(error), "danger")
+            return admin_email_code_page(user, 401)
+        next_url = session.pop("pending_login_next", "")
+        session.pop("pending_login_user_id", None)
+        session.pop("pending_login_method", None)
+        login_user(user, remember=False, fresh=True)
+        user.last_login_at = datetime.now(timezone.utc)
+        log_admin_login_event(
+            user, "auth.login_succeeded", two_factor=True, method="email"
+        )
+        return redirect(signed_in_landing_url(user, next_url))
+
     @app.route("/login", methods=["GET", "POST"])
     def login():
         if current_user.is_authenticated and request.method == "GET":
@@ -867,6 +945,12 @@ def create_app(test_config=None):
             pending_user_id = session.get("pending_login_user_id")
             if pending_user_id:
                 pending_user = db.session.get(User, pending_user_id)
+                if (
+                    pending_user
+                    and pending_user.is_active
+                    and session.get("pending_login_method") == "email"
+                ):
+                    return admin_email_code_page(pending_user)
                 if pending_user and pending_user.is_active and pending_user.totp_enabled:
                     return render_template(
                         "login.html",
@@ -875,6 +959,7 @@ def create_app(test_config=None):
                     )
                 session.pop("pending_login_user_id", None)
                 session.pop("pending_login_next", None)
+                session.pop("pending_login_method", None)
                 flash("Sign-in expired. Please enter your credentials again.", "warning")
         if request.method == "POST":
             pending_user_id = session.get("pending_login_user_id")
@@ -883,11 +968,19 @@ def create_app(test_config=None):
                 if request.form.get("back_to_login") == "1":
                     next_url = session.pop("pending_login_next", "")
                     session.pop("pending_login_user_id", None)
+                    session.pop("pending_login_method", None)
                     return render_template(
                         "login.html",
                         login_identifier=user.username if user else "",
                         next_url=next_url,
                     )
+                if (
+                    user
+                    and user.is_active
+                    and user.is_admin
+                    and session.get("pending_login_method") == "email"
+                ):
+                    return finish_admin_email_login(user)
                 if not user or not user.is_active or not user.totp_enabled:
                     session.pop("pending_login_user_id", None)
                     session.pop("pending_login_next", None)
@@ -974,6 +1067,8 @@ def create_app(test_config=None):
                 target = urlsplit(urljoin(request.host_url, next_url))
                 if target.scheme not in {"http", "https"} or target.netloc != request.host:
                     next_url = ""
+            if user.is_admin:
+                return start_admin_email_login(user, next_url)
             if user.totp_enabled:
                 session.clear()
                 user.totp_attempts = 0
@@ -3139,14 +3234,16 @@ def create_app(test_config=None):
             func.lower(User.username) == DEFAULT_ADMIN_USERNAME
         ).one_or_none()
         created_admin = default_admin is None
+        admin_email = app.config["ADMIN_EMAIL"]
+        email_owner = User.query.filter(func.lower(User.email) == admin_email).first()
         if default_admin is None:
-            if User.query.filter(func.lower(User.email) == "admin@localhost").first():
+            if email_owner is not None:
                 raise click.ClickException(
-                    "Cannot create the default admin account because admin@localhost is already in use."
+                    f"Cannot create the default admin account because {admin_email} is already in use."
                 )
             default_admin = User(
                 username=DEFAULT_ADMIN_USERNAME,
-                email="admin@localhost",
+                email=admin_email,
                 full_name="Administrator",
                 password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
                 status="active",
@@ -3163,6 +3260,16 @@ def create_app(test_config=None):
                     details={"username": default_admin.username},
                 )
             )
+        elif default_admin.email.lower() != admin_email:
+            # Sign-in codes go to the administrator mailbox, so move the account there.
+            if email_owner is not None:
+                click.echo(
+                    f"Warning: {admin_email} belongs to another account; the Administrator "
+                    f"keeps {default_admin.email} and receives sign-in codes there."
+                )
+            else:
+                default_admin.email = admin_email
+                click.echo(f"Administrator email set to {admin_email}.")
         if roles["Administrator"] not in default_admin.roles:
             default_admin.roles.append(roles["Administrator"])
         db.session.commit()
@@ -3409,24 +3516,65 @@ def create_app(test_config=None):
 
     @app.cli.command("create-admin")
     @click.option("--username", prompt=True)
-    @click.option("--email", prompt=True)
+    @click.option(
+        "--email",
+        default=lambda: app.config["ADMIN_EMAIL"],
+        show_default="ADMIN_EMAIL (devmonitor.system@gmail.com)",
+        help="Must be the administrator mailbox; sign-in codes are sent there.",
+    )
     @click.option("--full-name", prompt="Full name")
-    def create_admin_command(username, email, full_name):
-        """Create an administrator account without exposing a password in shell history."""
+    @click.option(
+        "--reset-password",
+        is_flag=True,
+        help="Set a new password for the existing administrator that uses this email.",
+    )
+    def create_admin_command(username, email, full_name, reset_password):
+        """Create the administrator account (or reset its password) without exposing it in shell history.
+
+        The administrator signs in with this password plus a 6-digit code emailed
+        to ADMIN_EMAIL, so the account must use that mailbox.
+        """
         username = username.strip()
         email = email.strip().lower()
         full_name = full_name.strip()
+        admin_email = app.config["ADMIN_EMAIL"]
+        if email != admin_email:
+            raise click.ClickException(
+                f"The administrator account must use {admin_email} (set ADMIN_EMAIL to change it)."
+            )
+        if reset_password:
+            administrator = User.query.filter(func.lower(User.email) == email).one_or_none()
+            if administrator is None or not administrator.is_admin:
+                raise click.ClickException(f"No administrator account uses {email}.")
+            password = click.prompt("New password", hide_input=True, confirmation_prompt=True)
+            try:
+                validate_password(password)
+            except ValidationError as error:
+                raise click.ClickException(str(error)) from error
+            administrator.password_hash = hash_password(password)
+            db.session.add(
+                ActivityLog(
+                    event_type="auth.admin_password_reset",
+                    entity_type="user",
+                    entity_id=administrator.id,
+                    details={"username": administrator.username, "source": "cli"},
+                )
+            )
+            db.session.commit()
+            click.echo(f"Password updated for administrator {administrator.username!r}.")
+            return
         if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
             raise click.ClickException("Username must be 3-64 letters, numbers, dots, dashes, or underscores.")
-        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
-            raise click.ClickException("Enter a valid email address.")
         if not full_name or len(full_name) > 120:
             raise click.ClickException("Full name is required and must be at most 120 characters.")
         if User.query.filter(
             (func.lower(User.username) == username.lower())
             | (func.lower(User.email) == email.lower())
         ).first():
-            raise click.ClickException("That username or email address already exists.")
+            raise click.ClickException(
+                "That username or email address already exists. Use --reset-password "
+                "to change the existing administrator's password."
+            )
         role = Role.query.filter_by(name="Administrator").one_or_none()
         if role is None:
             raise click.ClickException(

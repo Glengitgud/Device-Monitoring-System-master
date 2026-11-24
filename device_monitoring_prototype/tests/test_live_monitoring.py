@@ -380,9 +380,9 @@ class LiveMonitoringApiTest(unittest.TestCase):
         admin_client.get("/login")
         with admin_client.session_transaction() as session:
             admin_csrf = session["_csrf_token"]
-        login = admin_client.post(
-            "/login",
-            data={
+        login = base_tests.complete_admin_login(
+            admin_client,
+            {
                 "csrf_token": admin_csrf,
                 "username": "monitoradmin",
                 "password": "monitor-admin-password",

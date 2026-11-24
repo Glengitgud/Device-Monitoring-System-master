@@ -1958,6 +1958,23 @@ code {
     text-align: center;
 }
 
+/* 5-minute countdown under email code fields (static/js/code-expiry.js). */
+.code-expiry {
+    margin: 0.5rem 0 0;
+    font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--dm-text-muted);
+}
+
+.code-expiry.is-expiring {
+    color: #fcd34d;
+}
+
+.code-expiry.is-expired {
+    color: #fca5a5;
+    font-weight: 600;
+}
+
 .authenticator-qr {
     display: block;
     width: min(72vw, 17rem);

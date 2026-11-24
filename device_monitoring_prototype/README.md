@@ -35,7 +35,7 @@ C:\xampp\mysql\bin\mysql.exe --host=localhost --port=3306 --user=root --database
 python -m flask --app device_monitoring_prototype.app check-db
 ```
 
-On a new installation, `init-db` creates the reserved `admin` account with the bootstrap password `admin123` and the Administrator role. Re-running initialization does not reset an existing password or status; use the supported account-management process to change those values. This development credential must be changed before deployment. The reserved account is excluded from user management and cannot be created through public registration. Use `create-admin` only when adding another administrator.
+On a new installation, `init-db` creates the reserved `admin` account with the bootstrap password `admin123` and the Administrator role. Re-running initialization does not reset an existing password or status; use the supported account-management process to change those values. This development credential must be changed before deployment. The reserved account is excluded from user management and cannot be created through public registration. The administrator account uses `ADMIN_EMAIL` (default `devmonitor.system@gmail.com`); after the password, sign-in asks for a 6-digit code emailed there, valid for 5 minutes, so SMTP must be configured. `create-admin` only accepts that address; `create-admin --reset-password` changes the administrator password.
 
 Active devices can be archived and restored from the **Archived Devices** page. The lifecycle state is stored separately from online/offline device status. Administrator delete actions mark a device as deleted without physically removing the device or its history; there is no hard-delete route.
 

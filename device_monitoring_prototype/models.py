@@ -177,6 +177,33 @@ class EmailVerification(db.Model):
     )
 
 
+class LoginVerification(db.Model):
+    """A 6-digit sign-in code emailed to an administrator (second sign-in step)."""
+
+    __tablename__ = "login_verifications"
+    __table_args__ = (
+        db.Index("ix_login_verifications_user_created", "user_id", "created_at"),
+        db.Index("ix_login_verifications_expiry", "expires_at"),
+    )
+
+    id = db.Column(ID_TYPE, primary_key=True)
+    user_id = db.Column(
+        ID_TYPE, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    code_hash = db.Column(db.String(64), nullable=False)
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    attempts = db.Column(db.Integer, nullable=False, server_default="0")
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    used_at = db.Column(db.DateTime(timezone=True))
+
+    user = db.relationship(
+        "User",
+        backref=db.backref("login_verifications", cascade="all, delete-orphan"),
+    )
+
+
 class Role(db.Model):
     __tablename__ = "roles"
 

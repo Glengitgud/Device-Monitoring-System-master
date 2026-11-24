@@ -30,7 +30,25 @@
             <!-- Login Form -->
             <form id="loginForm" method="post" action="{{ url_for('login') }}" novalidate>
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                {% if not requires_totp %}
+                {% if requires_email_code %}
+                <p class="text-center">
+                    Signing in as <strong>{{ login_identifier }}</strong>
+                </p>
+                <p class="text-center small text-muted">
+                    We emailed a 6-digit sign-in code to <strong>{{ code_email }}</strong>.
+                </p>
+                <div class="mb-3">
+                    <label for="email_code" class="form-label">Email sign-in code</label>
+                    <input id="email_code" name="email_code" class="form-control"
+                           inputmode="numeric" autocomplete="one-time-code"
+                           pattern="[0-9]{6}" minlength="6" maxlength="6" required autofocus
+                           aria-required="true" aria-describedby="emailCodeExpiry">
+                    <p id="emailCodeExpiry" class="code-expiry" role="timer" aria-live="polite"
+                       data-code-expires-in="{{ code_expires_in }}">
+                        This code expires in 5 minutes.
+                    </p>
+                </div>
+                {% elif not requires_totp %}
                 <input type="hidden" name="next"
                        value="{{ next_url|default(request.args.get('next', ''), true) }}">
                 <div class="mb-3">
@@ -89,13 +107,20 @@
                     {% endfor %}
                 {% endwith %}
                 <button type="submit" class="btn btn-primary w-100 login-btn" id="loginBtn">
-                    {% if requires_totp %}
+                    {% if requires_totp or requires_email_code %}
                     <i class="bi bi-shield-lock me-1"></i>Verify code
                     {% else %}
                     <i class="bi bi-box-arrow-in-right me-1"></i>Sign In
                     {% endif %}
                 </button>
-                {% if requires_totp %}
+                {% if requires_email_code %}
+                <button type="submit" class="btn btn-link w-100 mt-1" id="resendLoginCode"
+                        name="resend_code" value="1" formnovalidate
+                        data-resend-in="{{ resend_in }}">
+                    Resend code
+                </button>
+                {% endif %}
+                {% if requires_totp or requires_email_code %}
                 <button type="submit" class="btn btn-outline-secondary w-100 mt-2"
                         name="back_to_login" value="1" formnovalidate>
                     Back to sign in
@@ -116,6 +141,7 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js">
     </script>
     <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/code-expiry.js') }}" defer></script>
     <script src="{{ url_for('static', filename='js/register.js') }}" defer></script>
     <script src="{{ url_for('static', filename='js/password-toggle.js') }}" defer></script>
 </body>

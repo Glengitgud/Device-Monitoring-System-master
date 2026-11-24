@@ -67,6 +67,23 @@ def _totp_code(secret, counter):
     return f"{value % 1_000_000:06d}"
 
 
+def complete_admin_login(client, data):
+    """Administrator sign-in: password, then the 6-digit code emailed to the admin.
+
+    Returns the response to the final step (or to the password step when no code
+    was sent, e.g. wrong credentials).
+    """
+    with patch("device_monitoring_prototype.authentication._send_email") as send_email:
+        response = client.post("/login", data=data)
+    if not send_email.called:
+        return response
+    with client.session_transaction() as session:
+        csrf = session["_csrf_token"]
+    return client.post(
+        "/login", data={"csrf_token": csrf, "email_code": send_email.call_args.args[1]}
+    )
+
+
 class DatabaseIntegrationTest(unittest.TestCase):
     def setUp(self):
         self.app = create_app(
@@ -699,7 +716,7 @@ class DatabaseIntegrationTest(unittest.TestCase):
     def test_check_db_command_validates_declared_schema_and_row_counts(self):
         result = self.app.test_cli_runner().invoke(args=["check-db"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("18 tables", result.output)
+        self.assertIn("19 tables", result.output)
         self.assertIn(
             "primary/unique keys, foreign keys, and check constraints",
             result.output,
@@ -771,9 +788,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.client.get("/login")
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
-        response = self.client.post(
-            "/login",
-            data={
+        response = complete_admin_login(
+            self.client,
+            {
                 "csrf_token": token,
                 "username": "admin",
                 "password": "old-admin-password",
@@ -1141,9 +1158,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
         admin_client.get("/login")
         with admin_client.session_transaction() as session:
             admin_csrf = session["_csrf_token"]
-        admin_login = admin_client.post(
-            "/login",
-            data={
+        admin_login = complete_admin_login(
+            admin_client,
+            {
                 "csrf_token": admin_csrf,
                 "username": "admin",
                 "password": "admin123",
@@ -2199,9 +2216,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.client.get("/login")
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
-        login = self.client.post(
-            "/login",
-            data={
+        login = complete_admin_login(
+            self.client,
+            {
                 "csrf_token": token,
                 "username": "refreshadmin",
                 "password": "refresh-admin-password",
@@ -2350,9 +2367,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.client.get("/login")
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
-        login = self.client.post(
-            "/login",
-            data={
+        login = complete_admin_login(
+            self.client,
+            {
                 "csrf_token": token,
                 "username": "deviceadmin",
                 "password": "device-admin-password",
@@ -2550,9 +2567,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.client.get("/login")
         with self.client.session_transaction() as session:
             csrf = session["_csrf_token"]
-        login = self.client.post(
-            "/login",
-            data={
+        login = complete_admin_login(
+            self.client,
+            {
                 "csrf_token": csrf,
                 "username": "rootadmin",
                 "password": "admin-password-long-enough",
@@ -2636,9 +2653,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
         self.client.get("/login")
         with self.client.session_transaction() as session:
             token = session["_csrf_token"]
-        response = self.client.post(
-            "/login",
-            data={
+        response = complete_admin_login(
+            self.client,
+            {
                 "csrf_token": token,
                 "username": "rootadmin",
                 "password": "admin-password-long-enough",
@@ -2933,9 +2950,9 @@ class DatabaseIntegrationTest(unittest.TestCase):
         admin_client.get("/login")
         with admin_client.session_transaction() as session:
             admin_csrf = session["_csrf_token"]
-        admin_login = admin_client.post(
-            "/login",
-            data={
+        admin_login = complete_admin_login(
+            admin_client,
+            {
                 "csrf_token": admin_csrf,
                 "username": "admin",
                 "password": "admin123",

@@ -65,6 +65,21 @@ CREATE TABLE email_verifications (
         REFERENCES registration_challenges (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE login_verifications (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    user_id BIGINT NOT NULL,
+    code_hash CHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    attempts INT NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    used_at DATETIME NULL,
+    PRIMARY KEY (id),
+    KEY ix_login_verifications_user_created (user_id, created_at),
+    KEY ix_login_verifications_expiry (expires_at),
+    CONSTRAINT fk_login_verifications_user FOREIGN KEY (user_id)
+        REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE roles (
     id BIGINT NOT NULL AUTO_INCREMENT,
     name VARCHAR(64) NOT NULL,

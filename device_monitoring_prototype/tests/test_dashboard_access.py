@@ -306,7 +306,15 @@ class DashboardAccessTest(unittest.TestCase):
         self.assertEqual(self.client.get("/device-verification").status_code, 404)
         self.assertEqual(self.client.get("/download").status_code, 200)
         self.assertEqual(self.client.post("/api/device-link", headers={"X-CSRF-Token": csrf}).status_code, 403)
-        self.assertEqual(self.sign_in().location, "/dashboard")
+        # Administrators confirm a code emailed to them instead of the authenticator.
+        self.client.post("/logout", data={"csrf_token": self.csrf_for(self.client)})
+        self.client.get("/login")
+        signed_in = base_tests.complete_admin_login(self.client, {
+            "csrf_token": self.csrf_for(self.client),
+            "username": "testuser",
+            "password": "Passw0rd!",
+        })
+        self.assertEqual(signed_in.location, "/dashboard")
 
     def test_only_the_users_own_verified_active_devices_unlock_access(self):
         csrf = self.register_and_login()

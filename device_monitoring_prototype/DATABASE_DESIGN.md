@@ -45,7 +45,7 @@ Create the initial Administrator and RBAC tables:
 flask --app device_monitoring_prototype.app init-db
 ```
 
-The bootstrap login is `admin` / `admin123`. Change it before deployment. `create-admin` can add additional administrator accounts.
+The bootstrap login is `admin` / `admin123`. Change it before deployment. The administrator account uses `ADMIN_EMAIL` (default `devmonitor.system@gmail.com`) and signs in with its password plus a 5-minute code emailed there (`login_verifications`, migration 014). `create-admin --reset-password` changes the password.
 
 Database credentials are read from `.env`/environment variables or `DATABASE_URL`. Set persistent random `SECRET_KEY` and `TOTP_ENCRYPTION_KEY` values; rotating or losing the latter makes encrypted authenticator secrets unreadable. Configure Gmail with `MAIL_SERVER=smtp.gmail.com`, `MAIL_PORT=587`, `MAIL_USE_TLS=true`, a Gmail sender/username, and a Google App Password in `MAIL_PASSWORD`. Never commit `.env`. Run `flask --app device_monitoring_prototype.app check-mail` to test SMTP TLS and authentication. Set `COOKIE_SECURE=true` when HTTPS is enabled.
 
