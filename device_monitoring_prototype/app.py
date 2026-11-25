@@ -817,16 +817,28 @@ def create_app(test_config=None):
             is_verified=True,
         ).filter(Device.lifecycle_status != "deleted").count()
 
+    def same_host_next_url(next_url):
+        """``next_url`` when it stays on this site over http(s), else ""."""
+        if not next_url:
+            return ""
+        target = urlsplit(urljoin(request.host_url, next_url))
+        if target.scheme not in {"http", "https"} or target.netloc != request.host:
+            return ""
+        return next_url
+
     def signed_in_landing_url(user, next_url=""):
         """Where a signed-in user should land.
 
-        Standard users without a verified device must link one first. Everyone
-        else (administrators and verified users) goes to the already
-        same-host-validated ``next`` URL or the dashboard. Device state is read
-        from the database on every call, so a device linked moments ago counts
-        immediately and no re-login is needed.
+        Standard users without a verified device must link one first; the only
+        ``next`` page they may continue to is /device-link/open, which is how the
+        DevMonitor Agent links that first device. Everyone else (administrators
+        and verified users) goes to the already same-host-validated ``next`` URL
+        or the dashboard. Device state is read from the database on every call,
+        so a device linked moments ago counts immediately and no re-login is needed.
         """
         if not user.is_admin and not verified_device_count(user.id):
+            if next_url and urlsplit(next_url).path == url_for("open_device_link"):
+                return next_url
             return url_for("device_verification")
         return next_url or url_for("dashboard")
 
@@ -941,7 +953,9 @@ def create_app(test_config=None):
     @app.route("/login", methods=["GET", "POST"])
     def login():
         if current_user.is_authenticated and request.method == "GET":
-            return redirect(signed_in_landing_url(current_user))
+            return redirect(signed_in_landing_url(
+                current_user, same_host_next_url(request.args.get("next", ""))
+            ))
         if request.method == "GET":
             pending_user_id = session.get("pending_login_user_id")
             if pending_user_id:
@@ -1062,12 +1076,16 @@ def create_app(test_config=None):
                 )
                 db.session.commit()
                 flash("Invalid username or password.", "danger")
-                return render_template("login.html"), 401
-            next_url = request.form.get("next", "") or request.args.get("next", "")
-            if next_url:
-                target = urlsplit(urljoin(request.host_url, next_url))
-                if target.scheme not in {"http", "https"} or target.netloc != request.host:
-                    next_url = ""
+                # Keep where the user was going (e.g. /device-link/open) for the retry.
+                return render_template(
+                    "login.html",
+                    next_url=same_host_next_url(
+                        request.form.get("next", "") or request.args.get("next", "")
+                    ),
+                ), 401
+            next_url = same_host_next_url(
+                request.form.get("next", "") or request.args.get("next", "")
+            )
             if user.is_admin:
                 return start_admin_email_login(user, next_url)
             if user.totp_enabled:

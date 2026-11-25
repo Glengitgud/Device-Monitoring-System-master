@@ -14,7 +14,8 @@ document.addEventListener('DOMContentLoaded', () => {
             toggle.setAttribute('aria-pressed', String(visible));
             toggle.setAttribute('aria-label', label);
             toggle.title = label;
-            if (icon) icon.className = visible ? 'bi bi-eye-slash' : 'bi bi-eye';
+            // Hidden password: slashed eye. Visible password: open eye.
+            if (icon) icon.className = visible ? 'bi bi-eye' : 'bi bi-eye-slash';
         };
 
         toggle.addEventListener('click', event => {
