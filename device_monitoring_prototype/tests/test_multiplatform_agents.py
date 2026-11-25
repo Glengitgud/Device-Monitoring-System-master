@@ -690,6 +690,98 @@ class DownloadHubIntegrationTest(unittest.TestCase):
         with self.assertRaises(agent.AgentError):
             agent.submit_registration(*enrollment, payload, opener=self._flask_opener())
 
+    def _sign_in_again(self, csrf, next_url, password="Passw0rd!"):
+        """Sign out, then sign in (password + authenticator) carrying ``next``."""
+        from device_monitoring_prototype.authentication import decrypt_totp_secret, totp_counter
+        from device_monitoring_prototype.models import User
+
+        self.assertEqual(
+            self.client.post("/logout", data={"csrf_token": csrf}).status_code, 302
+        )
+        self.client.get("/login")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        page = self.client.post(
+            "/login",
+            data={"csrf_token": csrf, "username": "testuser", "password": password,
+                  "next": next_url},
+        )
+        self.assertEqual(page.status_code, 200)
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        with self.app.app_context():
+            user = User.query.filter_by(username="testuser").one()
+            secret = decrypt_totp_secret(user.totp_secret_encrypted)
+            counter = user.totp_last_counter + 1
+        with patch(
+            "device_monitoring_prototype.authentication.totp_counter",
+            side_effect=lambda s, c: totp_counter(s, c, now=counter * 30 + 1),
+        ):
+            return self.client.post(
+                "/login",
+                data={"csrf_token": csrf, "totp_code": base_tests._totp_code(secret, counter)},
+            )
+
+    def test_agent_link_page_survives_sign_in_for_the_first_device(self):
+        # The agent opens /device-link/open; signed out, the user is sent to sign in.
+        csrf = self.register_and_login()
+        signed_in = self._sign_in_again(csrf, "http://localhost/device-link/open")
+        # After the authenticator step the user returns to the link page, not the
+        # generic Link a Device page (which has no link button for a first device).
+        self.assertEqual(signed_in.status_code, 302)
+        self.assertEqual(signed_in.location, "http://localhost/device-link/open")
+        page = self.client.get(signed_in.location)
+        self.assertEqual(page.status_code, 200)
+        link = re.search(r'data-device-link="([^"]+)"', page.get_data(as_text=True)).group(1)
+        enrollment = agent.parse_enrollment_link(link.replace("&amp;", "&"))
+        specifications = {
+            "cpu_name": "Intel Core i5", "cpu_cores": 4,
+            "ram_capacity_bytes": 8 * GIB, "ram_usage_bytes": 4 * GIB,
+            "storage_devices": [{"name": "C:", "total_bytes": 256 * GIB, "available_bytes": 100 * GIB}],
+            "storage_total_bytes": 256 * GIB, "storage_available_bytes": 100 * GIB,
+            "gpu_information": ["Intel UHD"], "motherboard_brand": "Dell",
+            "operating_system_name": "Windows", "operating_system_version": "11",
+            "network_adapters": ["Ethernet"], "ip_addresses": ["192.168.1.30"],
+        }
+        result = agent.submit_registration(
+            *enrollment,
+            {"name": "Office PC", "device_type": "Desktop", "specifications": specifications},
+            opener=self._flask_opener(),
+        )
+        with self.app.app_context():
+            self.assertTrue(db.session.get(Device, result["device_id"]).is_verified)
+        self.assertEqual(self.client.get("/dashboard").status_code, 200)
+
+    def test_first_device_sign_in_ignores_other_or_foreign_next_pages(self):
+        csrf = self.register_and_login()
+        signed_in = self._sign_in_again(csrf, "http://localhost/dashboard")
+        self.assertEqual(signed_in.location, "/device-verification")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        signed_in = self._sign_in_again(csrf, "https://evil.example.com/device-link/open")
+        self.assertEqual(signed_in.location, "/device-verification")
+
+    def test_signed_in_user_is_not_asked_to_sign_in_again(self):
+        self.register_and_login()
+        already = self.client.get("/login?next=/device-link/open")
+        self.assertEqual(already.status_code, 302)
+        self.assertEqual(already.location, "/device-link/open")
+        foreign = self.client.get("/login?next=https://evil.example.com/device-link/open")
+        self.assertEqual(foreign.location, "/device-verification")
+        self.assertEqual(self.client.get(already.location).status_code, 200)
+
+    def test_wrong_password_keeps_the_agent_link_page_as_next(self):
+        self.client.get("/login")
+        with self.client.session_transaction() as session:
+            csrf = session["_csrf_token"]
+        page = self.client.post(
+            "/login",
+            data={"csrf_token": csrf, "username": "nobody", "password": "x",
+                  "next": "http://localhost/device-link/open"},
+        )
+        self.assertEqual(page.status_code, 401)
+        self.assertIn('value="http://localhost/device-link/open"', page.get_data(as_text=True))
+
     def test_first_device_page_has_no_link_button_but_later_devices_do(self):
         csrf = self.register_and_login()
         first = self.client.get("/device-verification").get_data(as_text=True)
